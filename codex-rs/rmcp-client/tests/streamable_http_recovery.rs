@@ -5,27 +5,37 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use codex_config::types::AuthKeyringBackendKind;
+use codex_config::types::OAuthCredentialsStoreMode;
 use codex_exec_server::Environment;
 use codex_exec_server::ExecServerError;
 use codex_exec_server::HttpClient;
 use codex_exec_server::HttpRequestParams;
 use codex_exec_server::HttpRequestResponse;
 use codex_exec_server::HttpResponseBodyStream;
+use codex_rmcp_client::RmcpClient;
 use futures::FutureExt as _;
 use futures::future::BoxFuture;
+use futures::future::join_all;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 
+use streamable_http_test_support::EnvVarGuard;
 use streamable_http_test_support::arm_initialize_post_failure;
 use streamable_http_test_support::arm_initialize_post_json_rpc_failure;
 use streamable_http_test_support::arm_initialized_notification_post_json_rpc_failure;
 use streamable_http_test_support::arm_session_post_failure;
+use streamable_http_test_support::arm_session_post_failure_for_method;
 use streamable_http_test_support::arm_session_post_json_rpc_failure;
 use streamable_http_test_support::call_echo_tool;
 use streamable_http_test_support::create_client;
 use streamable_http_test_support::create_client_with_http_client;
+use streamable_http_test_support::create_oauth_client;
 use streamable_http_test_support::expected_echo_result;
+use streamable_http_test_support::set_expected_bearer;
 use streamable_http_test_support::spawn_streamable_http_server;
+use streamable_http_test_support::spawn_streamable_http_server_with_env;
+use streamable_http_test_support::write_fallback_oauth_tokens;
 
 const JSON_RPC_INTERNAL_ERROR_CODE: i64 = -32603;
 const SIMULATED_NO_RESPONSE_MESSAGE: &str =
@@ -270,6 +280,209 @@ async fn streamable_http_session_recovery_retries_initialize_failure() -> anyhow
     let recovered = call_echo_tool(&client, "recovered-after-retry").await?;
     assert_eq!(http_client.initialize_attempts(), 3);
     assert_eq!(recovered, expected_echo_result("recovered-after-retry"));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[serial_test::serial]
+async fn streamable_http_oauth_401_refreshes_recovers_and_retries_once() -> anyhow::Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let token_count_file = temp_dir.path().join("token-count");
+    let token_count_file = token_count_file
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("token count file path must be utf-8"))?
+        .to_string();
+    let (_server, base_url) = spawn_streamable_http_server_with_env(&[
+        ("MCP_EXPECT_BEARER", "initial-access-token"),
+        (
+            "MCP_OAUTH_REFRESH_ACCESS_TOKEN",
+            "token-after-refresh-required",
+        ),
+        ("MCP_OAUTH_REFRESH_TOKEN", "refreshed-refresh-token"),
+        ("MCP_OAUTH_TOKEN_COUNT_FILE", &token_count_file),
+    ])
+    .await?;
+    let oauth_client =
+        create_oauth_client(&base_url, "initial-access-token", "initial-refresh-token").await?;
+
+    let warmup = call_echo_tool(&oauth_client.client, "warmup").await?;
+    assert_eq!(warmup, expected_echo_result("warmup"));
+    set_expected_bearer(&base_url, Some("token-after-refresh-required")).await?;
+
+    arm_session_post_failure_for_method(
+        &base_url,
+        /*status*/ 401,
+        /*remaining*/ 1,
+        /*www_authenticate_headers*/
+        &[r#"Bearer realm="OAuth", error="invalid_token", error_description="expired""#],
+        Some("tools/call"),
+    )
+    .await?;
+
+    let recovered = call_echo_tool(&oauth_client.client, "recovered").await?;
+    assert_eq!(recovered, expected_echo_result("recovered"));
+    assert_eq!(std::fs::read_to_string(token_count_file)?.trim(), "1");
+    let credentials =
+        std::fs::read_to_string(oauth_client.codex_home_path().join(".credentials.json"))?;
+    assert!(credentials.contains("refreshed-refresh-token"));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[serial_test::serial]
+async fn streamable_http_oauth_401_reloads_newer_persisted_credentials_after_invalid_grant()
+-> anyhow::Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let token_count_file = temp_dir.path().join("token-count");
+    let token_count_file = token_count_file
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("token count file path must be utf-8"))?
+        .to_string();
+    let (_server, base_url) = spawn_streamable_http_server_with_env(&[
+        ("MCP_EXPECT_BEARER", "initial-access-token"),
+        ("MCP_OAUTH_TOKEN_ERROR", "invalid_grant"),
+        ("MCP_OAUTH_TOKEN_COUNT_FILE", &token_count_file),
+    ])
+    .await?;
+    let oauth_client =
+        create_oauth_client(&base_url, "initial-access-token", "initial-refresh-token").await?;
+
+    let warmup = call_echo_tool(&oauth_client.client, "warmup").await?;
+    assert_eq!(warmup, expected_echo_result("warmup"));
+
+    let server_url = format!("{base_url}/mcp");
+    write_fallback_oauth_tokens(
+        oauth_client.codex_home_path(),
+        "test-streamable-http-oauth",
+        &server_url,
+        "externally-refreshed-access-token",
+        "externally-refreshed-refresh-token",
+        None,
+    )?;
+    set_expected_bearer(&base_url, Some("externally-refreshed-access-token")).await?;
+
+    arm_session_post_failure_for_method(
+        &base_url,
+        /*status*/ 401,
+        /*remaining*/ 1,
+        /*www_authenticate_headers*/
+        &[r#"Bearer realm="OAuth", error="invalid_token", error_description="expired""#],
+        Some("tools/call"),
+    )
+    .await?;
+
+    let recovered =
+        call_echo_tool(&oauth_client.client, "recovered-after-external-refresh").await?;
+    assert_eq!(
+        recovered,
+        expected_echo_result("recovered-after-external-refresh")
+    );
+    assert!(
+        !std::path::Path::new(&token_count_file).exists(),
+        "newer persisted credentials should be used without a refresh attempt"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[serial_test::serial]
+async fn streamable_http_oauth_expired_startup_invalid_grant_deletes_credentials_and_requires_reauth()
+-> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let (_server, base_url) = spawn_streamable_http_server_with_env(&[
+        ("MCP_EXPECT_BEARER", "initial-access-token"),
+        ("MCP_OAUTH_TOKEN_ERROR", "invalid_grant"),
+    ])
+    .await?;
+    let server_url = format!("{base_url}/mcp");
+    write_fallback_oauth_tokens(
+        codex_home.path(),
+        "test-streamable-http-oauth",
+        &server_url,
+        "expired-access-token",
+        "invalid-refresh-token",
+        Some(1),
+    )?;
+    let _codex_home_guard = EnvVarGuard::set("CODEX_HOME", codex_home.path().as_os_str());
+
+    let error = match RmcpClient::new_streamable_http_client(
+        "test-streamable-http-oauth",
+        &server_url,
+        /*bearer_token*/ None,
+        /*http_headers*/ None,
+        /*env_http_headers*/ None,
+        OAuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+        Environment::default_for_tests().get_http_client(),
+        /*auth_provider*/ None,
+    )
+    .await
+    {
+        Ok(_) => anyhow::bail!("expected startup refresh to require reauthorization"),
+        Err(error) => error,
+    };
+    let error_chain = format!("{error:#}");
+    assert!(
+        error_chain.contains("reauthorization is required"),
+        "expected reauthorization-required error, got: {error:#}"
+    );
+    let credentials_path = codex_home.path().join(".credentials.json");
+    if credentials_path.exists() {
+        let credentials = std::fs::read_to_string(credentials_path)?;
+        assert!(!credentials.contains("test-streamable-http-oauth"));
+    }
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[serial_test::serial]
+async fn streamable_http_oauth_concurrent_401_recovery_refreshes_once() -> anyhow::Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let token_count_file = temp_dir.path().join("token-count");
+    let token_count_file = token_count_file
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("token count file path must be utf-8"))?
+        .to_string();
+    let (_server, base_url) = spawn_streamable_http_server_with_env(&[
+        ("MCP_EXPECT_BEARER", "initial-access-token"),
+        ("MCP_OAUTH_REFRESH_ACCESS_TOKEN", "initial-access-token"),
+        (
+            "MCP_OAUTH_REFRESH_TOKEN",
+            "concurrent-refreshed-refresh-token",
+        ),
+        ("MCP_OAUTH_TOKEN_COUNT_FILE", &token_count_file),
+    ])
+    .await?;
+    let oauth_client =
+        create_oauth_client(&base_url, "initial-access-token", "initial-refresh-token").await?;
+
+    let warmup = call_echo_tool(&oauth_client.client, "warmup").await?;
+    assert_eq!(warmup, expected_echo_result("warmup"));
+
+    arm_session_post_failure_for_method(
+        &base_url,
+        /*status*/ 401,
+        /*remaining*/ 1,
+        /*www_authenticate_headers*/
+        &[r#"Bearer realm="OAuth", error="invalid_token", error_description="expired""#],
+        Some("tools/call"),
+    )
+    .await?;
+
+    let results = join_all([
+        call_echo_tool(&oauth_client.client, "concurrent-a"),
+        call_echo_tool(&oauth_client.client, "concurrent-b"),
+        call_echo_tool(&oauth_client.client, "concurrent-c"),
+    ])
+    .await;
+    for result in results {
+        result?;
+    }
+    assert_eq!(std::fs::read_to_string(token_count_file)?.trim(), "1");
 
     Ok(())
 }

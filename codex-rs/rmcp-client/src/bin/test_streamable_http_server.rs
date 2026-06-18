@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::body::Body;
+use axum::body::Bytes;
 use axum::body::to_bytes;
 use axum::extract::Json;
 use axum::extract::State;
@@ -69,7 +70,14 @@ const SESSION_POST_FAILURE_CONTROL_PATH: &str = "/test/control/session-post-fail
 const INITIALIZE_POST_FAILURE_CONTROL_PATH: &str = "/test/control/initialize-post-failure";
 const INITIALIZED_NOTIFICATION_POST_FAILURE_CONTROL_PATH: &str =
     "/test/control/initialized-notification-post-failure";
+const EXPECTED_BEARER_CONTROL_PATH: &str = "/test/control/expected-bearer";
 const MAX_MCP_POST_BODY_BYTES: usize = 1024 * 1024;
+
+#[derive(Clone, Default)]
+struct AppState {
+    post_failure: PostFailureState,
+    expected_bearer: Arc<Mutex<Option<String>>>,
+}
 
 #[derive(Clone, Default)]
 struct PostFailureState {
@@ -92,6 +100,7 @@ struct ArmedFailure {
     www_authenticate_headers: Vec<HeaderValue>,
     content_type: Option<HeaderValue>,
     body: Option<String>,
+    mcp_method: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -103,6 +112,13 @@ struct ArmSessionPostFailureRequest {
     www_authenticate_headers: Vec<String>,
     content_type: Option<String>,
     body: Option<String>,
+    #[serde(default)]
+    mcp_method: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SetExpectedBearerRequest {
+    token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -115,7 +131,14 @@ struct EchoArgs {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bind_addr = parse_bind_addr()?;
-    let post_failure_state = PostFailureState::default();
+    let app_state = AppState {
+        post_failure: PostFailureState::default(),
+        expected_bearer: Arc::new(Mutex::new(
+            std::env::var("MCP_EXPECT_BEARER")
+                .ok()
+                .map(|token| format!("Bearer {token}")),
+        )),
+    };
     const MAX_BIND_RETRIES: u32 = 20;
     const BIND_RETRY_DELAY: Duration = Duration::from_millis(50);
 
@@ -155,6 +178,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             INITIALIZED_NOTIFICATION_POST_FAILURE_CONTROL_PATH,
             post(arm_initialized_notification_post_failure),
         )
+        .route(EXPECTED_BEARER_CONTROL_PATH, post(set_expected_bearer))
         .route(
             "/.well-known/oauth-authorization-server/mcp",
             get({
@@ -179,6 +203,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }),
         )
+        .route("/oauth/token", post(oauth_token))
         .nest_service(
             "/mcp",
             StreamableHttpService::new(
@@ -188,17 +213,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ),
         )
         .layer(middleware::from_fn_with_state(
-            post_failure_state.clone(),
+            app_state.clone(),
+            require_bearer,
+        ))
+        .layer(middleware::from_fn_with_state(
+            app_state.clone(),
             fail_mcp_post_when_armed,
         ))
-        .with_state(post_failure_state);
-
-    let router = if let Ok(token) = std::env::var("MCP_EXPECT_BEARER") {
-        let expected = Arc::new(format!("Bearer {token}"));
-        router.layer(middleware::from_fn_with_state(expected, require_bearer))
-    } else {
-        router
-    };
+        .with_state(app_state);
 
     axum::serve(listener, router).await?;
     task::yield_now().await;
@@ -411,12 +433,35 @@ fn parse_bind_addr() -> Result<SocketAddr, Box<dyn std::error::Error>> {
 }
 
 async fn require_bearer(
-    State(expected): State<Arc<String>>,
-    request: Request<Body>,
+    State(state): State<AppState>,
+    mut request: Request<Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    if request.uri().path().contains("/.well-known/") {
+    if request.uri().path().contains("/.well-known/")
+        || request.uri().path().starts_with("/oauth/")
+        || request.uri().path().starts_with("/test/control/")
+        || (request.uri().path() == "/mcp"
+            && !request.headers().contains_key(MCP_SESSION_ID_HEADER))
+    {
         return Ok(next.run(request).await);
+    }
+    let expected = state.expected_bearer.lock().await.clone();
+    let Some(expected) = expected else {
+        return Ok(next.run(request).await);
+    };
+    if request.uri().path() == "/mcp"
+        && request.method() == Method::POST
+        && request.headers().contains_key(MCP_SESSION_ID_HEADER)
+    {
+        let (preserved_request, is_initialized_notification) =
+            match request_matches_mcp_method(request, "notifications/initialized").await {
+                Ok(result) => result,
+                Err(response) => return Ok(response),
+            };
+        request = preserved_request;
+        if is_initialized_notification {
+            return Ok(next.run(request).await);
+        }
     }
     if request
         .headers()
@@ -425,29 +470,88 @@ async fn require_bearer(
     {
         Ok(next.run(request).await)
     } else {
-        Err(StatusCode::UNAUTHORIZED)
+        #[expect(clippy::expect_used)]
+        Ok(Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .header(
+                WWW_AUTHENTICATE,
+                r#"Bearer realm="OAuth", error="invalid_token""#,
+            )
+            .body(Body::from("missing or invalid bearer token"))
+            .expect("valid bearer challenge response"))
     }
 }
 
+async fn oauth_token(body: Bytes) -> Response {
+    if let Ok(count_file) = std::env::var("MCP_OAUTH_TOKEN_COUNT_FILE") {
+        let count = fs::read_to_string(&count_file)
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .unwrap_or(0)
+            + 1;
+        if let Err(err) = fs::write(&count_file, count.to_string()) {
+            eprintln!("failed to write OAuth token count file {count_file}: {err}");
+        }
+    }
+
+    let body = String::from_utf8_lossy(&body);
+    if let Ok(required_refresh_token) = std::env::var("MCP_OAUTH_VALID_REFRESH_TOKEN")
+        && !body.contains(&format!("refresh_token={required_refresh_token}"))
+    {
+        return oauth_error_response("invalid_grant", "refresh token is invalid");
+    }
+    if let Ok(error) = std::env::var("MCP_OAUTH_TOKEN_ERROR") {
+        let description = std::env::var("MCP_OAUTH_TOKEN_ERROR_DESCRIPTION")
+            .unwrap_or_else(|_| "forced OAuth token error".to_string());
+        return oauth_error_response(&error, &description);
+    }
+
+    let access_token = std::env::var("MCP_OAUTH_REFRESH_ACCESS_TOKEN")
+        .or_else(|_| std::env::var("MCP_EXPECT_BEARER"))
+        .unwrap_or_else(|_| "test-bearer".to_string());
+    let refresh_token = std::env::var("MCP_OAUTH_REFRESH_TOKEN")
+        .unwrap_or_else(|_| "refreshed-refresh-token".to_string());
+
+    #[expect(clippy::expect_used)]
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&json!({
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+                "token_type": "bearer",
+                "expires_in": 3600,
+            }))
+            .expect("failed to serialize OAuth token response"),
+        ))
+        .expect("valid OAuth token response")
+}
+
 async fn arm_session_post_failure(
-    State(state): State<PostFailureState>,
+    State(state): State<AppState>,
     Json(request): Json<ArmSessionPostFailureRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    arm_post_failure(state, request, ArmedFailureTarget::Session).await
+    arm_post_failure(state.post_failure, request, ArmedFailureTarget::Session).await
 }
 
 async fn arm_initialize_post_failure(
-    State(state): State<PostFailureState>,
+    State(state): State<AppState>,
     Json(request): Json<ArmSessionPostFailureRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    arm_post_failure(state, request, ArmedFailureTarget::Initialize).await
+    arm_post_failure(state.post_failure, request, ArmedFailureTarget::Initialize).await
 }
 
 async fn arm_initialized_notification_post_failure(
-    State(state): State<PostFailureState>,
+    State(state): State<AppState>,
     Json(request): Json<ArmSessionPostFailureRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    arm_post_failure(state, request, ArmedFailureTarget::InitializedNotification).await
+    arm_post_failure(
+        state.post_failure,
+        request,
+        ArmedFailureTarget::InitializedNotification,
+    )
+    .await
 }
 
 async fn arm_post_failure(
@@ -475,14 +579,23 @@ async fn arm_post_failure(
             www_authenticate_headers,
             content_type,
             body: request.body,
+            mcp_method: request.mcp_method,
         })
     };
     *state.armed_failure.lock().await = armed_failure;
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn set_expected_bearer(
+    State(state): State<AppState>,
+    Json(request): Json<SetExpectedBearerRequest>,
+) -> Result<StatusCode, StatusCode> {
+    *state.expected_bearer.lock().await = request.token.map(|token| format!("Bearer {token}"));
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn fail_mcp_post_when_armed(
-    State(state): State<PostFailureState>,
+    State(state): State<AppState>,
     request: Request<Body>,
     next: Next,
 ) -> Response {
@@ -502,7 +615,7 @@ async fn fail_mcp_post_when_armed(
     let mcp_method = request_mcp_method(&body_bytes);
 
     {
-        let mut armed_failure = state.armed_failure.lock().await;
+        let mut armed_failure = state.post_failure.armed_failure.lock().await;
         if let Some(failure) = armed_failure.as_mut()
             && failure.remaining > 0
             && match failure.target {
@@ -511,7 +624,12 @@ async fn fail_mcp_post_when_armed(
                     has_session_id && mcp_method.as_deref() == Some("notifications/initialized")
                 }
                 ArmedFailureTarget::Session => {
-                    has_session_id && mcp_method.as_deref() != Some("notifications/initialized")
+                    has_session_id
+                        && mcp_method.as_deref() != Some("notifications/initialized")
+                        && failure
+                            .mcp_method
+                            .as_deref()
+                            .is_none_or(|expected| Some(expected) == mcp_method.as_deref())
                 }
             }
         {
@@ -550,4 +668,41 @@ fn request_mcp_method(body: &[u8]) -> Option<String> {
         .get("method")?
         .as_str()
         .map(ToString::to_string)
+}
+
+async fn request_matches_mcp_method(
+    request: Request<Body>,
+    expected_method: &str,
+) -> Result<(Request<Body>, bool), Response> {
+    let (parts, body) = request.into_parts();
+    let bytes = match to_bytes(body, MAX_MCP_POST_BODY_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            let mut response = Response::new(Body::from(format!(
+                "failed to inspect MCP request body: {error}"
+            )));
+            *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+            return Err(response);
+        }
+    };
+    let matches_method = request_mcp_method(&bytes).is_some_and(|method| method == expected_method);
+    Ok((
+        Request::from_parts(parts, Body::from(bytes)),
+        matches_method,
+    ))
+}
+
+fn oauth_error_response(error: &str, error_description: &str) -> Response {
+    #[expect(clippy::expect_used)]
+    Response::builder()
+        .status(StatusCode::BAD_REQUEST)
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&json!({
+                "error": error,
+                "error_description": error_description,
+            }))
+            .expect("failed to serialize OAuth error response"),
+        ))
+        .expect("valid OAuth error response")
 }

@@ -57,6 +57,7 @@ use tokio::sync::Mutex;
 use tokio::sync::Semaphore;
 use tokio::sync::watch;
 use tokio::time;
+use tracing::info;
 use tracing::instrument;
 use tracing::warn;
 
@@ -249,6 +250,12 @@ fn remaining_operation_timeout(
     } else {
         Ok(Some(remaining))
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ServiceRecoveryReason {
+    SessionExpired404,
+    OAuthAuthRequired401,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -957,20 +964,34 @@ impl RmcpClient {
         .await
         {
             Ok(result) => Ok(result),
-            Err(error) if Self::is_session_expired_404(&error) => {
-                self.reinitialize_after_session_expiry(&service).await?;
-                let recovered_service = self.service().await?;
-                Self::run_service_operation_with_transient_retries(
-                    recovered_service,
-                    label,
-                    timeout,
-                    self.elicitation_pause_state.clone(),
-                    &operation,
-                )
-                .await
-                .map_err(Into::into)
+            Err(error) => {
+                let recovery_reason = if Self::is_session_expired_404(&error) {
+                    Some(ServiceRecoveryReason::SessionExpired404)
+                } else if Self::is_auth_required_401(&error)
+                    && self.oauth_persistor().await.is_some()
+                {
+                    Some(ServiceRecoveryReason::OAuthAuthRequired401)
+                } else {
+                    None
+                };
+
+                if let Some(recovery_reason) = recovery_reason {
+                    self.reinitialize_after_service_failure(&service, recovery_reason)
+                        .await?;
+                    let recovered_service = self.service().await?;
+                    Self::run_service_operation_with_transient_retries(
+                        recovered_service,
+                        label,
+                        timeout,
+                        self.elicitation_pause_state.clone(),
+                        &operation,
+                    )
+                    .await
+                    .map_err(Into::into)
+                } else {
+                    Err(error.into())
+                }
             }
-            Err(error) => Err(error.into()),
         }
     }
 
@@ -1091,9 +1112,23 @@ impl RmcpClient {
             })
     }
 
-    async fn reinitialize_after_session_expiry(
+    fn is_auth_required_401(error: &ClientOperationError) -> bool {
+        let ClientOperationError::Service(rmcp::service::ServiceError::TransportSend(error)) =
+            error
+        else {
+            return false;
+        };
+
+        error
+            .error
+            .downcast_ref::<StreamableHttpError<StreamableHttpClientAdapterError>>()
+            .is_some_and(|error| matches!(error, StreamableHttpError::AuthRequired(_)))
+    }
+
+    async fn reinitialize_after_service_failure(
         &self,
         failed_service: &Arc<RunningService<RoleClient, ElicitationClientService>>,
+        reason: ServiceRecoveryReason,
     ) -> Result<()> {
         let _recovery_guard = self
             .session_recovery_lock
@@ -1101,13 +1136,13 @@ impl RmcpClient {
             .await
             .map_err(|_| anyhow!("MCP client recovery semaphore closed"))?;
 
-        {
+        let oauth_persistor = {
             let guard = self.state.lock().await;
             match &*guard {
                 ClientState::Ready { service, .. } if !Arc::ptr_eq(service, failed_service) => {
                     return Ok(());
                 }
-                ClientState::Ready { .. } => {}
+                ClientState::Ready { oauth, .. } => oauth.clone(),
                 ClientState::Connecting { .. } => {
                     return Err(anyhow!("MCP client not initialized"));
                 }
@@ -1115,8 +1150,26 @@ impl RmcpClient {
                     return Err(anyhow!("MCP client is shut down"));
                 }
             }
+        };
+
+        if matches!(reason, ServiceRecoveryReason::OAuthAuthRequired401) {
+            let runtime = oauth_persistor.ok_or_else(|| {
+                anyhow!("MCP client cannot recover OAuth 401 without OAuth state")
+            })?;
+            runtime.persist_if_needed().await?;
+            info!("refreshing OAuth credentials after MCP 401");
+            if let Err(error) = runtime.refresh().await {
+                if !is_auth_required_error(&error) {
+                    return Err(error);
+                }
+                warn!(
+                    "OAuth credential refresh returned auth-required after MCP 401; retrying with refreshed credentials"
+                );
+                runtime.persist_if_needed().await?;
+            }
         }
 
+        info!(reason = ?reason, "reinitializing MCP transport after service failure");
         let initialize_context = self
             .initialize_context
             .lock()
@@ -1153,6 +1206,12 @@ impl RmcpClient {
     }
 }
 
+fn is_auth_required_error(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|error| error.to_string().to_lowercase().contains("auth required"))
+}
+
 async fn create_oauth_transport_and_runtime(
     server_name: &str,
     url: &str,
@@ -1170,7 +1229,7 @@ async fn create_oauth_transport_and_runtime(
         default_headers.clone(),
     ));
     let mut oauth_state =
-        OAuthState::new_with_oauth_http_client(url.to_string(), oauth_http_client).await?;
+        OAuthState::new_with_oauth_http_client(url.to_string(), oauth_http_client.clone()).await?;
 
     oauth_state
         .set_credentials(
@@ -1193,11 +1252,6 @@ async fn create_oauth_transport_and_runtime(
     );
     let auth_manager = auth_client.auth_manager.clone();
 
-    let transport = StreamableHttpClientTransport::with_client(
-        auth_client,
-        StreamableHttpClientTransportConfig::with_uri(url.to_string()),
-    );
-
     let runtime = OAuthPersistor::new(
         server_name.to_string(),
         url.to_string(),
@@ -1205,6 +1259,14 @@ async fn create_oauth_transport_and_runtime(
         credentials_store,
         keyring_backend_kind,
         Some(initial_tokens),
+        oauth_http_client,
+    );
+
+    runtime.refresh_if_needed().await?;
+
+    let transport = StreamableHttpClientTransport::with_client(
+        auth_client,
+        StreamableHttpClientTransportConfig::with_uri(url.to_string()),
     );
 
     Ok((transport, runtime))

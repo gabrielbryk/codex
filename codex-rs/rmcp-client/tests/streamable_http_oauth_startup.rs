@@ -357,7 +357,7 @@ async fn expired_unrefreshable_startup_child() -> anyhow::Result<()> {
         AuthKeyringBackendKind::default(),
     )?;
 
-    let client = RmcpClient::new_streamable_http_client(
+    let error = match RmcpClient::new_streamable_http_client(
         SERVER_NAME,
         &server_url,
         /*bearer_token*/ None,
@@ -368,11 +368,11 @@ async fn expired_unrefreshable_startup_child() -> anyhow::Result<()> {
         Environment::default_for_tests().get_http_client(),
         /*auth_provider*/ None,
     )
-    .await?;
-
-    let error = initialize_client(&client)
-        .await
-        .expect_err("expired token without a refresh token should fail startup");
+    .await
+    {
+        Ok(_) => anyhow::bail!("expired token without a refresh token should fail startup"),
+        Err(error) => error,
+    };
     assert!(is_authentication_required_error(&error));
     Ok(())
 }
