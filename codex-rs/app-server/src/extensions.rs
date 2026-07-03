@@ -355,6 +355,7 @@ mod tests {
     use crate::outgoing_message::OutgoingEnvelope;
     use crate::outgoing_message::OutgoingMessage;
     use crate::thread_state::ConnectionCapabilities;
+    use crate::thread_state::ThreadSubscriptionKind;
 
     use super::*;
 
@@ -457,10 +458,11 @@ mod tests {
                 .await;
         }
         thread_state_manager
-            .try_ensure_connection_subscribed(
+            .try_ensure_connection_attached(
                 thread_id,
                 subscribed_connection,
                 /*experimental_raw_events*/ false,
+                ThreadSubscriptionKind::Explicit,
             )
             .await
             .expect("connection should be subscribed");
@@ -523,10 +525,11 @@ mod tests {
         });
         tokio::task::yield_now().await;
         thread_state_manager
-            .try_ensure_connection_subscribed(
+            .try_ensure_connection_attached(
                 thread_id,
                 subscribed_connection,
                 /*experimental_raw_events*/ false,
+                ThreadSubscriptionKind::Explicit,
             )
             .await
             .expect("connection should be subscribed");
@@ -573,10 +576,11 @@ mod tests {
             .connection_initialized(subscribed_connection, ConnectionCapabilities::default())
             .await;
         thread_state_manager
-            .try_ensure_connection_subscribed(
+            .try_ensure_connection_attached(
                 thread_id,
                 subscribed_connection,
                 /*experimental_raw_events*/ false,
+                ThreadSubscriptionKind::Explicit,
             )
             .await
             .expect("connection should be subscribed");
