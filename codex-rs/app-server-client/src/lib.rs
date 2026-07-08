@@ -2047,21 +2047,60 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remote_disconnect_surfaces_as_event() {
-        let websocket_url = start_test_remote_server(|mut websocket| async move {
+    async fn remote_disconnect_reconnects_and_preserves_event_stream() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("listener address");
+        let websocket_url = format!("ws://{addr}");
+        tokio::spawn(async move {
+            let (stream, _) = listener
+                .accept()
+                .await
+                .expect("first accept should succeed");
+            let mut websocket = accept_async(stream)
+                .await
+                .expect("first websocket upgrade should succeed");
             expect_remote_initialize(&mut websocket).await;
             websocket.close(None).await.expect("close should succeed");
-        })
-        .await;
+            let (stream, _) = listener
+                .accept()
+                .await
+                .expect("second accept should succeed");
+            let mut websocket = accept_async(stream)
+                .await
+                .expect("second websocket upgrade should succeed");
+            expect_remote_initialize(&mut websocket).await;
+            write_websocket_message(
+                &mut websocket,
+                JSONRPCMessage::Notification(
+                    serde_json::from_value(
+                        serde_json::to_value(ServerNotification::AccountUpdated(
+                            AccountUpdatedNotification {
+                                auth_mode: None,
+                                plan_type: None,
+                            },
+                        ))
+                        .expect("notification should serialize"),
+                    )
+                    .expect("notification should convert to JSON-RPC"),
+                ),
+            )
+            .await;
+        });
         let mut client = RemoteAppServerClient::connect(test_remote_connect_args(websocket_url))
             .await
             .expect("remote client should connect");
 
-        let event = client
-            .next_event()
+        let event = timeout(Duration::from_secs(2), client.next_event())
             .await
-            .expect("disconnect event should arrive");
-        assert!(matches!(event, AppServerEvent::Disconnected { .. }));
+            .expect("reconnected event should arrive")
+            .expect("event stream should stay open");
+        assert!(matches!(
+            event,
+            AppServerEvent::ServerNotification(ServerNotification::AccountUpdated(_))
+        ));
+        client.shutdown().await.expect("shutdown should complete");
     }
 
     #[test]
