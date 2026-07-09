@@ -141,6 +141,10 @@ pub(super) fn read_session_import(path: &Path) -> io::Result<ParsedSessionImport
         if let Some(title) = ai_title_from_record(&record) {
             ai_title = Some(title.to_string());
         }
+        if is_claude_compact_boundary_record(&record) {
+            messages.clear();
+            continue;
+        }
         if let Some(message) = conversation_message_from_owned_record(&mut record) {
             messages.push(message);
         }
@@ -160,6 +164,11 @@ fn custom_title_from_record(record: &JsonValue) -> Option<&str> {
 
 fn ai_title_from_record(record: &JsonValue) -> Option<&str> {
     title_from_record(record, "ai-title", "aiTitle")
+}
+
+fn is_claude_compact_boundary_record(record: &JsonValue) -> bool {
+    record.get("type").and_then(JsonValue::as_str) == Some("system")
+        && record.get("subtype").and_then(JsonValue::as_str) == Some("compact_boundary")
 }
 
 fn title_from_record<'a>(record: &'a JsonValue, record_type: &str, field: &str) -> Option<&'a str> {
@@ -399,6 +408,91 @@ mod tests {
     }
 
     #[test]
+    fn reads_only_messages_after_claude_compact_boundary() {
+        let root = TempDir::new().expect("tempdir");
+        let path = root.path().join("session.jsonl");
+        let contents = [
+            session_record("user", "old request", root.path()),
+            session_record("assistant", "old answer", root.path()),
+            claude_compact_boundary_record(),
+            session_record("user", "compacted summary", root.path()),
+            session_record("assistant", "new answer", root.path()),
+        ]
+        .into_iter()
+        .map(|record| record.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+        std::fs::write(&path, &contents).expect("session");
+
+        let parsed = read_session_import(&path).expect("parse session");
+        let texts = parsed
+            .messages
+            .iter()
+            .map(|message| message.text.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(texts, vec!["compacted summary", "new answer"]);
+        assert_eq!(
+            parsed.content_sha256,
+            format!("{:x}", Sha256::digest(contents))
+        );
+    }
+
+    #[test]
+    fn reads_only_messages_after_last_claude_compact_boundary() {
+        let root = TempDir::new().expect("tempdir");
+        let path = root.path().join("session.jsonl");
+        let contents = [
+            session_record("user", "first request", root.path()),
+            claude_compact_boundary_record(),
+            session_record("user", "first summary", root.path()),
+            session_record("assistant", "middle answer", root.path()),
+            claude_compact_boundary_record(),
+            session_record("user", "second summary", root.path()),
+        ]
+        .into_iter()
+        .map(|record| record.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+        std::fs::write(&path, &contents).expect("session");
+
+        let parsed = read_session_import(&path).expect("parse session");
+        let texts = parsed
+            .messages
+            .iter()
+            .map(|message| message.text.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(texts, vec!["second summary"]);
+    }
+
+    #[test]
+    fn preserves_titles_across_claude_compact_boundary() {
+        let root = TempDir::new().expect("tempdir");
+        let path = root.path().join("session.jsonl");
+        let contents = [
+            serde_json::json!({
+                "type": "custom-title",
+                "customTitle": "kept title",
+            }),
+            session_record("user", "old request", root.path()),
+            claude_compact_boundary_record(),
+            session_record("user", "summary", root.path()),
+        ]
+        .into_iter()
+        .map(|record| record.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+        std::fs::write(&path, &contents).expect("session");
+
+        let parsed = read_session_import(&path).expect("parse session");
+
+        assert_eq!(parsed.custom_title.as_deref(), Some("kept title"));
+        assert_eq!(parsed.messages.len(), 1);
+        assert_eq!(parsed.messages[0].text, "summary");
+    }
+
+    #[test]
     fn converts_tool_use_blocks_to_bounded_external_agent_tags() {
         let block = serde_json::json!({
             "type": "tool_use",
@@ -447,5 +541,25 @@ mod tests {
              command failed\n\
              [/external_agent_tool_result]"
         );
+    }
+
+    fn session_record(role: &str, text: &str, cwd: &Path) -> JsonValue {
+        serde_json::json!({
+            "type": role,
+            "cwd": cwd,
+            "timestamp": "2026-06-03T12:00:00Z",
+            "message": { "content": text },
+        })
+    }
+
+    fn claude_compact_boundary_record() -> JsonValue {
+        serde_json::json!({
+            "type": "system",
+            "subtype": "compact_boundary",
+            "compactMetadata": {
+                "preTokens": 612171,
+                "postTokens": 21713,
+            },
+        })
     }
 }
