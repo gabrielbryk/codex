@@ -1367,6 +1367,9 @@ async fn discover_project_layers(
     let codex_home_abs = AbsolutePathBuf::from_absolute_path(codex_home)?;
     let codex_home_normalized =
         normalize_path(codex_home_abs.as_path()).unwrap_or_else(|_| codex_home_abs.to_path_buf());
+    let default_codex_home_abs = AbsolutePathBuf::resolve_path_against_base("~/.codex", cwd);
+    let default_codex_home_normalized = normalize_path(default_codex_home_abs.as_path())
+        .unwrap_or_else(|_| default_codex_home_abs.to_path_buf());
     let mut dirs = cwd
         .ancestors()
         .scan(false, |done, a| {
@@ -1401,7 +1404,14 @@ async fn discover_project_layers(
         let hooks_config_folder_override = trust_context.root_checkout_hooks_folder_for_dir(&dir);
         let dot_codex_normalized =
             normalize_path(dot_codex_abs.as_path()).unwrap_or_else(|_| dot_codex_abs.to_path_buf());
-        if dot_codex_abs == codex_home_abs || dot_codex_normalized == codex_home_normalized {
+        if should_skip_project_config_folder(
+            &dot_codex_abs,
+            &dot_codex_normalized,
+            &codex_home_abs,
+            &codex_home_normalized,
+            &default_codex_home_abs,
+            &default_codex_home_normalized,
+        ) {
             continue;
         }
         let config_file = dot_codex_abs.join(CONFIG_TOML_FILE);
@@ -1481,6 +1491,23 @@ async fn discover_project_layers(
         layers,
         startup_warnings,
     })
+}
+
+fn should_skip_project_config_folder(
+    dot_codex: &AbsolutePathBuf,
+    dot_codex_normalized: &Path,
+    codex_home: &AbsolutePathBuf,
+    codex_home_normalized: &Path,
+    default_codex_home: &AbsolutePathBuf,
+    default_codex_home_normalized: &Path,
+) -> bool {
+    let is_selected_user_config =
+        dot_codex == codex_home || dot_codex_normalized == codex_home_normalized;
+    let uses_alternate_codex_home =
+        codex_home != default_codex_home && codex_home_normalized != default_codex_home_normalized;
+    let is_default_user_config =
+        dot_codex == default_codex_home || dot_codex_normalized == default_codex_home_normalized;
+    is_selected_user_config || uses_alternate_codex_home && is_default_user_config
 }
 
 /// For linked worktrees, preserve ordinary worktree-local project config while
