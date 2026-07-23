@@ -301,6 +301,33 @@ async fn streamable_http_401_does_not_trigger_recovery() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A live `401` carrying a `WWW-Authenticate` challenge surfaces as RMCP `AuthRequired`, which the
+/// client now recovers by (attempting an OAuth refresh and) retrying the operation exactly once.
+/// This client uses a static bearer with no OAuth persistor, so the refresh step is a no-op; the
+/// point of the test is that the classifier routes `AuthRequired` into the single-retry recovery
+/// arm rather than propagating it, and the retried attempt succeeds once the server stops failing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn streamable_http_401_auth_required_recovers_and_retries_once() -> anyhow::Result<()> {
+    let (_server, base_url) = spawn_streamable_http_server().await?;
+    let client = create_client(&base_url).await?;
+
+    let warmup = call_echo_tool(&client, "warmup").await?;
+    assert_eq!(warmup, expected_echo_result("warmup"));
+
+    arm_session_post_failure(
+        &base_url,
+        /*status*/ 401,
+        /*remaining*/ 1,
+        /*www_authenticate_headers*/ &[r#"Bearer realm="mcp""#],
+    )
+    .await?;
+
+    let recovered = call_echo_tool(&client, "recovered").await?;
+    assert_eq!(recovered, expected_echo_result("recovered"));
+
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn streamable_http_403_scope_challenge_returns_insufficient_scope() -> anyhow::Result<()> {
     let (_server, base_url) = spawn_streamable_http_server().await?;
