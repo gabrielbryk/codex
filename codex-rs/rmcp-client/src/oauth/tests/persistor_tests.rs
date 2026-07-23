@@ -381,6 +381,86 @@ async fn provider_timeout_releases_lock_and_preserves_durable_credentials() -> R
     Ok(())
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn refresh_after_unauthorized_forces_provider_refresh_for_fresh_token() -> Result<()> {
+    let (_env, server, expired) = test_context().await?;
+    // A credential whose cached expiry still looks valid. The proactive expiry gate would skip it,
+    // so only a reactive 401 recovery should reach the provider — the exact gap Fix #2 closes.
+    let mut initial = sample_tokens();
+    initial.url = expired.url.clone();
+    assert!(
+        !crate::oauth::token_needs_refresh(initial.expires_at),
+        "the fixture must look fresh to the proactive expiry gate"
+    );
+
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .and(body_string_contains("grant_type=refresh_token"))
+        .and(body_string_contains("refresh_token=refresh-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "access_token": "reactive-access-token",
+            "token_type": "Bearer",
+            "expires_in": 3600,
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    save_oauth_tokens_to_file(&initial)?;
+    let persistor = persistor_for(&initial).await?;
+
+    // Proactive refresh is expiry-gated and must not contact the provider for a fresh token.
+    persistor.refresh_if_needed().await?;
+    let after_proactive = load_oauth_tokens_from_file(&initial.server_name, &initial.url)?
+        .expect("the fresh credential must remain");
+    assert_eq!(
+        after_proactive.token_response.0.access_token().secret(),
+        "access-token"
+    );
+
+    // Reactive 401 recovery forces the refresh even though the cached expiry looks fine, and never
+    // deletes the store entry.
+    persistor.refresh_after_unauthorized().await?;
+    let stored = load_oauth_tokens_from_file(&initial.server_name, &initial.url)?
+        .expect("the store entry must be preserved, not deleted");
+    assert_eq!(
+        stored.token_response.0.access_token().secret(),
+        "reactive-access-token"
+    );
+    server.verify().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn refresh_after_unauthorized_rejected_grant_preserves_credentials() -> Result<()> {
+    let (_env, server, expired) = test_context().await?;
+    let mut initial = sample_tokens();
+    initial.url = expired.url.clone();
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .and(body_string_contains("grant_type=refresh_token"))
+        .and(body_string_contains("refresh_token=refresh-token"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+            "error": "invalid_grant",
+            "error_description": "refresh token expired or revoked",
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    save_oauth_tokens_to_file(&initial)?;
+    let persistor = persistor_for(&initial).await?;
+
+    let error = persistor
+        .refresh_after_unauthorized()
+        .await
+        .expect_err("a provider-rejected reactive refresh must require reauthorization");
+    assert!(is_authentication_required_error(&error));
+    let stored = load_oauth_tokens_from_file(&initial.server_name, &initial.url)?
+        .expect("a rejected reactive refresh must preserve the durable credentials");
+    assert_tokens_match_without_expiry(&stored, &initial);
+    server.verify().await;
+    Ok(())
+}
+
 async fn persistor_for(tokens: &StoredOAuthTokens) -> Result<OAuthPersistor> {
     Ok(OAuthPersistor::new(
         tokens.server_name.clone(),
