@@ -17,6 +17,7 @@ Current base: **rust-v0.145.0**.
 | 5 | `fix(app-server-daemon): disable stock auto-updater for local fork` | local-env | `app-server-daemon/src/lib.rs` | Fork-only forever — the managed-fork deploy must not let the stock updater snap `standalone/current` back to upstream stock. |
 | 6 | `fix(rmcp-client): classify invalid_grant startup errors as reauth` | defensive | `rmcp-client/src/startup_error.rs` | Fork-only; largely redundant since 0.145.0's `refresh_transaction` maps `invalid_grant`→`AuthorizationRequired`. Re-evaluate each release; drop if a raw path can no longer surface it. |
 | 7 | `chore: refresh workspace lock for 0.145.0` | chore | `codex-rs/Cargo.lock` | Regenerated every release (release tags ship `0.0.0`; first `cargo` run stamps the real version). Drop + recreate each upgrade. |
+| 8 | `fix(mcp): reap superseded MCP connection managers on refresh` | upstreamable | `codex-mcp/src/{connection_manager,runtime}.rs`, `core/src/state/service.rs` | Fork-only for now; strong candidate to PR upstream. Root-causes a wide, actively-tracked upstream leak cluster (openai/codex#26984, #30408, #12491, #17832, #21008, #24347, #28361 and more) — `publish_mcp_runtime` dropped a superseded `McpConnectionManager` via `ArcSwap::store()` instead of an awaited `shutdown()`, a regression from PR #29608 introduced by PR #30101. Re-evaluate each release; drop once upstream lands an equivalent fix (watch #26984). |
 
 ## History note — dropped patches
 
