@@ -1008,6 +1008,13 @@ impl McpConnectionManager {
 impl Drop for McpConnectionManager {
     fn drop(&mut self) {
         self.startup_cancellation_token.cancel();
+        // Cancelling each client's token releases any background task (e.g. a codex-apps
+        // reconnect loop) holding a strong `Arc` to it, so the stdio child's RAII kill guard
+        // (StdioServerProcessHandleInner::Drop) actually gets to run instead of being pinned
+        // alive indefinitely by a task this manager no longer owns a handle to.
+        for client in self.clients.values() {
+            client.cancel_token.cancel();
+        }
         self.clients.clear();
     }
 }

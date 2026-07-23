@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 
 use crate::SkillsService;
 use crate::agent::AgentControl;
@@ -45,6 +46,7 @@ use std::path::PathBuf;
 use tokio::runtime::Handle;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
+use tracing::warn;
 
 pub(crate) struct SessionServices {
     /// The single owner of live MCP connections for this thread.
@@ -130,7 +132,8 @@ impl SessionServices {
         ready_selected_capability_roots: Vec<SelectedCapabilityRoot>,
         connections: McpConnectionManager,
     ) -> Arc<McpRuntimeSnapshot> {
-        let connections = self.mcp_runtime.replace(connections);
+        let (superseded, connections) = self.mcp_runtime.replace(connections);
+        spawn_superseded_mcp_manager_drain(superseded);
         let runtime = Arc::new(McpRuntimeSnapshot::new(
             config,
             plugins_available,
@@ -148,4 +151,31 @@ impl SessionServices {
         };
         runtime
     }
+}
+
+/// A superseded [`McpConnectionManager`] must stay alive while an in-flight step/tool call still
+/// holds a clone of it (that's the whole point of #30101's `Arc`-lifetime design), but nothing
+/// upstream ever proactively shuts it down once the last such caller finishes — the only thing
+/// that reaps it is `Drop`, which requires *literally every* clone in the process to have been
+/// released, silently never firing if any code path anywhere holds a stray one. That's the root
+/// cause behind codex-rs upstream MCP process leaks (see openai/codex#26984, #30408, #12491):
+/// this makes teardown deterministic and bounded instead of implicit.
+fn spawn_superseded_mcp_manager_drain(superseded: Arc<McpConnectionManager>) {
+    const POLL_INTERVAL: Duration = Duration::from_millis(250);
+    const MAX_DRAIN_WAIT: Duration = Duration::from_secs(600);
+
+    tokio::spawn(async move {
+        let deadline = tokio::time::Instant::now() + MAX_DRAIN_WAIT;
+        while Arc::strong_count(&superseded) > 1 && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+        if Arc::strong_count(&superseded) > 1 {
+            warn!(
+                "superseded MCP runtime still has {} holder(s) after {MAX_DRAIN_WAIT:?}; \
+                 shutting it down anyway",
+                Arc::strong_count(&superseded).saturating_sub(1)
+            );
+        }
+        superseded.shutdown().await;
+    });
 }

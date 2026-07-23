@@ -40,10 +40,17 @@ impl McpRuntime {
         self.connections.load_full()
     }
 
-    pub fn replace(&self, connections: McpConnectionManager) -> Arc<McpConnectionManager> {
+    /// Publishes `connections` as the current manager and returns it alongside the manager it
+    /// superseded. Callers must arrange for the superseded manager to eventually be shut down
+    /// (see `publish_mcp_runtime`) — plain `Drop` only guarantees cleanup once every other clone
+    /// of the returned `Arc` (e.g. an in-flight step still using it) has also been released.
+    pub fn replace(
+        &self,
+        connections: McpConnectionManager,
+    ) -> (Arc<McpConnectionManager>, Arc<McpConnectionManager>) {
         let connections = Arc::new(connections);
-        self.connections.store(Arc::clone(&connections));
-        connections
+        let superseded = self.connections.swap(Arc::clone(&connections));
+        (superseded, connections)
     }
 
     pub async fn shutdown(&self) {
