@@ -8,6 +8,7 @@ use anyhow::Context;
 use anyhow::Result;
 use codex_keyring_store::DefaultKeyringStore;
 use codex_keyring_store::KeyringStore;
+use oauth2::RefreshToken;
 use oauth2::TokenResponse;
 use rmcp::transport::auth::AuthError;
 use rmcp::transport::auth::AuthorizationManager;
@@ -50,6 +51,48 @@ impl OAuthPersistor {
             return Ok(());
         }
 
+        self.spawn_refresh_transaction(
+            keyring_store,
+            refresh_request_timeout,
+            RefreshTrigger::Expiry,
+        )
+        .await
+    }
+
+    /// Reactive recovery after a live `401 Unauthorized` from an in-session MCP request.
+    ///
+    /// Proactive [`Self::refresh_if_needed`] is expiry-gated and cannot see early server-side
+    /// revocation, a missing or incorrect stored expiry (`expires_at == None` makes
+    /// `token_needs_refresh` return `false`), or clock skew — so the rejected access token would
+    /// otherwise surface to the user. This forces the same authoritative transaction (locked
+    /// reread, adopt-newer-from-another-process, fail-closed persistence) but bypasses the expiry
+    /// gate, so the caller can retry the operation once. A dead refresh token still surfaces as
+    /// `AuthorizationRequired`, correctly requiring reauthorization.
+    pub(crate) async fn refresh_after_unauthorized(&self) -> Result<()> {
+        self.refresh_after_unauthorized_in(&DefaultKeyringStore, REFRESH_REQUEST_TIMEOUT)
+            .await
+    }
+
+    /// Injects the credential backend and provider timeout for deterministic tests.
+    pub(super) async fn refresh_after_unauthorized_in<K: KeyringStore + Clone + 'static>(
+        &self,
+        keyring_store: &K,
+        refresh_request_timeout: Duration,
+    ) -> Result<()> {
+        self.spawn_refresh_transaction(
+            keyring_store,
+            refresh_request_timeout,
+            RefreshTrigger::Unauthorized,
+        )
+        .await
+    }
+
+    async fn spawn_refresh_transaction<K: KeyringStore + Clone + 'static>(
+        &self,
+        keyring_store: &K,
+        refresh_request_timeout: Duration,
+        trigger: RefreshTrigger,
+    ) -> Result<()> {
         let persistor = self.clone();
         let keyring_store = keyring_store.clone();
         // Once the provider can consume a rotating token, caller cancellation must not cancel
@@ -59,14 +102,14 @@ impl OAuthPersistor {
         // risk is preferred to holding the credential lock indefinitely.
         let transaction_task = tokio::spawn(async move {
             let result = persistor
-                .refresh_transaction(&keyring_store, refresh_request_timeout)
+                .refresh_transaction(&keyring_store, refresh_request_timeout, trigger)
                 .await;
 
             // Keep this summary inside the owned task so caller cancellation cannot suppress it.
             if let Err(error) = &result {
                 warn!(
                     server_name = %persistor.inner.server_name,
-                    refresh_reason = "expiry",
+                    refresh_reason = trigger.reason(),
                     error = %error,
                     "MCP OAuth refresh transaction failed"
                 );
@@ -91,7 +134,7 @@ impl OAuthPersistor {
         skip_all,
         fields(
             server_name = %self.inner.server_name,
-            refresh_reason = "expiry",
+            refresh_reason = trigger.reason(),
         ),
         err
     )]
@@ -99,6 +142,7 @@ impl OAuthPersistor {
         &self,
         keyring_store: &K,
         refresh_request_timeout: Duration,
+        trigger: RefreshTrigger,
     ) -> Result<()> {
         debug!("waiting for the MCP OAuth credential transaction lock");
         let _lock =
@@ -132,7 +176,19 @@ impl OAuthPersistor {
             });
         };
 
-        if !token_needs_refresh(latest.expires_at) {
+        let adopt_without_provider = match trigger {
+            RefreshTrigger::Expiry => !token_needs_refresh(latest.expires_at),
+            // A live 401 means the provider rejected the token we were using, so a fresh-looking
+            // expiry alone is not enough to trust the stored credential. Only skip the provider
+            // call when another process already rotated the stored credential to a different,
+            // still-usable token; otherwise force a real refresh even though `expires_at` looks
+            // fine (this is what covers `expires_at == None`, early revocation, and clock skew).
+            RefreshTrigger::Unauthorized => {
+                !token_needs_refresh(latest.expires_at)
+                    && !self.latest_matches_last_credentials(&latest).await
+            }
+        };
+        if adopt_without_provider {
             debug!("adopting newer MCP OAuth credentials without contacting the provider");
             let manager = self.inner.authorization_manager.clone();
             let mut guard = manager.lock().await;
@@ -250,6 +306,43 @@ impl OAuthPersistor {
         drop(guard);
         debug!("persisted refreshed MCP OAuth credentials and completed the transaction");
         Ok(())
+    }
+
+    /// Reports whether the authoritative reread still carries the same access/refresh secrets our
+    /// in-memory snapshot held. The reactive-401 path uses this to distinguish "another process
+    /// already rotated the credential" (adopt it) from "we still hold the rejected token" (force a
+    /// provider refresh).
+    async fn latest_matches_last_credentials(&self, latest: &StoredOAuthTokens) -> bool {
+        let guard = self.inner.last_credentials.lock().await;
+        guard
+            .as_ref()
+            .is_some_and(|current| stored_tokens_share_secret(current, latest))
+    }
+}
+
+/// Compares the durable token secrets (access + refresh) of two stored credentials, ignoring
+/// expiry/scope drift that re-serialization can introduce.
+fn stored_tokens_share_secret(left: &StoredOAuthTokens, right: &StoredOAuthTokens) -> bool {
+    let left_response = &left.token_response.0;
+    let right_response = &right.token_response.0;
+    left_response.access_token().secret() == right_response.access_token().secret()
+        && left_response.refresh_token().map(RefreshToken::secret)
+            == right_response.refresh_token().map(RefreshToken::secret)
+}
+
+/// Distinguishes proactive expiry-driven refresh from reactive recovery after a live 401.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RefreshTrigger {
+    Expiry,
+    Unauthorized,
+}
+
+impl RefreshTrigger {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::Expiry => "expiry",
+            Self::Unauthorized => "unauthorized",
+        }
     }
 }
 
