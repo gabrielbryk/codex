@@ -39,8 +39,11 @@ fn client_initialize_error_requires_authentication(error: &ClientInitializeError
 }
 
 fn auth_error_requires_authentication(error: &AuthError) -> bool {
-    matches!(
-        error,
-        AuthError::AuthorizationRequired | AuthError::TokenExpired
-    )
+    match error {
+        AuthError::AuthorizationRequired | AuthError::TokenExpired => true,
+        AuthError::TokenRefreshFailed(message) | AuthError::OAuthError(message) => {
+            message.contains("invalid_grant") || message.contains("No refresh token available")
+        }
+        _ => false,
+    }
 }
