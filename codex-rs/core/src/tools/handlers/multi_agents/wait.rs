@@ -1,6 +1,7 @@
 use super::*;
 use crate::agent::status::is_final;
 use crate::session::session::Session;
+use crate::session::turn_context::TurnContext;
 use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
 use crate::tools::handlers::multi_agents_spec::create_wait_agent_tool_v1;
 use codex_protocol::error::CodexErrorDetails;
@@ -9,6 +10,7 @@ use futures::FutureExt;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch::Receiver;
@@ -65,12 +67,16 @@ impl Handler {
         let receiver_thread_ids = parse_agent_id_targets(args.targets)?;
         let mut receiver_agents = Vec::with_capacity(receiver_thread_ids.len());
         let mut target_by_thread_id = HashMap::with_capacity(receiver_thread_ids.len());
+        let mut known_thread_ids = HashSet::with_capacity(receiver_thread_ids.len());
         for receiver_thread_id in &receiver_thread_ids {
             let agent_metadata = session
                 .services
                 .agent_control
-                .get_agent_metadata(*receiver_thread_id)
-                .unwrap_or_default();
+                .get_agent_metadata(*receiver_thread_id);
+            if agent_metadata.is_some() {
+                known_thread_ids.insert(*receiver_thread_id);
+            }
+            let agent_metadata = agent_metadata.unwrap_or_default();
             target_by_thread_id.insert(
                 *receiver_thread_id,
                 agent_metadata
@@ -116,6 +122,7 @@ impl Handler {
 
         let mut status_rxs = Vec::with_capacity(receiver_thread_ids.len());
         let mut initial_final_statuses = Vec::new();
+        let mut missing_thread_ids = Vec::new();
         for id in &receiver_thread_ids {
             match session.services.agent_control.subscribe_status(*id).await {
                 Ok(rx) => {
@@ -126,31 +133,33 @@ impl Handler {
                     status_rxs.push((*id, rx));
                 }
                 Err(err) if matches!(err.details(), CodexErrorDetails::ThreadNotFound(_)) => {
-                    initial_final_statuses.push((*id, AgentStatus::NotFound));
+                    // A target that is neither live nor present in the agent registry is gone
+                    // for good. Reporting it as a `not_found` entry of an otherwise successful
+                    // result reads like ordinary status noise, so the model keeps waiting on a
+                    // thread that can never report again.
+                    if known_thread_ids.contains(id) {
+                        initial_final_statuses.push((*id, AgentStatus::NotFound));
+                    } else {
+                        missing_thread_ids.push(*id);
+                    }
                 }
                 Err(err) => {
                     let mut statuses = HashMap::with_capacity(1);
                     statuses.insert(*id, session.services.agent_control.get_status(*id).await);
-                    session
-                        .emit_turn_item_completed(
-                            &turn,
-                            TurnItem::CollabAgentToolCall(CollabAgentToolCallItem {
-                                id: call_id.clone(),
-                                tool: CollabAgentTool::Wait,
-                                status: wait_tool_call_status(&statuses),
-                                sender_thread_id: session.thread_id,
-                                receiver_thread_ids: statuses.keys().copied().collect(),
-                                receiver_agents: wait_receiver_agents(&statuses, &receiver_agents),
-                                prompt: None,
-                                model: None,
-                                reasoning_effort: None,
-                                agents_states: statuses,
-                            }),
-                        )
+                    emit_wait_completed(&session, &turn, &call_id, &receiver_agents, statuses)
                         .await;
                     return Err(collab_agent_error(*id, err));
                 }
             }
+        }
+
+        if !missing_thread_ids.is_empty() {
+            let statuses = missing_thread_ids
+                .iter()
+                .map(|id| (*id, AgentStatus::NotFound))
+                .collect();
+            emit_wait_completed(&session, &turn, &call_id, &receiver_agents, statuses).await;
+            return Err(missing_agents_error(&missing_thread_ids));
         }
 
         let statuses = if !initial_final_statuses.is_empty() {
@@ -186,6 +195,26 @@ impl Handler {
         };
 
         let timed_out = statuses.is_empty();
+        if timed_out {
+            // A target can disappear mid-wait without waking its status watch, in which case
+            // the wait burns the full timeout and reports an empty status map. That tells the
+            // model nothing, so it waits again. Re-check the registry and fail instead when
+            // every target has since gone missing.
+            let mut gone = Vec::with_capacity(receiver_thread_ids.len());
+            for id in &receiver_thread_ids {
+                if matches!(
+                    session.services.agent_control.get_status(*id).await,
+                    AgentStatus::NotFound
+                ) {
+                    gone.push(*id);
+                }
+            }
+            if gone.len() == receiver_thread_ids.len() {
+                let statuses = gone.iter().map(|id| (*id, AgentStatus::NotFound)).collect();
+                emit_wait_completed(&session, &turn, &call_id, &receiver_agents, statuses).await;
+                return Err(missing_agents_error(&gone));
+            }
+        }
         let statuses_by_id = statuses.clone().into_iter().collect::<HashMap<_, _>>();
         let result = WaitAgentResult {
             status: statuses
@@ -200,26 +229,48 @@ impl Handler {
             timed_out,
         };
 
-        session
-            .emit_turn_item_completed(
-                &turn,
-                TurnItem::CollabAgentToolCall(CollabAgentToolCallItem {
-                    id: call_id,
-                    tool: CollabAgentTool::Wait,
-                    status: wait_tool_call_status(&statuses_by_id),
-                    sender_thread_id: session.thread_id,
-                    receiver_thread_ids: statuses_by_id.keys().copied().collect(),
-                    receiver_agents: wait_receiver_agents(&statuses_by_id, &receiver_agents),
-                    prompt: None,
-                    model: None,
-                    reasoning_effort: None,
-                    agents_states: statuses_by_id,
-                }),
-            )
-            .await;
+        emit_wait_completed(&session, &turn, &call_id, &receiver_agents, statuses_by_id).await;
 
         Ok(boxed_tool_output(result))
     }
+}
+
+async fn emit_wait_completed(
+    session: &Arc<Session>,
+    turn: &Arc<TurnContext>,
+    call_id: &str,
+    receiver_agents: &[CollabAgentRef],
+    statuses: HashMap<ThreadId, AgentStatus>,
+) {
+    session
+        .emit_turn_item_completed(
+            turn,
+            TurnItem::CollabAgentToolCall(CollabAgentToolCallItem {
+                id: call_id.to_string(),
+                tool: CollabAgentTool::Wait,
+                status: wait_tool_call_status(&statuses),
+                sender_thread_id: session.thread_id,
+                receiver_thread_ids: statuses.keys().copied().collect(),
+                receiver_agents: wait_receiver_agents(&statuses, receiver_agents),
+                prompt: None,
+                model: None,
+                reasoning_effort: None,
+                agents_states: statuses,
+            }),
+        )
+        .await;
+}
+
+/// Reports targets that no longer exist as a tool error so the model stops waiting on them.
+fn missing_agents_error(thread_ids: &[ThreadId]) -> FunctionCallError {
+    let targets = thread_ids
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    FunctionCallError::RespondToModel(format!(
+        "agent with id {targets} not found; it is gone and will not report a status"
+    ))
 }
 
 fn wait_tool_call_status(statuses: &HashMap<ThreadId, AgentStatus>) -> CollabAgentToolCallStatus {
