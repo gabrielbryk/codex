@@ -4519,6 +4519,69 @@ async fn turn_start_with_elevated_override_does_not_persist_project_trust() -> R
     Ok(())
 }
 
+/// A client that loses its connection mid-request can re-send the submission
+/// after reconnecting. The `clientUserMessageId` makes that replay safe: the
+/// second request must resolve to the turn the first one started rather than
+/// starting a second turn.
+#[tokio::test]
+async fn turn_start_deduplicates_replayed_client_user_message_id() -> Result<()> {
+    let server = create_mock_responses_server_sequence_unchecked(vec![
+        create_final_assistant_message_sse_response("Done")?,
+    ])
+    .await;
+
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+
+    let ThreadStartResponse { thread, .. } = mcp
+        .start_thread(ThreadStartParams {
+            model: Some("mock-model".to_string()),
+            ..Default::default()
+        })
+        .await?;
+
+    let turn_start_params = || TurnStartParams {
+        thread_id: thread.id.clone(),
+        client_user_message_id: Some("client-message-1".to_string()),
+        input: vec![V2UserInput::Text {
+            text: "Hello".to_string(),
+            text_elements: Vec::new(),
+        }],
+        ..Default::default()
+    };
+
+    let TurnStartResponse { turn: first } = mcp
+        .request(|request_id| ClientRequest::TurnStart {
+            request_id,
+            params: turn_start_params(),
+        })
+        .await?;
+    let TurnStartResponse { turn: replayed } = mcp
+        .request(|request_id| ClientRequest::TurnStart {
+            request_id,
+            params: turn_start_params(),
+        })
+        .await?;
+
+    assert_eq!(
+        first, replayed,
+        "a replayed turn/start should return the original turn"
+    );
+
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+
+    Ok(())
+}
+
 fn write_test_skill(codex_home: &Path, name: &str) -> std::io::Result<()> {
     let skill_dir = codex_home.join("skills").join(name);
     std::fs::create_dir_all(&skill_dir)?;
