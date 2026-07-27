@@ -694,7 +694,7 @@ impl App {
                             .as_ref()
                             .map(|profile| &profile.permission_profile),
                     );
-                    let response = app_server
+                    let result = app_server
                         .turn_start(
                             thread_id,
                             items.to_vec(),
@@ -711,12 +711,24 @@ impl App {
                             *personality,
                             final_output_json_schema.clone(),
                         )
-                        .await?;
-                    if self.active_thread_id == Some(thread_id)
-                        && self.chat_widget.thread_id() == Some(thread_id)
-                    {
-                        self.chat_widget
-                            .record_safety_buffering_turn(response.turn.id, op);
+                        .await;
+                    match result {
+                        Ok(response) => {
+                            if self.active_thread_id == Some(thread_id)
+                                && self.chat_widget.thread_id() == Some(thread_id)
+                            {
+                                self.chat_widget
+                                    .record_safety_buffering_turn(response.turn.id, op);
+                            }
+                        }
+                        Err(err) => {
+                            // A dropped app-server websocket fails every in-flight request, so a
+                            // failed turn/start must stay recoverable instead of exiting the TUI.
+                            tracing::warn!("turn/start failed for thread {thread_id}: {err:#}");
+                            self.chat_widget.add_error_message(format!(
+                                "Failed to start turn: {err:#}. The app-server connection may have dropped and reconnected — please resend your message."
+                            ));
+                        }
                     }
                 }
                 Ok(true)
