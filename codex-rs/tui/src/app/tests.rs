@@ -2,6 +2,7 @@
 
 #[path = "tests/advanced_reasoning_tests.rs"]
 mod advanced_reasoning_tests;
+mod fatal_exit;
 mod model_catalog;
 mod plugin_catalog;
 mod rate_limits;
