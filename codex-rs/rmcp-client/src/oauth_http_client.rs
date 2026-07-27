@@ -17,6 +17,7 @@ use rmcp::transport::auth::OAuthHttpRedirectPolicy;
 use rmcp::transport::auth::OAuthHttpRequest;
 
 use crate::auth_status::OAuthDiscoveryTimeout;
+use crate::slack_oauth_envelope::normalize_slack_token_response;
 
 const MAX_OAUTH_HTTP_RESPONSE_BODY_BYTES: usize = 1024 * 1024;
 static NEXT_OAUTH_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
@@ -65,6 +66,9 @@ impl OAuthHttpClientAdapter {
             }
         };
         let (parts, body) = request.into_parts();
+        // Only token/registration requests are POSTs; discovery documents are fetched with GET
+        // and must never be rewritten.
+        let is_post = parts.method == oauth2::http::Method::POST;
         let mut headers = self.default_headers.clone();
         for name in parts.headers.keys() {
             headers.remove(name);
@@ -125,9 +129,17 @@ impl OAuthHttpClientAdapter {
         for header in response.headers {
             builder = builder.header(header.name, header.value);
         }
-        builder
+        let response = builder
             .body(body)
-            .map_err(|error| OAuthHttpClientError::new(error.to_string()))
+            .map_err(|error| OAuthHttpClientError::new(error.to_string()))?;
+        // Slack's advertised `token_endpoint` is a Slack Web API method that returns its own
+        // envelope under HTTP 200. Normalize it here, the single seam every OAuth request shares,
+        // so both the refresh and the authorization code exchange see an RFC 6749 body.
+        Ok(if is_post {
+            normalize_slack_token_response(response)
+        } else {
+            response
+        })
     }
 }
 
