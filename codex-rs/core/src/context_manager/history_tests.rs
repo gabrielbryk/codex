@@ -1473,7 +1473,6 @@ fn normalize_adds_missing_output_for_function_call() {
     );
 }
 
-#[cfg(not(debug_assertions))]
 #[test]
 fn normalize_adds_missing_output_for_custom_tool_call() {
     let items = vec![ResponseItem::CustomToolCall {
@@ -1509,6 +1508,42 @@ fn normalize_adds_missing_output_for_custom_tool_call() {
                 internal_chat_message_metadata_passthrough: None,
             },
         ]
+    );
+}
+
+#[test]
+fn backfill_missing_call_outputs_persists_repair_once() {
+    let call = ResponseItem::CustomToolCall {
+        id: None,
+        status: None,
+        call_id: "tool-x".to_string(),
+        name: "custom".to_string(),
+        namespace: None,
+        input: "{}".to_string(),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let synthetic_output = ResponseItem::CustomToolCallOutput {
+        id: None,
+        call_id: "tool-x".to_string(),
+        name: None,
+        output: FunctionCallOutputPayload::from_text("aborted".to_string()),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let mut h = create_history_with_items(vec![call.clone()]);
+
+    let injected = h.backfill_missing_call_outputs();
+
+    assert_eq!(injected, vec![synthetic_output.clone()]);
+    assert_eq!(h.raw_items(), vec![call.clone(), synthetic_output.clone()]);
+
+    // The repair is durable, so a later pass finds nothing to inject and cannot re-log.
+    let second_pass = h.backfill_missing_call_outputs();
+
+    assert_eq!(second_pass, Vec::new());
+    assert_eq!(h.raw_items(), vec![call.clone(), synthetic_output.clone()]);
+    assert_eq!(
+        h.clone().for_prompt(&default_input_modalities()),
+        vec![call, synthetic_output]
     );
 }
 
@@ -1812,23 +1847,6 @@ fn normalize_adds_missing_output_for_tool_search_call() {
             },
         ]
     );
-}
-
-#[cfg(debug_assertions)]
-#[test]
-#[should_panic]
-fn normalize_adds_missing_output_for_custom_tool_call_panics_in_debug() {
-    let items = vec![ResponseItem::CustomToolCall {
-        id: None,
-        status: None,
-        call_id: "tool-x".to_string(),
-        name: "custom".to_string(),
-        namespace: None,
-        input: "{}".to_string(),
-        internal_chat_message_metadata_passthrough: None,
-    }];
-    let mut h = create_history_with_items(items);
-    h.normalize_history(&default_input_modalities());
 }
 
 #[cfg(debug_assertions)]

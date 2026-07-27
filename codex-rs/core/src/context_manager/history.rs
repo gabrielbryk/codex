@@ -151,6 +151,16 @@ impl ContextManager {
             .collect()
     }
 
+    /// Repairs calls whose outputs never arrived and returns the injected outputs so the
+    /// caller can persist them.
+    ///
+    /// `for_prompt` applies the same repair to a throwaway snapshot, so an orphaned call is
+    /// re-detected — and re-logged — on every request, every retry, and every later turn.
+    /// Applying it to the durable history instead makes the repair stick.
+    pub(crate) fn backfill_missing_call_outputs(&mut self) -> Vec<ResponseItem> {
+        normalize::ensure_call_outputs_present(Arc::make_mut(&mut self.items))
+    }
+
     /// Iterates over raw response items without exposing their history envelopes.
     pub(crate) fn raw_items(
         &self,
