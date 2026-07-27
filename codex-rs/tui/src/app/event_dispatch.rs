@@ -562,10 +562,8 @@ impl App {
                 self.chat_widget.prepare_local_op_submission(&op);
                 if let Err(err) = self.submit_active_thread_op(app_server, op).await {
                     let handled = is_user_turn
-                        && matches!(
+                        && is_recoverable_turn_start_failure(
                             err.downcast_ref::<TypedRequestError>(),
-                            Some(TypedRequestError::Server { method, .. })
-                                if method == "turn/start"
                         )
                         && self
                             .chat_widget
@@ -2724,5 +2722,67 @@ impl App {
                 AppRunControl::Continue
             }
         }
+    }
+}
+
+/// Returns whether a failed `turn/start` should be surfaced in chat instead of exiting the TUI.
+///
+/// `Transport` is included on purpose: this fork's remote app-server client calls
+/// `fail_pending_requests()` on every websocket drop before it reconnects, so an in-flight
+/// `turn/start` observes a transport error even though the client is back moments later.
+/// Treating that as fatal would end the whole session over a momentary blip.
+fn is_recoverable_turn_start_failure(error: Option<&TypedRequestError>) -> bool {
+    matches!(
+        error,
+        Some(
+            TypedRequestError::Server { method, .. } | TypedRequestError::Transport { method, .. }
+        ) if method == "turn/start"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_recoverable_turn_start_failure;
+    use codex_app_server_client::TypedRequestError;
+    use codex_app_server_protocol::JSONRPCErrorError;
+
+    fn server_error(method: &str) -> TypedRequestError {
+        TypedRequestError::Server {
+            method: method.to_string(),
+            source: JSONRPCErrorError {
+                code: -32600,
+                message: "thread not found".to_string(),
+                data: None,
+            },
+        }
+    }
+
+    fn transport_error(method: &str) -> TypedRequestError {
+        TypedRequestError::Transport {
+            method: method.to_string(),
+            source: std::io::Error::new(std::io::ErrorKind::BrokenPipe, "connection closed"),
+        }
+    }
+
+    #[test]
+    fn server_and_transport_turn_start_failures_are_recoverable() {
+        assert!(is_recoverable_turn_start_failure(Some(&server_error(
+            "turn/start"
+        ))));
+        // A websocket drop fails the in-flight request before the client reconnects.
+        assert!(is_recoverable_turn_start_failure(Some(&transport_error(
+            "turn/start"
+        ))));
+    }
+
+    #[test]
+    fn other_methods_and_missing_errors_stay_fatal() {
+        assert!(!is_recoverable_turn_start_failure(Some(&server_error(
+            "thread/compact/start"
+        ))));
+        assert!(!is_recoverable_turn_start_failure(Some(&transport_error(
+            "thread/compact/start"
+        ))));
+        assert!(!is_recoverable_turn_start_failure(None));
     }
 }
