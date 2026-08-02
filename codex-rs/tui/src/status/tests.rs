@@ -295,6 +295,7 @@ async fn status_snapshot_includes_reasoning_details() {
     let usage = TokenUsage {
         input_tokens: 1_200,
         cached_input_tokens: 200,
+        cache_write_input_tokens: 0,
         output_tokens: 900,
         reasoning_output_tokens: 150,
         total_tokens: 2_250,
@@ -943,6 +944,7 @@ async fn status_snapshot_includes_forked_from() {
     let usage = TokenUsage {
         input_tokens: 800,
         cached_input_tokens: 0,
+        cache_write_input_tokens: 0,
         output_tokens: 400,
         reasoning_output_tokens: 0,
         total_tokens: 1_200,
@@ -997,6 +999,7 @@ async fn status_snapshot_includes_monthly_limit() {
     let usage = TokenUsage {
         input_tokens: 800,
         cached_input_tokens: 0,
+        cache_write_input_tokens: 0,
         output_tokens: 400,
         reasoning_output_tokens: 0,
         total_tokens: 1_200,
@@ -1062,6 +1065,7 @@ async fn status_snapshot_includes_enterprise_monthly_credit_limit() {
     let usage = TokenUsage {
         input_tokens: 800,
         cached_input_tokens: 0,
+        cache_write_input_tokens: 0,
         output_tokens: 400,
         reasoning_output_tokens: 0,
         total_tokens: 1_200,
@@ -1139,6 +1143,7 @@ async fn status_snapshot_uses_generic_limit_labels_for_unsupported_windows() {
     let usage = TokenUsage {
         input_tokens: 800,
         cached_input_tokens: 0,
+        cache_write_input_tokens: 0,
         output_tokens: 400,
         reasoning_output_tokens: 0,
         total_tokens: 1_200,
@@ -1423,6 +1428,7 @@ async fn status_card_token_usage_excludes_cached_tokens() {
     let usage = TokenUsage {
         input_tokens: 1_200,
         cached_input_tokens: 200,
+        cache_write_input_tokens: 0,
         output_tokens: 900,
         reasoning_output_tokens: 0,
         total_tokens: 2_100,
@@ -1471,6 +1477,7 @@ async fn status_snapshot_truncates_in_narrow_terminal() {
     let usage = TokenUsage {
         input_tokens: 1_200,
         cached_input_tokens: 200,
+        cache_write_input_tokens: 0,
         output_tokens: 900,
         reasoning_output_tokens: 150,
         total_tokens: 2_250,
@@ -1573,6 +1580,7 @@ async fn status_snapshot_shows_missing_limits_message() {
     let usage = TokenUsage {
         input_tokens: 500,
         cached_input_tokens: 0,
+        cache_write_input_tokens: 0,
         output_tokens: 250,
         reasoning_output_tokens: 0,
         total_tokens: 750,
@@ -1621,6 +1629,7 @@ async fn status_snapshot_uses_default_reasoning_when_config_empty() {
     let usage = TokenUsage {
         input_tokens: 500,
         cached_input_tokens: 0,
+        cache_write_input_tokens: 0,
         output_tokens: 250,
         reasoning_output_tokens: 0,
         total_tokens: 750,
@@ -1676,6 +1685,7 @@ async fn status_snapshot_shows_refreshing_limits_notice() {
     let usage = TokenUsage {
         input_tokens: 500,
         cached_input_tokens: 0,
+        cache_write_input_tokens: 0,
         output_tokens: 250,
         reasoning_output_tokens: 0,
         total_tokens: 750,
@@ -1829,6 +1839,7 @@ async fn status_snapshot_includes_credits_and_limits() {
     let usage = TokenUsage {
         input_tokens: 1_500,
         cached_input_tokens: 100,
+        cache_write_input_tokens: 0,
         output_tokens: 600,
         reasoning_output_tokens: 0,
         total_tokens: 2_200,
@@ -1901,6 +1912,7 @@ async fn status_snapshot_shows_unavailable_limits_message() {
     let usage = TokenUsage {
         input_tokens: 500,
         cached_input_tokens: 0,
+        cache_write_input_tokens: 0,
         output_tokens: 250,
         reasoning_output_tokens: 0,
         total_tokens: 750,
@@ -1960,6 +1972,7 @@ async fn status_snapshot_treats_refreshing_empty_limits_as_unavailable() {
     let usage = TokenUsage {
         input_tokens: 500,
         cached_input_tokens: 0,
+        cache_write_input_tokens: 0,
         output_tokens: 250,
         reasoning_output_tokens: 0,
         total_tokens: 750,
@@ -2021,6 +2034,7 @@ async fn status_snapshot_shows_stale_limits_message() {
     let usage = TokenUsage {
         input_tokens: 1_200,
         cached_input_tokens: 200,
+        cache_write_input_tokens: 0,
         output_tokens: 900,
         reasoning_output_tokens: 150,
         total_tokens: 2_250,
@@ -2090,6 +2104,7 @@ async fn status_snapshot_cached_limits_hide_credits_without_flag() {
     let usage = TokenUsage {
         input_tokens: 900,
         cached_input_tokens: 200,
+        cache_write_input_tokens: 0,
         output_tokens: 350,
         reasoning_output_tokens: 0,
         total_tokens: 1_450,
@@ -2162,6 +2177,7 @@ async fn status_context_window_uses_last_usage() {
     let total_usage = TokenUsage {
         input_tokens: 12_800,
         cached_input_tokens: 0,
+        cache_write_input_tokens: 0,
         output_tokens: 879,
         reasoning_output_tokens: 0,
         total_tokens: 102_000,
@@ -2169,6 +2185,7 @@ async fn status_context_window_uses_last_usage() {
     let last_usage = TokenUsage {
         input_tokens: 12_800,
         cached_input_tokens: 0,
+        cache_write_input_tokens: 0,
         output_tokens: 879,
         reasoning_output_tokens: 0,
         total_tokens: 13_679,

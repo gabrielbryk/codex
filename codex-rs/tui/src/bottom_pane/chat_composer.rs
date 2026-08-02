@@ -4751,7 +4751,7 @@ impl ChatComposer {
                     if show_right && let Some(line) = &right_line {
                         render_context_right(hint_rect, buf, line);
                     }
-                    if status_line_active && !truncated_status_hyperlink_lines.is_empty() {
+                    if transition_visible && !truncated_status_hyperlink_lines.is_empty() {
                         let prefix: Span<'static> = " ".repeat(FOOTER_INDENT_COLS).into();
                         let lines = prefix_hyperlink_lines(
                             truncated_status_hyperlink_lines,

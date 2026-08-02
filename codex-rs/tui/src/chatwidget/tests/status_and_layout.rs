@@ -218,6 +218,7 @@ async fn stale_status_line_git_summary_update_is_ignored() {
     chat.status_line_git_summary_pending = true;
 
     chat.set_status_line_git_summary(
+        chat.status_line_async_owner,
         PathBuf::from("/other"),
         StatusLineGitSummary {
             pull_request: Some(crate::branch_summary::StatusLinePullRequest {
@@ -232,7 +233,7 @@ async fn stale_status_line_git_summary_update_is_ignored() {
     );
 
     assert!(chat.status_line_git_summary.is_none());
-    assert!(!chat.status_line_git_summary_pending);
+    assert!(chat.status_line_git_summary_pending);
 }
 
 #[tokio::test]

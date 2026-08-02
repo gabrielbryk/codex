@@ -20,6 +20,7 @@ use crate::status_line_command::wire::STATUS_LINE_COMMAND_SCHEMA_VERSION;
 use crate::status_line_command::wire::StatusLineCommandBranchChanges;
 use crate::status_line_command::wire::StatusLineCommandCodex;
 use crate::status_line_command::wire::StatusLineCommandContextWindow;
+use crate::status_line_command::wire::StatusLineCommandCurrentUsage;
 use crate::status_line_command::wire::StatusLineCommandEffort;
 use crate::status_line_command::wire::StatusLineCommandInput;
 use crate::status_line_command::wire::StatusLineCommandModel;
@@ -81,6 +82,19 @@ impl ChatWidget {
         };
         let local_cwd = runtime.local_cwd.clone();
         *runtime = StatusLineCommandRuntime::new(local_cwd);
+        self.status_line_async_owner = self.status_line_async_owner.wrapping_add(/*rhs*/ 1);
+        self.status_line_branch = None;
+        self.status_line_branch_cwd = None;
+        self.status_line_branch_pending = false;
+        self.status_line_branch_lookup_complete = false;
+        self.status_line_git_summary = None;
+        self.status_line_git_summary_cwd = None;
+        self.status_line_git_summary_pending = false;
+        self.status_line_git_summary_lookup_complete = false;
+        self.status_line_workspace_headline = None;
+        self.status_line_workspace_headline_pending_request_id = None;
+        self.status_line_workspace_headline_last_requested_at = None;
+        self.status_line_workspace_messages_disabled = false;
         self.set_status_hyperlink_lines(Vec::new());
         self.set_status_line_hyperlink(/*url*/ None);
     }
@@ -149,7 +163,9 @@ impl ChatWidget {
             } else {
                 None
             };
-            runtime.task = None;
+            if apply_result != StatusLineCommandApplyResult::Stale {
+                runtime.task = None;
+            }
             (apply_result, lines, retry_input)
         };
 
@@ -189,7 +205,8 @@ impl ChatWidget {
                 level: effort.as_str().to_string(),
             })
         });
-        let total_usage = self.status_line_total_usage();
+        let current_usage = self.token_info.as_ref().map(|info| &info.last_token_usage);
+        let latest_usage = current_usage.cloned().unwrap_or_default();
         let context_window_size = self
             .status_line_context_window_size()
             .unwrap_or_default()
@@ -262,18 +279,23 @@ impl ChatWidget {
             },
             version: CODEX_CLI_VERSION.to_string(),
             fast_mode: self.current_service_tier() == Some(ServiceTier::Fast.request_value()),
-            exceeds_200k_tokens: total_usage.input_tokens.max(0) > 200_000,
+            exceeds_200k_tokens: latest_usage.total_tokens.max(0) > 200_000,
             effort,
             thinking: StatusLineCommandThinking {
                 enabled: thinking_enabled,
             },
             context_window: StatusLineCommandContextWindow {
-                total_input_tokens: total_usage.input_tokens.max(0) as u64,
-                total_output_tokens: total_usage.output_tokens.max(0) as u64,
+                total_input_tokens: latest_usage.input_tokens.max(0) as u64,
+                total_output_tokens: latest_usage.output_tokens.max(0) as u64,
                 context_window_size,
                 used_percentage,
                 remaining_percentage,
-                current_usage: None,
+                current_usage: current_usage.map(|usage| StatusLineCommandCurrentUsage {
+                    input_tokens: usage.input_tokens.max(0) as u64,
+                    output_tokens: usage.output_tokens.max(0) as u64,
+                    cache_creation_input_tokens: usage.cache_write_input_tokens.max(0) as u64,
+                    cache_read_input_tokens: usage.cached_input_tokens.max(0) as u64,
+                }),
             },
             rate_limits,
             extra_usage: None,

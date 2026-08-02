@@ -754,6 +754,8 @@ pub(crate) struct ChatWidget {
     status_line_workspace_headline_last_requested_at: Option<Instant>,
     // Set after the backend reports the workspace-message feature gate is disabled.
     status_line_workspace_messages_disabled: bool,
+    // Invalidates async status dependencies when a command-mode widget changes threads.
+    status_line_async_owner: u64,
     status_line_command: Option<status_line_command::StatusLineCommandRuntime>,
     // Current thread-goal status shown in the status line when plan mode is inactive.
     current_goal_status_indicator: Option<GoalStatusIndicator>,
@@ -921,6 +923,7 @@ fn token_usage_info_from_app_server(token_usage: ThreadTokenUsage) -> TokenUsage
             total_tokens: token_usage.total.total_tokens,
             input_tokens: token_usage.total.input_tokens,
             cached_input_tokens: token_usage.total.cached_input_tokens,
+            cache_write_input_tokens: token_usage.total.cache_write_input_tokens,
             output_tokens: token_usage.total.output_tokens,
             reasoning_output_tokens: token_usage.total.reasoning_output_tokens,
         },
@@ -928,6 +931,7 @@ fn token_usage_info_from_app_server(token_usage: ThreadTokenUsage) -> TokenUsage
             total_tokens: token_usage.last.total_tokens,
             input_tokens: token_usage.last.input_tokens,
             cached_input_tokens: token_usage.last.cached_input_tokens,
+            cache_write_input_tokens: token_usage.last.cache_write_input_tokens,
             output_tokens: token_usage.last.output_tokens,
             reasoning_output_tokens: token_usage.last.reasoning_output_tokens,
         },

@@ -82,6 +82,21 @@ fn status_line_semantic_hyperlinks_reach_the_terminal_buffer() {
         .filter(|cell| cell.symbol().contains(destination))
         .count();
     assert_eq!(linked_cells, "details".len());
+
+    composer.footer.show_flash(
+        Line::from("temporary notice"),
+        std::time::Duration::from_secs(60),
+    );
+    buffer = Buffer::empty(area);
+    composer.render(area, &mut buffer);
+    assert_eq!(
+        buffer
+            .content()
+            .iter()
+            .filter(|cell| cell.symbol().contains(destination))
+            .count(),
+        0
+    );
 }
 
 #[test]

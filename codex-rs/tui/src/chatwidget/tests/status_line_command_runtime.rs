@@ -95,6 +95,127 @@ async fn thread_reset_clears_last_good_and_session_identity() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn stale_completion_does_not_detach_newer_process_from_cancellation() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let sentinel = temp.path().join("newer-completed");
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    install_command(
+        &mut chat,
+        vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            concat!(
+                "IFS= read -r input; ",
+                "case \"$input\" in ",
+                "*'\"status\":\"working\"'*) ",
+                "sleep 1; printf done > \"$1\"; printf newer ;; ",
+                "*) printf older ;; esac"
+            )
+            .to_string(),
+            "status-line-test".to_string(),
+            sentinel.to_string_lossy().into_owned(),
+        ],
+    );
+    chat.status_state.terminal_title_status_kind = TerminalTitleStatusKind::Working;
+    chat.refresh_status_line();
+    let older = next_completion(&mut rx).await;
+
+    chat.bottom_pane.set_task_running(/*running*/ true);
+    chat.set_status_header("Working".to_string());
+    tokio::time::sleep(std::time::Duration::from_millis(450)).await;
+    assert!(!chat.apply_status_line_command_completion(older));
+    chat.reset_status_line_command_for_thread();
+    tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+
+    assert!(!sentinel.exists());
+}
+
+#[tokio::test]
+async fn same_cwd_thread_reset_rejects_old_dependency_results() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    install_command(&mut chat, vec!["formatter".to_string()]);
+    let cwd = PathBuf::from("/same-cwd");
+    let old_owner = chat.status_line_async_owner;
+    chat.status_line_branch = Some("old-branch".to_string());
+    chat.status_line_git_summary = Some(StatusLineGitSummary::default());
+    chat.status_line_workspace_headline = Some("old headline".to_string());
+    chat.status_line_workspace_headline_pending_request_id = Some(10);
+
+    chat.reset_status_line_command_for_thread();
+    assert_ne!(chat.status_line_async_owner, old_owner);
+    assert_eq!(chat.status_line_branch, None);
+    assert!(chat.status_line_git_summary.is_none());
+    assert_eq!(chat.status_line_workspace_headline, None);
+    assert_eq!(chat.status_line_workspace_headline_pending_request_id, None);
+
+    chat.status_line_branch_cwd = Some(cwd.clone());
+    chat.status_line_branch_pending = true;
+    chat.status_line_git_summary_cwd = Some(cwd.clone());
+    chat.status_line_git_summary_pending = true;
+    chat.status_line_workspace_headline_pending_request_id = Some(11);
+    chat.set_status_line_branch(old_owner, cwd.clone(), Some("stale-branch".to_string()));
+    chat.set_status_line_git_summary(old_owner, cwd, StatusLineGitSummary::default());
+    assert!(!chat.set_status_line_workspace_headline(
+        10,
+        Ok(
+            crate::workspace_messages::WorkspaceHeadlineFetchResult::Available(Some(
+                "stale headline".to_string(),
+            )),
+        ),
+    ));
+
+    assert_eq!(chat.status_line_branch, None);
+    assert!(chat.status_line_git_summary.is_none());
+    assert_eq!(chat.status_line_workspace_headline, None);
+    assert!(chat.status_line_branch_pending);
+    assert!(chat.status_line_git_summary_pending);
+    assert_eq!(
+        chat.status_line_workspace_headline_pending_request_id,
+        Some(11)
+    );
+}
+
+#[tokio::test]
+async fn command_input_uses_latest_context_usage_instead_of_session_total() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    install_command(&mut chat, vec!["formatter".to_string()]);
+    chat.token_info = Some(TokenUsageInfo {
+        total_token_usage: TokenUsage {
+            input_tokens: 900_000,
+            output_tokens: 80_000,
+            total_tokens: 980_000,
+            ..TokenUsage::default()
+        },
+        last_token_usage: TokenUsage {
+            input_tokens: 175_000,
+            cached_input_tokens: 120_000,
+            cache_write_input_tokens: 4_000,
+            output_tokens: 12_000,
+            total_tokens: 187_000,
+            ..TokenUsage::default()
+        },
+        model_context_window: Some(272_000),
+    });
+
+    let input = chat.status_line_command_input().expect("command input");
+    assert!(!input.exceeds_200k_tokens);
+    assert_eq!(input.context_window.total_input_tokens, 175_000);
+    assert_eq!(input.context_window.total_output_tokens, 12_000);
+    assert_eq!(
+        input.context_window.current_usage,
+        Some(
+            crate::status_line_command::wire::StatusLineCommandCurrentUsage {
+                input_tokens: 175_000,
+                output_tokens: 12_000,
+                cache_creation_input_tokens: 4_000,
+                cache_read_input_tokens: 120_000,
+            }
+        )
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn run_state_change_refreshes_command_input() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     install_command(
