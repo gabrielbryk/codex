@@ -341,9 +341,9 @@ async fn real_runner_failure_retains_last_good_output() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn timeout_terminates_formatter_descendants() {
+async fn timeout_terminates_formatter_process_group() {
     let temp = tempfile::tempdir().expect("temp dir");
-    let sentinel = temp.path().join("descendant-survived");
+    let sentinel = temp.path().join("group-child-survived");
     let mut config = shell_config(
         "(sleep 1; printf survived > \"$1\") & wait",
         vec![
@@ -364,7 +364,10 @@ async fn timeout_terminates_formatter_descendants() {
         StatusLineCommandFailureKind::Timeout
     );
     tokio::time::sleep(Duration::from_millis(1_200)).await;
-    assert!(!sentinel.exists(), "formatter descendant survived timeout");
+    assert!(
+        !sentinel.exists(),
+        "formatter process-group child survived timeout"
+    );
 }
 
 #[cfg(unix)]

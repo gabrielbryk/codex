@@ -4,7 +4,7 @@ use super::find_python;
 use super::wait_for_output_contains;
 use crate::TerminalSize;
 use crate::spawn_pipe_process_no_stdin;
-use crate::spawn_piped_process_tree;
+use crate::spawn_piped_contained_process;
 use crate::spawn_pty_process;
 use std::collections::HashMap;
 use std::path::Path;
@@ -78,9 +78,15 @@ async fn assert_terminate_kills_descendant(
     );
     let args = vec!["-u".to_string(), "-c".to_string(), code];
     let spawned = if backend == "pipe" {
-        let spawned =
-            spawn_piped_process_tree(python, &args, Path::new("."), env, /*arg0*/ &None, &[])
-                .await?;
+        let spawned = spawn_piped_contained_process(
+            python,
+            &args,
+            Path::new("."),
+            env,
+            /*arg0*/ &None,
+            &[],
+        )
+        .await?;
         spawned.session.close_stdin();
         spawned
     } else {
@@ -188,7 +194,8 @@ async fn assert_strict_session_drop_kills_descendant(
     );
     let args = vec!["-u".to_string(), "-c".to_string(), code];
     let spawned =
-        spawn_piped_process_tree(python, &args, Path::new("."), env, /*arg0*/ &None, &[]).await?;
+        spawn_piped_contained_process(python, &args, Path::new("."), env, /*arg0*/ &None, &[])
+            .await?;
     spawned.session.close_stdin();
     let (session, output_rx, exit_rx) = combine_spawned_output(spawned);
     let (_, exit_code) = collect_output_until_exit(output_rx, exit_rx, /*timeout_ms*/ 10_000).await;

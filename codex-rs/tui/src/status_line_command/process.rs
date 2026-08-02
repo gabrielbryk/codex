@@ -5,7 +5,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use codex_config::types::TuiStatusLineCommand;
-use codex_utils_pty::spawn_piped_process_tree;
+use codex_utils_pty::spawn_piped_contained_process;
 use tokio::sync::mpsc;
 
 use super::parser::MAX_STATUS_LINE_COMMAND_BYTES;
@@ -40,7 +40,7 @@ async fn execute(
         Err(err) => return failure(StatusLineCommandFailureKind::Stdin, err.to_string()),
     };
     let env = std::env::vars().collect::<HashMap<_, _>>();
-    let spawned = match spawn_piped_process_tree(
+    let spawned = match spawn_piped_contained_process(
         program,
         args,
         local_cwd,
