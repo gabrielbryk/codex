@@ -420,6 +420,7 @@ pub(crate) enum AppEvent {
 
     /// Fetch workspace messages for the status-line headline item.
     RefreshStatusLineWorkspaceHeadline {
+        owner: u64,
         request_id: u64,
     },
 
@@ -1071,6 +1072,7 @@ pub(crate) enum AppEvent {
     },
     /// Async update of the workspace notification headline for status line rendering.
     StatusLineWorkspaceHeadlineUpdated {
+        owner: u64,
         request_id: u64,
         result: Result<crate::workspace_messages::WorkspaceHeadlineFetchResult, String>,
     },

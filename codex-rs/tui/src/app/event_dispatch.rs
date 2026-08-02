@@ -867,8 +867,8 @@ impl App {
             AppEvent::RefreshTokenActivity { request_id } => {
                 self.refresh_token_activity(app_server, request_id);
             }
-            AppEvent::RefreshStatusLineWorkspaceHeadline { request_id } => {
-                self.refresh_status_line_workspace_headline(app_server, request_id);
+            AppEvent::RefreshStatusLineWorkspaceHeadline { owner, request_id } => {
+                self.refresh_status_line_workspace_headline(app_server, owner, request_id);
             }
             AppEvent::OpenThreadGoalMenu { thread_id } => {
                 self.open_thread_goal_menu(app_server, thread_id).await;
@@ -2277,10 +2277,14 @@ impl App {
                     .set_status_line_git_summary(owner, cwd, summary);
                 self.refresh_status_line();
             }
-            AppEvent::StatusLineWorkspaceHeadlineUpdated { request_id, result } => {
+            AppEvent::StatusLineWorkspaceHeadlineUpdated {
+                owner,
+                request_id,
+                result,
+            } => {
                 if self
                     .chat_widget
-                    .set_status_line_workspace_headline(request_id, result)
+                    .set_status_line_workspace_headline(owner, request_id, result)
                 {
                     tui.frame_requester().schedule_frame();
                 }
