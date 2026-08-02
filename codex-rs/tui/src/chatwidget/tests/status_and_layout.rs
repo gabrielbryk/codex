@@ -3095,6 +3095,53 @@ async fn status_line_fast_mode_footer_snapshot() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn external_status_line_command_footer_snapshot() {
+    use ratatui::Terminal;
+
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.show_welcome_banner = false;
+    chat.config.tui_status_line_command = Some(codex_config::types::TuiStatusLineCommand {
+        command: vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "printf '\\033[35ms(m)\\033[0m\\nctx 42%%'".to_string(),
+        ],
+        timeout_ms: 1_000,
+    });
+    chat.status_line_command = Some(
+        crate::chatwidget::status_line_command::StatusLineCommandRuntime::new(
+            std::env::current_dir().ok(),
+        ),
+    );
+    chat.refresh_status_line();
+
+    let completion = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            match rx.recv().await {
+                Some(AppEvent::StatusLineCommandFinished(completion)) => break completion,
+                Some(_) => {}
+                None => panic!("app event channel closed"),
+            }
+        }
+    })
+    .await
+    .expect("status-line command completion");
+    assert!(chat.apply_status_line_command_completion(completion));
+
+    let width = 80;
+    let height = chat.desired_height(width);
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("create terminal");
+    terminal
+        .draw(|frame| chat.render(frame.area(), frame.buffer_mut()))
+        .expect("draw external status-line footer");
+    assert_chatwidget_snapshot!(
+        "external_status_line_command_footer",
+        normalized_backend_snapshot(terminal.backend())
+    );
+}
+
 #[tokio::test]
 async fn status_line_model_with_reasoning_includes_fast_for_fast_capable_models() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;

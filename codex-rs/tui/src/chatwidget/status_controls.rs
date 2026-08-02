@@ -40,16 +40,17 @@ impl ChatWidget {
             StatusDetailsCapitalization::Preserve,
             details_max_lines,
         );
-        let title_uses_status = self
-            .config
-            .tui_terminal_title
-            .as_ref()
-            .is_some_and(|items| {
-                items
-                    .iter()
-                    .any(|item| item == "run-state" || item == "status")
-            });
-        if title_uses_status {
+        let surface_uses_status = self.config.tui_status_line_command.is_some()
+            || self
+                .config
+                .tui_terminal_title
+                .as_ref()
+                .is_some_and(|items| {
+                    items
+                        .iter()
+                        .any(|item| item == "run-state" || item == "status")
+                });
+        if surface_uses_status {
             self.refresh_status_surfaces();
         }
         status_indicator_updated
@@ -74,6 +75,13 @@ impl ChatWidget {
 
     pub(crate) fn set_status_lines(&mut self, status_lines: Vec<Line<'static>>) {
         self.bottom_pane.set_status_lines(status_lines);
+    }
+
+    pub(crate) fn set_status_hyperlink_lines(
+        &mut self,
+        status_lines: Vec<crate::terminal_hyperlinks::HyperlinkLine>,
+    ) {
+        self.bottom_pane.set_status_hyperlink_lines(status_lines);
     }
 
     /// Sets the terminal hyperlink target for the currently rendered footer status line.
