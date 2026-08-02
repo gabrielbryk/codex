@@ -1,6 +1,8 @@
 use pretty_assertions::assert_eq;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 use ratatui::text::Line;
 
 use super::ChatComposer;
@@ -8,6 +10,7 @@ use super::CollaborationModeIndicator;
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
 use crate::render::renderable::Renderable;
+use crate::terminal_hyperlinks::HyperlinkLine;
 
 fn test_composer() -> ChatComposer {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
@@ -56,6 +59,29 @@ fn status_line_rows_are_bounded_at_the_presentation_boundary() {
         status_text(&composer.footer.status_line_lines),
         vec!["one", "two", "three"]
     );
+}
+
+#[test]
+fn status_line_semantic_hyperlinks_reach_the_terminal_buffer() {
+    let mut composer = test_composer();
+    composer.set_status_line_enabled(/*enabled*/ true);
+    let destination = "https://example.com/status";
+    let mut line = HyperlinkLine::default();
+    line.push_span("model ".into(), /*destination*/ None);
+    line.push_span("details".into(), Some(destination));
+    composer.set_status_hyperlink_lines(vec![line]);
+
+    let width = 52;
+    let height = composer.desired_height(width);
+    let area = Rect::new(/*x*/ 0, /*y*/ 0, width, height);
+    let mut buffer = Buffer::empty(area);
+    composer.render(area, &mut buffer);
+    let linked_cells = buffer
+        .content()
+        .iter()
+        .filter(|cell| cell.symbol().contains(destination))
+        .count();
+    assert_eq!(linked_cells, "details".len());
 }
 
 #[test]

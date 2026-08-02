@@ -173,6 +173,11 @@ use crate::key_hint;
 use crate::key_hint::KeyBinding;
 use crate::key_hint::has_ctrl_or_alt;
 use crate::line_truncation::truncate_line_with_ellipsis_if_overflow;
+use crate::terminal_hyperlinks::HyperlinkLine;
+use crate::terminal_hyperlinks::mark_buffer_hyperlinks;
+use crate::terminal_hyperlinks::prefix_hyperlink_lines;
+use crate::terminal_hyperlinks::remap_hyperlinks_to_visible_line;
+use crate::terminal_hyperlinks::visible_lines;
 use crate::ui_consts::FOOTER_INDENT_COLS;
 use codex_message_history::HistoryBatchCursor;
 use crossterm::event::KeyCode;
@@ -623,6 +628,7 @@ impl ChatComposer {
                 goal_status_indicator: None,
                 ide_context_active: false,
                 status_line_lines: Vec::new(),
+                status_line_hyperlink_lines: Vec::new(),
                 status_line_hyperlink_url: None,
                 status_line_enabled: false,
                 side_conversation_context_label: None,
@@ -4213,10 +4219,29 @@ impl ChatComposer {
     /// keeps the same bound so callers cannot accidentally grow the composer footer without limit.
     pub(crate) fn set_status_lines(&mut self, mut status_lines: Vec<Line<'static>>) -> bool {
         status_lines.truncate(MAX_STATUS_LINE_ROWS);
-        if self.footer.status_line_lines == status_lines {
+        if self.footer.status_line_lines == status_lines
+            && self.footer.status_line_hyperlink_lines.is_empty()
+        {
             return false;
         }
         self.footer.status_line_lines = status_lines;
+        self.footer.status_line_hyperlink_lines.clear();
+        true
+    }
+
+    pub(crate) fn set_status_hyperlink_lines(
+        &mut self,
+        mut status_lines: Vec<HyperlinkLine>,
+    ) -> bool {
+        status_lines.truncate(MAX_STATUS_LINE_ROWS);
+        let visible = visible_lines(status_lines.clone());
+        if self.footer.status_line_lines == visible
+            && self.footer.status_line_hyperlink_lines == status_lines
+        {
+            return false;
+        }
+        self.footer.status_line_lines = visible;
+        self.footer.status_line_hyperlink_lines = status_lines;
         true
     }
 
@@ -4653,6 +4678,15 @@ impl ChatComposer {
                             .map(|(_, show_context)| *show_context)
                             .unwrap_or(can_show_left_and_context)
                     };
+                    let truncated_status_hyperlink_lines = self
+                        .footer
+                        .status_line_hyperlink_lines
+                        .iter()
+                        .zip(&truncated_status_lines)
+                        .map(|(source, line)| {
+                            remap_hyperlinks_to_visible_line(source, line.clone())
+                        })
+                        .collect::<Vec<_>>();
 
                     if let Some((summary_left, _)) = single_line_layout {
                         match summary_left {
@@ -4715,6 +4749,15 @@ impl ChatComposer {
                     }
                     if show_right && let Some(line) = &right_line {
                         render_context_right(hint_rect, buf, line);
+                    }
+                    if status_line_active && !truncated_status_hyperlink_lines.is_empty() {
+                        let prefix: Span<'static> = " ".repeat(FOOTER_INDENT_COLS).into();
+                        let lines = prefix_hyperlink_lines(
+                            truncated_status_hyperlink_lines,
+                            prefix.clone(),
+                            prefix,
+                        );
+                        mark_buffer_hyperlinks(buf, hint_rect, &lines, /*scroll_rows*/ 0);
                     }
                     if status_line_active
                         && let Some(url) = self.footer.status_line_hyperlink_url.as_deref()
