@@ -13,7 +13,10 @@ fn install_command(chat: &mut ChatWidget, command: Vec<String>) {
     chat.status_line_command = Some(StatusLineCommandRuntime::new(std::env::current_dir().ok()));
 }
 
-fn switched_thread_session(cwd: AbsolutePathBuf) -> crate::session_state::ThreadSessionState {
+fn switched_thread_session(
+    cwd: AbsolutePathBuf,
+    runtime_workspace_roots: Vec<AbsolutePathBuf>,
+) -> crate::session_state::ThreadSessionState {
     crate::session_state::ThreadSessionState {
         thread_id: ThreadId::new(),
         forked_from_id: None,
@@ -26,7 +29,7 @@ fn switched_thread_session(cwd: AbsolutePathBuf) -> crate::session_state::Thread
         approvals_reviewer: ApprovalsReviewer::User,
         permission_profile: PermissionProfile::read_only(),
         active_permission_profile: None,
-        runtime_workspace_roots: vec![cwd.clone()],
+        runtime_workspace_roots,
         cwd,
         instruction_source_paths: Vec::new(),
         reasoning_effort: None,
@@ -155,7 +158,7 @@ async fn thread_reset_during_debounce_prevents_formatter_spawn() {
     chat.config.workspace_roots = vec![old_cwd];
 
     chat.refresh_status_line();
-    chat.handle_thread_session(switched_thread_session(new_cwd));
+    chat.handle_thread_session(switched_thread_session(new_cwd.clone(), vec![new_cwd]));
     let completion = next_completion(&mut rx).await;
 
     assert!(!sentinel.exists(), "formatter spawned after thread reset");
@@ -207,7 +210,7 @@ async fn stale_completion_does_not_detach_newer_process_from_cancellation() {
     chat.set_status_header("Working".to_string());
     tokio::time::sleep(std::time::Duration::from_millis(450)).await;
     assert!(!chat.apply_status_line_command_completion(older));
-    chat.handle_thread_session(switched_thread_session(new_cwd));
+    chat.handle_thread_session(switched_thread_session(new_cwd.clone(), vec![new_cwd]));
     let new_thread = next_completion(&mut rx).await;
     assert!(chat.apply_status_line_command_completion(new_thread));
     tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
@@ -364,48 +367,28 @@ async fn command_input_reports_session_project_and_added_workspace_roots() {
     let project_dir = test_path_buf("/session/project").abs();
     let shared_dir = test_path_buf("/session/shared").abs();
     let tools_dir = test_path_buf("/session/tools").abs();
-    chat.current_cwd = Some(project_dir.to_path_buf());
-    chat.config.cwd = project_dir.clone();
-    chat.config.workspace_roots = vec![project_dir.clone(), shared_dir.clone(), tools_dir.clone()];
+    chat.handle_thread_session(switched_thread_session(
+        project_dir.clone(),
+        vec![project_dir.clone(), shared_dir.clone(), tools_dir.clone()],
+    ));
 
-    let workspace = chat
+    let stdin = chat
         .status_line_command_input()
         .expect("command input")
-        .workspace;
+        .to_json_line()
+        .expect("serialize formatter stdin");
+    let input: serde_json::Value = serde_json::from_slice(&stdin).expect("formatter stdin JSON");
     assert_eq!(
-        workspace,
-        crate::status_line_command::wire::StatusLineCommandWorkspace {
-            current_dir: project_dir.to_string_lossy().into_owned(),
-            project_dir: Some(project_dir.to_string_lossy().into_owned()),
-            added_dirs: vec![
+        input["workspace"],
+        serde_json::json!({
+            "current_dir": project_dir.to_string_lossy().into_owned(),
+            "project_dir": project_dir.to_string_lossy().into_owned(),
+            "added_dirs": [
                 shared_dir.to_string_lossy().into_owned(),
                 tools_dir.to_string_lossy().into_owned(),
             ],
-            repo: None,
-        }
+        })
     );
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn command_status_line_does_not_append_active_agent_label() {
-    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    install_command(
-        &mut chat,
-        vec![
-            "/bin/sh".to_string(),
-            "-c".to_string(),
-            "printf command-owned".to_string(),
-        ],
-    );
-    chat.set_active_agent_label(Some("Robie [explorer]".to_string()));
-
-    chat.refresh_status_line();
-    assert!(chat.apply_status_line_command_completion(next_completion(&mut rx).await));
-
-    let rendered = render_bottom_popup(&chat, /*width*/ 80);
-    assert!(rendered.contains("command-owned"));
-    assert!(!rendered.contains("Robie [explorer]"));
 }
 
 #[tokio::test]

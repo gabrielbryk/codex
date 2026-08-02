@@ -3099,40 +3099,19 @@ async fn status_line_fast_mode_footer_snapshot() {
     );
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn external_status_line_command_footer_snapshot() {
     use ratatui::Terminal;
 
-    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.show_welcome_banner = false;
     chat.config.tui_status_line_command = Some(codex_config::types::TuiStatusLineCommand {
-        command: vec![
-            "/bin/sh".to_string(),
-            "-c".to_string(),
-            "printf '\\033[35ms(m)\\033[0m\\nctx 42%%'".to_string(),
-        ],
+        command: vec!["formatter".to_string()],
         timeout_ms: 1_000,
     });
-    chat.status_line_command = Some(
-        crate::chatwidget::status_line_command::StatusLineCommandRuntime::new(
-            std::env::current_dir().ok(),
-        ),
-    );
-    chat.refresh_status_line();
-
-    let completion = tokio::time::timeout(std::time::Duration::from_secs(3), async {
-        loop {
-            match rx.recv().await {
-                Some(AppEvent::StatusLineCommandFinished(completion)) => break completion,
-                Some(_) => {}
-                None => panic!("app event channel closed"),
-            }
-        }
-    })
-    .await
-    .expect("status-line command completion");
-    assert!(chat.apply_status_line_command_completion(completion));
+    chat.set_status_lines(vec![Line::from("s(m)").magenta(), "ctx 42%".into()]);
+    chat.bottom_pane.set_status_line_enabled(/*enabled*/ true);
+    chat.set_active_agent_label(Some("Robie [explorer]".to_string()));
 
     let width = 80;
     let height = chat.desired_height(width);
