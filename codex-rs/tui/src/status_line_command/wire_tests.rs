@@ -6,7 +6,6 @@ use super::*;
 
 fn minimal_input() -> StatusLineCommandInput {
     StatusLineCommandInput {
-        schema_version: STATUS_LINE_COMMAND_SCHEMA_VERSION,
         cwd: "/remote/workspace".to_string(),
         session_id: Uuid::parse_str("11111111-2222-4333-8444-555555555555")
             .expect("valid UUID")
@@ -39,6 +38,7 @@ fn minimal_input() -> StatusLineCommandInput {
         extra_usage: None,
         pr: None,
         codex: StatusLineCommandCodex {
+            schema_version: STATUS_LINE_COMMAND_SCHEMA_VERSION,
             local_process_cwd: "/local/codex".to_string(),
             status: "working".to_string(),
             permissions: "workspace-write".to_string(),
@@ -46,6 +46,8 @@ fn minimal_input() -> StatusLineCommandInput {
             service_tier: "fast".to_string(),
             workspace_headline: None,
             task_progress: None,
+            git_branch: None,
+            branch_changes: None,
         },
     }
 }
@@ -58,7 +60,6 @@ fn minimal_contract_uses_null_only_for_declared_nullable_fields() {
     assert_eq!(
         actual,
         json!({
-            "schema_version": 1,
             "cwd": "/remote/workspace",
             "session_id": "11111111-2222-4333-8444-555555555555",
             "model": { "id": "gpt-5.6-terra", "display_name": "Terra" },
@@ -80,13 +81,16 @@ fn minimal_contract_uses_null_only_for_declared_nullable_fields() {
                 "current_usage": null
             },
             "codex": {
+                "schema_version": 1,
                 "local_process_cwd": "/local/codex",
                 "status": "working",
                 "permissions": "workspace-write",
                 "approval_mode": "on-request",
                 "service_tier": "fast",
                 "workspace_headline": null,
-                "task_progress": null
+                "task_progress": null,
+                "git_branch": null,
+                "branch_changes": null
             }
         })
     );
@@ -133,4 +137,99 @@ fn json_line_ends_with_one_newline() {
     let bytes = minimal_input().to_json_line().expect("serialize input");
     assert_eq!(bytes.last(), Some(&b'\n'));
     assert_eq!(bytes.iter().filter(|byte| **byte == b'\n').count(), 1);
+}
+
+#[test]
+fn fully_populated_exporter_fixture_is_stable() {
+    let mut input = minimal_input();
+    input.session_name = Some("Status work".to_string());
+    input.workspace.project_dir = Some("/remote".to_string());
+    input.workspace.added_dirs = vec!["/remote/shared".to_string()];
+    input.workspace.repo = Some(StatusLineCommandRepository {
+        host: "github.com".to_string(),
+        owner: "openai".to_string(),
+        name: "codex".to_string(),
+    });
+    input.effort = Some(StatusLineCommandEffort {
+        level: "high".to_string(),
+    });
+    input.thinking.enabled = true;
+    input.context_window.used_percentage = Some(25.0);
+    input.context_window.remaining_percentage = Some(75.0);
+    input.context_window.current_usage = Some(StatusLineCommandCurrentUsage {
+        input_tokens: 100,
+        output_tokens: 20,
+        cache_creation_input_tokens: 10,
+        cache_read_input_tokens: 5,
+    });
+    input.rate_limits = Some(StatusLineCommandRateLimits {
+        five_hour: Some(StatusLineCommandRateLimitWindow {
+            used_percentage: 10.0,
+            resets_at: 1_800_000_000,
+        }),
+        seven_day: Some(StatusLineCommandRateLimitWindow {
+            used_percentage: 20.0,
+            resets_at: 1_800_500_000,
+        }),
+    });
+    input.extra_usage = Some(StatusLineCommandExtraUsage {
+        enabled: true,
+        used: 2.5,
+        limit: 50.0,
+    });
+    input.pr = Some(StatusLineCommandPullRequest {
+        number: 42,
+        url: "https://github.com/openai/codex/pull/42".to_string(),
+        review_state: Some("approved".to_string()),
+    });
+    input.codex.workspace_headline = Some("Implementing status line".to_string());
+    input.codex.task_progress = Some(StatusLineCommandTaskProgress {
+        completed: 2,
+        total: 3,
+    });
+    input.codex.git_branch = Some("feature/status-line".to_string());
+    input.codex.branch_changes = Some(StatusLineCommandBranchChanges {
+        additions: 12,
+        deletions: 3,
+    });
+
+    let actual = serde_json::to_value(input).expect("serialize full fixture");
+    assert_eq!(actual["session_name"], "Status work");
+    assert_eq!(
+        actual["workspace"],
+        json!({
+            "current_dir": "/remote/workspace",
+            "project_dir": "/remote",
+            "added_dirs": ["/remote/shared"],
+            "repo": { "host": "github.com", "owner": "openai", "name": "codex" }
+        })
+    );
+    assert_eq!(
+        actual["context_window"]["current_usage"],
+        json!({
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "cache_creation_input_tokens": 10,
+            "cache_read_input_tokens": 5
+        })
+    );
+    assert_eq!(
+        actual["rate_limits"]["seven_day"]["resets_at"],
+        1_800_500_000_i64
+    );
+    assert_eq!(actual["pr"]["review_state"], "approved");
+    assert_eq!(actual["codex"]["schema_version"], 1);
+    assert_eq!(
+        actual["codex"]["workspace_headline"],
+        "Implementing status line"
+    );
+    assert_eq!(
+        actual["codex"]["task_progress"],
+        json!({ "completed": 2, "total": 3 })
+    );
+    assert_eq!(actual["codex"]["git_branch"], "feature/status-line");
+    assert_eq!(
+        actual["codex"]["branch_changes"],
+        json!({ "additions": 12, "deletions": 3 })
+    );
 }

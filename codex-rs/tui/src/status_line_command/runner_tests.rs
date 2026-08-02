@@ -6,7 +6,6 @@ use crate::status_line_command::wire::*;
 
 fn input() -> StatusLineCommandInput {
     StatusLineCommandInput {
-        schema_version: STATUS_LINE_COMMAND_SCHEMA_VERSION,
         cwd: "/remote".to_string(),
         session_id: StatusLineCommandSessionId::new(),
         session_name: None,
@@ -37,6 +36,7 @@ fn input() -> StatusLineCommandInput {
         extra_usage: None,
         pr: None,
         codex: StatusLineCommandCodex {
+            schema_version: STATUS_LINE_COMMAND_SCHEMA_VERSION,
             local_process_cwd: "/local".to_string(),
             status: "idle".to_string(),
             permissions: "read-only".to_string(),
@@ -44,6 +44,8 @@ fn input() -> StatusLineCommandInput {
             service_tier: "default".to_string(),
             workspace_headline: None,
             task_progress: None,
+            git_branch: None,
+            branch_changes: None,
         },
     }
 }
