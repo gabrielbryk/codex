@@ -2235,12 +2235,17 @@ impl App {
                     }
                 }
             }
-            AppEvent::StatusLineBranchUpdated { cwd, branch } => {
-                self.chat_widget.set_status_line_branch(cwd, branch);
+            AppEvent::StatusLineBranchUpdated { owner, cwd, branch } => {
+                self.chat_widget.set_status_line_branch(owner, cwd, branch);
                 self.refresh_status_line();
             }
-            AppEvent::StatusLineGitSummaryUpdated { cwd, summary } => {
-                self.chat_widget.set_status_line_git_summary(cwd, summary);
+            AppEvent::StatusLineGitSummaryUpdated {
+                owner,
+                cwd,
+                summary,
+            } => {
+                self.chat_widget
+                    .set_status_line_git_summary(owner, cwd, summary);
                 self.refresh_status_line();
             }
             AppEvent::StatusLineWorkspaceHeadlineUpdated { request_id, result } => {

@@ -561,10 +561,11 @@ impl ChatWidget {
             return;
         };
         self.status_line_branch_pending = true;
+        let owner = self.status_line_async_owner;
         let tx = self.app_event_tx.clone();
         tokio::spawn(async move {
             let branch = branch_summary::current_branch_name(runner.as_ref(), &cwd).await;
-            tx.send(AppEvent::StatusLineBranchUpdated { cwd, branch });
+            tx.send(AppEvent::StatusLineBranchUpdated { owner, cwd, branch });
         });
     }
 
@@ -577,10 +578,15 @@ impl ChatWidget {
             return;
         };
         self.status_line_git_summary_pending = true;
+        let owner = self.status_line_async_owner;
         let tx = self.app_event_tx.clone();
         tokio::spawn(async move {
             let summary = branch_summary::status_line_git_summary(runner.as_ref(), &cwd).await;
-            tx.send(AppEvent::StatusLineGitSummaryUpdated { cwd, summary });
+            tx.send(AppEvent::StatusLineGitSummaryUpdated {
+                owner,
+                cwd,
+                summary,
+            });
         });
     }
 

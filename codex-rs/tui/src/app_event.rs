@@ -1049,11 +1049,13 @@ pub(crate) enum AppEvent {
 
     /// Async update of the current git branch for status line rendering.
     StatusLineBranchUpdated {
+        owner: u64,
         cwd: PathBuf,
         branch: Option<String>,
     },
     /// Async update of Git summary fields for status line rendering.
     StatusLineGitSummaryUpdated {
+        owner: u64,
         cwd: PathBuf,
         summary: crate::chatwidget::StatusLineGitSummary,
     },
