@@ -4,6 +4,7 @@ use super::find_python;
 use super::wait_for_output_contains;
 use crate::TerminalSize;
 use crate::spawn_pipe_process_no_stdin;
+use crate::spawn_piped_process_tree;
 use crate::spawn_pty_process;
 use std::collections::HashMap;
 use std::path::Path;
@@ -71,15 +72,17 @@ async fn assert_terminate_kills_descendant(
         "import pathlib,time; print('{READY_MARKER}',flush=True); time.sleep(1); pathlib.Path(bytes.fromhex('{}').decode()).write_text('survived')",
         utf8_hex(&marker.to_string_lossy())
     );
-    // Exercise descendants created after the best-effort pipe assignment,
-    // without making the test depend on winning the intentionally accepted race.
     let code = format!(
-        "import subprocess,sys,time; time.sleep(0.5); code=bytes.fromhex('{}').decode(); subprocess.Popen([sys.executable,'-u','-c',code]); time.sleep(60)",
+        "import subprocess,sys,time; code=bytes.fromhex('{}').decode(); subprocess.Popen([sys.executable,'-u','-c',code]); time.sleep(60)",
         utf8_hex(&child_code)
     );
     let args = vec!["-u".to_string(), "-c".to_string(), code];
     let spawned = if backend == "pipe" {
-        spawn_pipe_process_no_stdin(python, &args, Path::new("."), env, /*arg0*/ &None, &[]).await?
+        let spawned =
+            spawn_piped_process_tree(python, &args, Path::new("."), env, /*arg0*/ &None, &[])
+                .await?;
+        spawned.session.close_stdin();
+        spawned
     } else {
         spawn_pty_process(
             python,
@@ -161,8 +164,7 @@ async fn assert_normal_exit_preserves_descendant(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn terminate_kills_descendants_for_best_effort_pipe_and_atomic_conpty() -> anyhow::Result<()>
-{
+async fn terminate_kills_descendants_for_atomic_pipe_and_conpty() -> anyhow::Result<()> {
     let Some(python) = find_python() else {
         eprintln!("python not found; skipping Windows process-tree termination test");
         return Ok(());
