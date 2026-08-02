@@ -703,10 +703,7 @@ pub struct TuiStatusLineCommand {
 
     /// Maximum command execution time in milliseconds.
     #[serde(default = "default_tui_status_line_command_timeout_ms")]
-    #[schemars(range(
-        min = MIN_TUI_STATUS_LINE_COMMAND_TIMEOUT_MS,
-        max = MAX_TUI_STATUS_LINE_COMMAND_TIMEOUT_MS
-    ))]
+    #[schemars(range(min = 250, max = 30_000))]
     pub timeout_ms: u64,
 }
 

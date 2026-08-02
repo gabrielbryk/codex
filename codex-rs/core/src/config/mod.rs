@@ -3135,16 +3135,25 @@ fn validate_tui_status_line_config(
     };
 
     if tui.status_line.is_some() && tui.status_line_command.is_some() {
-        let origins = config_layer_stack.origins();
         let source = |key: &str| {
-            origins.get(key).map(|metadata| {
-                format_config_layer_source(&metadata.name, codex_config::CONFIG_TOML_FILE)
-            })
+            config_layer_stack
+                .layers_high_to_low()
+                .into_iter()
+                .find(|layer| {
+                    layer
+                        .config
+                        .get("tui")
+                        .and_then(toml::Value::as_table)
+                        .is_some_and(|tui| tui.contains_key(key))
+                })
+                .map(|layer| {
+                    format_config_layer_source(&layer.name, codex_config::CONFIG_TOML_FILE)
+                })
         };
-        let status_line_source = source("tui.status_line")
+        let status_line_source = source("status_line")
             .map(|source| format!(" from {source}"))
             .unwrap_or_default();
-        let command_source = source("tui.status_line_command")
+        let command_source = source("status_line_command")
             .map(|source| format!(" from {source}"))
             .unwrap_or_default();
         return Err(std::io::Error::new(
