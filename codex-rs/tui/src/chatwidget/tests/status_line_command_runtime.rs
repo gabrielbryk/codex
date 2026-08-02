@@ -245,6 +245,7 @@ async fn same_cwd_thread_reset_rejects_old_dependency_results() {
     chat.set_status_line_branch(old_owner, cwd.clone(), Some("stale-branch".to_string()));
     chat.set_status_line_git_summary(old_owner, cwd, StatusLineGitSummary::default());
     assert!(!chat.set_status_line_workspace_headline(
+        old_owner,
         10,
         Ok(
             crate::workspace_messages::WorkspaceHeadlineFetchResult::Available(Some(
@@ -370,14 +371,22 @@ async fn formatter_stdin_reports_resumed_workspace_without_local_cwd_leak() {
     for path in [&local_formatter_cwd, &project_dir, &shared_dir, &tools_dir] {
         std::fs::create_dir_all(path).expect("workspace directory");
     }
+    let local_formatter_cwd =
+        dunce::canonicalize(local_formatter_cwd).expect("canonical local formatter cwd");
     let captured_input = temp.path().join("captured-input.json");
+    let captured_cwd = temp.path().join("captured-cwd.txt");
     #[cfg(unix)]
     let command = vec![
         "/bin/sh".to_string(),
         "-c".to_string(),
-        "IFS= read -r input; printf '%s\\n' \"$input\" > \"$1\"; printf ok".to_string(),
+        concat!(
+            "IFS= read -r input; printf '%s\\n' \"$input\" > \"$1\"; ",
+            "pwd > \"$2\"; printf ok"
+        )
+        .to_string(),
         "status-line-test".to_string(),
         captured_input.to_string_lossy().into_owned(),
+        captured_cwd.to_string_lossy().into_owned(),
     ];
     #[cfg(windows)]
     let command = vec![
@@ -387,12 +396,16 @@ async fn formatter_stdin_reports_resumed_workspace_without_local_cwd_leak() {
         "-NonInteractive".to_string(),
         "-Command".to_string(),
         concat!(
-            "$input = [Console]::In.ReadToEnd(); ",
-            "[IO.File]::WriteAllText($args[0], $input, [Text.UTF8Encoding]::new($false)); ",
-            "[Console]::Out.Write('ok')"
+            "& { param($captured_input, $captured_cwd) ",
+            "$input_json = [Console]::In.ReadToEnd(); ",
+            "$utf8 = [Text.UTF8Encoding]::new($false); ",
+            "[IO.File]::WriteAllText($captured_input, $input_json, $utf8); ",
+            "[IO.File]::WriteAllText($captured_cwd, (Get-Location).Path, $utf8); ",
+            "[Console]::Out.Write('ok') }"
         )
         .to_string(),
         captured_input.to_string_lossy().into_owned(),
+        captured_cwd.to_string_lossy().into_owned(),
     ];
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     install_command(&mut chat, command);
@@ -412,6 +425,7 @@ async fn formatter_stdin_reports_resumed_workspace_without_local_cwd_leak() {
 
     let stdin = std::fs::read(captured_input).expect("captured formatter stdin");
     let input: serde_json::Value = serde_json::from_slice(&stdin).expect("formatter stdin JSON");
+    assert_eq!(input["cwd"], project_dir.to_string_lossy().into_owned());
     assert_eq!(
         input["workspace"],
         serde_json::json!({
@@ -430,6 +444,12 @@ async fn formatter_stdin_reports_resumed_workspace_without_local_cwd_leak() {
     assert_ne!(
         input["workspace"]["current_dir"],
         input["codex"]["local_process_cwd"]
+    );
+    let actual_formatter_cwd =
+        std::fs::read_to_string(captured_cwd).expect("captured formatter cwd");
+    assert_eq!(
+        dunce::canonicalize(actual_formatter_cwd.trim_end()).expect("canonical formatter cwd"),
+        local_formatter_cwd
     );
 }
 
