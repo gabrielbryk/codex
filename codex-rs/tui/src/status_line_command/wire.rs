@@ -7,6 +7,8 @@
 
 use serde::Serialize;
 use serde::ser::Error as _;
+use std::io;
+use std::io::Write;
 use uuid::Uuid;
 
 /// Current formatter input schema version.
@@ -62,14 +64,52 @@ pub(crate) struct StatusLineCommandInput {
 impl StatusLineCommandInput {
     /// Serialize one JSON object followed by a newline, ready for command stdin.
     pub(crate) fn to_json_line(&self) -> Result<Vec<u8>, serde_json::Error> {
-        let mut bytes = serde_json::to_vec(self)?;
-        if bytes.len().saturating_add(/*rhs*/ 1) > MAX_STATUS_LINE_COMMAND_INPUT_BYTES {
+        let mut writer =
+            BoundedJsonWriter::new(MAX_STATUS_LINE_COMMAND_INPUT_BYTES.saturating_sub(/*rhs*/ 1));
+        let result = serde_json::to_writer(&mut writer, self);
+        if writer.limit_exceeded {
             return Err(serde_json::Error::custom(format!(
                 "status-line command input exceeds {MAX_STATUS_LINE_COMMAND_INPUT_BYTES} bytes"
             )));
         }
+        result?;
+
+        let mut bytes = writer.bytes;
         bytes.push(b'\n');
         Ok(bytes)
+    }
+}
+
+/// A JSON sink whose retained allocation cannot grow beyond `max_bytes`.
+struct BoundedJsonWriter {
+    bytes: Vec<u8>,
+    max_bytes: usize,
+    limit_exceeded: bool,
+}
+
+impl BoundedJsonWriter {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            max_bytes,
+            limit_exceeded: false,
+        }
+    }
+}
+
+impl Write for BoundedJsonWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if buf.len() > self.max_bytes.saturating_sub(self.bytes.len()) {
+            self.limit_exceeded = true;
+            return Err(io::Error::other("status-line command input exceeds limit"));
+        }
+
+        self.bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 

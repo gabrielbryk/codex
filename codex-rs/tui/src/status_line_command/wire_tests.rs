@@ -160,10 +160,25 @@ fn json_line_ends_with_one_newline() {
 #[test]
 fn json_line_rejects_payloads_over_the_input_limit() {
     let mut input = minimal_input();
-    input.session_name = Some("x".repeat(MAX_STATUS_LINE_COMMAND_INPUT_BYTES));
+    input.session_name = Some("x".repeat(MAX_STATUS_LINE_COMMAND_INPUT_BYTES * 4));
 
     let err = input.to_json_line().expect_err("oversized input");
-    assert!(err.to_string().contains("input exceeds 65536 bytes"));
+    assert_eq!(
+        err.to_string(),
+        "status-line command input exceeds 65536 bytes"
+    );
+}
+
+#[test]
+fn json_line_writer_does_not_retain_bytes_beyond_its_limit() {
+    let max_bytes = 128;
+    let mut writer = BoundedJsonWriter::new(max_bytes);
+    let oversized_value = "x".repeat(MAX_STATUS_LINE_COMMAND_INPUT_BYTES * 4);
+
+    serde_json::to_writer(&mut writer, &oversized_value).expect_err("oversized input");
+
+    assert!(writer.limit_exceeded);
+    assert!(writer.bytes.len() <= max_bytes);
 }
 
 #[test]
