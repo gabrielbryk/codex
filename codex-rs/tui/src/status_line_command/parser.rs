@@ -10,6 +10,7 @@ use ratatui::style::Style;
 use ratatui::text::Span;
 use thiserror::Error;
 use unicode_width::UnicodeWidthChar;
+use unicode_width::UnicodeWidthStr;
 use url::Url;
 
 use crate::terminal_hyperlinks::HyperlinkLine;
@@ -75,7 +76,7 @@ struct Parser<'a> {
     offset: usize,
     style: Style,
     hyperlink: Option<String>,
-    hyperlink_label_cells: usize,
+    hyperlink_label: String,
     lines: Vec<HyperlinkLine>,
     current_line: HyperlinkLine,
     current_text: String,
@@ -92,7 +93,7 @@ impl<'a> Parser<'a> {
             offset: 0,
             style: Style::default(),
             hyperlink: None,
-            hyperlink_label_cells: 0,
+            hyperlink_label: String::new(),
             lines: Vec::new(),
             current_line: HyperlinkLine::default(),
             current_text: String::new(),
@@ -155,8 +156,8 @@ impl<'a> Parser<'a> {
 
         let width = UnicodeWidthChar::width(ch).unwrap_or(0);
         if self.hyperlink.is_some() {
-            self.hyperlink_label_cells = self.hyperlink_label_cells.saturating_add(width);
-            if self.hyperlink_label_cells > MAX_HYPERLINK_LABEL_CELLS {
+            self.hyperlink_label.push(ch);
+            if UnicodeWidthStr::width(self.hyperlink_label.as_str()) > MAX_HYPERLINK_LABEL_CELLS {
                 return Err(StatusLineCommandParseError::HyperlinkLabelTooLong);
             }
         }
@@ -247,7 +248,7 @@ impl<'a> Parser<'a> {
             if self.hyperlink.take().is_none() {
                 return Err(StatusLineCommandParseError::MalformedHyperlink);
             }
-            self.hyperlink_label_cells = 0;
+            self.hyperlink_label.clear();
         } else {
             if self.hyperlink.is_some() {
                 return Err(StatusLineCommandParseError::MalformedHyperlink);
@@ -266,7 +267,7 @@ impl<'a> Parser<'a> {
                 return Err(StatusLineCommandParseError::UnsafeHyperlink);
             }
             self.hyperlink = Some(url.to_string());
-            self.hyperlink_label_cells = 0;
+            self.hyperlink_label.clear();
         }
         self.offset = payload_end + terminator_len;
         Ok(())

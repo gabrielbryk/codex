@@ -44,11 +44,8 @@ pub(crate) struct StatusLineCommandInvocation {
 pub(crate) enum StatusLineCommandFailureKind {
     Spawn,
     Stdin,
-    Stdout,
-    Stderr,
     ExitStatus,
     Timeout,
-    Cancelled,
     OutputLimit,
     Parse,
 }
@@ -98,10 +95,6 @@ impl StatusLineCommandLifecycle {
             latest_generation: StatusLineCommandGeneration(0),
             last_good: None,
         }
-    }
-
-    pub(crate) fn owner_id(&self) -> &StatusLineCommandOwnerId {
-        &self.owner_id
     }
 
     pub(crate) fn session_id(&self) -> &StatusLineCommandSessionId {

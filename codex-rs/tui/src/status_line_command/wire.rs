@@ -20,10 +20,6 @@ impl StatusLineCommandSessionId {
     pub(crate) fn new() -> Self {
         Self(Uuid::new_v4().to_string())
     }
-
-    pub(crate) fn as_str(&self) -> &str {
-        &self.0
-    }
 }
 
 impl From<Uuid> for StatusLineCommandSessionId {
@@ -34,8 +30,6 @@ impl From<Uuid> for StatusLineCommandSessionId {
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub(crate) struct StatusLineCommandInput {
-    /// Codex-owned schema version. Claude-compatible aliases remain top-level.
-    pub(crate) schema_version: u8,
     /// Session workspace, which may be on a remote app-server host.
     pub(crate) cwd: String,
     pub(crate) session_id: StatusLineCommandSessionId,
@@ -152,6 +146,8 @@ pub(crate) struct StatusLineCommandPullRequest {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct StatusLineCommandCodex {
+    /// Codex-owned input schema version. Compatibility aliases remain top-level.
+    pub(crate) schema_version: u8,
     /// Working directory of the local TUI process that launches the formatter.
     pub(crate) local_process_cwd: String,
     pub(crate) status: String,
@@ -160,12 +156,20 @@ pub(crate) struct StatusLineCommandCodex {
     pub(crate) service_tier: String,
     pub(crate) workspace_headline: Option<String>,
     pub(crate) task_progress: Option<StatusLineCommandTaskProgress>,
+    pub(crate) git_branch: Option<String>,
+    pub(crate) branch_changes: Option<StatusLineCommandBranchChanges>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct StatusLineCommandTaskProgress {
     pub(crate) completed: u64,
     pub(crate) total: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct StatusLineCommandBranchChanges {
+    pub(crate) additions: u64,
+    pub(crate) deletions: u64,
 }
 
 #[cfg(test)]

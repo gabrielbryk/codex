@@ -121,3 +121,11 @@ fn rejects_hyperlink_labels_over_cell_limit() {
         Err(StatusLineCommandParseError::HyperlinkLabelTooLong)
     );
 }
+
+#[test]
+fn hyperlink_label_limit_uses_grapheme_aware_terminal_width() {
+    let label = "👩\u{200d}💻".repeat(MAX_HYPERLINK_LABEL_CELLS / 2);
+    let output = format!("\x1b]8;;https://example.com\x07{label}\x1b]8;;\x07");
+    let parsed = parse_status_line_command_output(output.as_bytes()).expect("512-cell label");
+    assert_eq!(parsed.lines[0].line.to_string(), label);
+}
