@@ -3,6 +3,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::style::Stylize;
 use ratatui::text::Line;
 
 use super::ChatComposer;
@@ -83,8 +84,10 @@ fn status_line_semantic_hyperlinks_reach_the_terminal_buffer() {
         .count();
     assert_eq!(linked_cells, "details".len());
 
+    let legacy_destination = "https://example.com/pull/42";
+    composer.set_status_line_hyperlink(Some(legacy_destination.to_string()));
     composer.footer.show_flash(
-        Line::from("temporary notice"),
+        Line::from("temporary notice".underlined()),
         std::time::Duration::from_secs(60),
     );
     buffer = Buffer::empty(area);
@@ -94,6 +97,14 @@ fn status_line_semantic_hyperlinks_reach_the_terminal_buffer() {
             .content()
             .iter()
             .filter(|cell| cell.symbol().contains(destination))
+            .count(),
+        0
+    );
+    assert_eq!(
+        buffer
+            .content()
+            .iter()
+            .filter(|cell| cell.symbol().contains(legacy_destination))
             .count(),
         0
     );

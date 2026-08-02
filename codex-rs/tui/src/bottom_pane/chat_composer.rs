@@ -4760,7 +4760,7 @@ impl ChatComposer {
                         );
                         mark_buffer_hyperlinks(buf, hint_rect, &lines, /*scroll_rows*/ 0);
                     }
-                    if status_line_active
+                    if transition_visible
                         && let Some(url) = self.footer.status_line_hyperlink_url.as_deref()
                     {
                         mark_underlined_hyperlink(buf, hint_rect, url);

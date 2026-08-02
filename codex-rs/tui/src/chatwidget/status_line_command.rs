@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use tokio::task::AbortHandle;
 
 use super::ChatWidget;
+use super::next_status_line_async_owner;
 use super::status_surfaces::approval_mode_display;
 use super::status_surfaces::five_hour_status_window;
 use super::status_surfaces::permissions_display;
@@ -16,6 +17,7 @@ use crate::status_line_command::runner::StatusLineCommandApplyResult;
 use crate::status_line_command::runner::StatusLineCommandCompletion;
 use crate::status_line_command::runner::StatusLineCommandLifecycle;
 use crate::status_line_command::runner::StatusLineCommandOutcome;
+use crate::status_line_command::wire::MAX_STATUS_LINE_WORKSPACE_HEADLINE_BYTES;
 use crate::status_line_command::wire::STATUS_LINE_COMMAND_SCHEMA_VERSION;
 use crate::status_line_command::wire::StatusLineCommandBranchChanges;
 use crate::status_line_command::wire::StatusLineCommandCodex;
@@ -82,7 +84,7 @@ impl ChatWidget {
         };
         let local_cwd = runtime.local_cwd.clone();
         *runtime = StatusLineCommandRuntime::new(local_cwd);
-        self.status_line_async_owner = self.status_line_async_owner.wrapping_add(/*rhs*/ 1);
+        self.status_line_async_owner = next_status_line_async_owner();
         self.status_line_branch = None;
         self.status_line_branch_cwd = None;
         self.status_line_branch_pending = false;
@@ -309,11 +311,22 @@ impl ChatWidget {
                 permissions: permissions_display(&self.config),
                 approval_mode: approval_mode_display(&self.config),
                 service_tier: self.current_service_tier().unwrap_or("default").to_string(),
-                workspace_headline: self.status_line_workspace_headline.clone(),
+                workspace_headline: self
+                    .status_line_workspace_headline
+                    .as_deref()
+                    .map(bounded_workspace_headline),
                 task_progress: None,
                 git_branch: self.status_line_branch.clone(),
                 branch_changes,
             },
         })
     }
+}
+
+fn bounded_workspace_headline(headline: &str) -> String {
+    let mut end = headline.len().min(MAX_STATUS_LINE_WORKSPACE_HEADLINE_BYTES);
+    while !headline.is_char_boundary(end) {
+        end = end.saturating_sub(/*rhs*/ 1);
+    }
+    headline[..end].to_string()
 }

@@ -153,6 +153,15 @@ fn json_line_ends_with_one_newline() {
 }
 
 #[test]
+fn json_line_rejects_payloads_over_the_input_limit() {
+    let mut input = minimal_input();
+    input.session_name = Some("x".repeat(MAX_STATUS_LINE_COMMAND_INPUT_BYTES));
+
+    let err = input.to_json_line().expect_err("oversized input");
+    assert!(err.to_string().contains("input exceeds 65536 bytes"));
+}
+
+#[test]
 fn fully_populated_exporter_fixture_is_stable() {
     let mut input = minimal_input();
     input.session_name = Some("Status work".to_string());
