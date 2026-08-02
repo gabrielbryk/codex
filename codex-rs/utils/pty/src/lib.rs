@@ -11,12 +11,14 @@ mod windows_input;
 
 pub const DEFAULT_OUTPUT_BYTES_CAP: usize = 1024 * 1024;
 
+/// Spawn a piped process with the strongest cleanup each platform offers:
+/// Job Object whole-tree termination on Windows, best-effort process-group
+/// termination on Unix.
+pub use pipe::spawn_contained_process as spawn_piped_contained_process;
 /// Spawn a non-interactive process using regular pipes for stdin/stdout/stderr.
 pub use pipe::spawn_process as spawn_pipe_process;
 /// Spawn a non-interactive process using regular pipes, but close stdin immediately.
 pub use pipe::spawn_process_no_stdin as spawn_pipe_process_no_stdin;
-/// Spawn a piped process with guaranteed whole-tree termination support.
-pub use pipe::spawn_process_tree as spawn_piped_process_tree;
 /// Driver-backed process adapter used by integrations with their own process transport.
 pub use process::ProcessDriver;
 /// Handle for interacting with a spawned process (PTY or pipe).

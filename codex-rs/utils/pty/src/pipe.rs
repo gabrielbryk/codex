@@ -116,7 +116,7 @@ where
 enum PipeSpawnMode {
     Piped,
     NullStdin,
-    ContainedProcessTree,
+    Contained,
 }
 
 async fn spawn_process_with_stdin_mode(
@@ -165,7 +165,7 @@ async fn spawn_process_with_stdin_mode(
         command.arg(arg);
     }
     match spawn_mode {
-        PipeSpawnMode::Piped | PipeSpawnMode::ContainedProcessTree => {
+        PipeSpawnMode::Piped | PipeSpawnMode::Contained => {
             command.stdin(Stdio::piped());
         }
         PipeSpawnMode::NullStdin => {
@@ -177,14 +177,14 @@ async fn spawn_process_with_stdin_mode(
 
     #[cfg(windows)]
     let job = match match spawn_mode {
-        PipeSpawnMode::ContainedProcessTree => crate::win::JobObject::create_contained(),
+        PipeSpawnMode::Contained => crate::win::JobObject::create_contained(),
         PipeSpawnMode::Piped | PipeSpawnMode::NullStdin => crate::win::JobObject::create(),
     }
     .map(Arc::new)
     {
         Ok(job) => Some(job),
         Err(err) => match spawn_mode {
-            PipeSpawnMode::ContainedProcessTree => return Err(err.into()),
+            PipeSpawnMode::Contained => return Err(err.into()),
             PipeSpawnMode::Piped | PipeSpawnMode::NullStdin => {
                 log::warn!("Windows pipe process tree containment unavailable: {err}");
                 None
@@ -192,7 +192,7 @@ async fn spawn_process_with_stdin_mode(
         },
     };
     #[cfg(windows)]
-    let suspended_spawn = matches!(spawn_mode, PipeSpawnMode::ContainedProcessTree);
+    let suspended_spawn = matches!(spawn_mode, PipeSpawnMode::Contained);
     #[cfg(windows)]
     if job.is_some() && suspended_spawn {
         crate::win::configure_suspended_spawn(&mut command);
@@ -309,7 +309,7 @@ async fn spawn_process_with_stdin_mode(
         (WindowsChildTerminator::Job(job), PipeSpawnMode::Piped | PipeSpawnMode::NullStdin) => {
             Some(Arc::clone(job))
         }
-        (WindowsChildTerminator::Job(_), PipeSpawnMode::ContainedProcessTree)
+        (WindowsChildTerminator::Job(_), PipeSpawnMode::Contained)
         | (WindowsChildTerminator::Process(_), _) => None,
     };
     let wait_handle: JoinHandle<()> = tokio::spawn(async move {
@@ -404,16 +404,23 @@ pub async fn spawn_process_no_stdin(
     .await
 }
 
-/// Spawn a non-interactive process whose entire process tree can be terminated
-/// through the returned [`ProcessHandle`].
+/// Spawn a non-interactive process contained as tightly as the platform allows,
+/// terminable through the returned [`ProcessHandle`].
 ///
-/// Unlike [`spawn_process`], this function fails rather than falling back to
-/// root-process-only termination when Windows Job Object containment cannot be
-/// established. The Windows child is created suspended, assigned to the job,
-/// and only then resumed, so descendants cannot escape during spawn.
-/// Descendants remain owned by the returned session after the root exits and
-/// are terminated when that session is terminated or dropped.
-pub async fn spawn_process_tree(
+/// Containment strength is platform-specific and is *not* uniform:
+///
+/// - **Windows**: the child is created suspended, assigned to a Job Object that
+///   forbids breakaway, and only then resumed, so no descendant can escape
+///   during spawn. Termination kills the whole tree. Unlike [`spawn_process`],
+///   this function fails rather than falling back to root-process-only
+///   termination when Job Object containment cannot be established. Descendants
+///   remain owned by the returned session after the root exits and are
+///   terminated when that session is terminated or dropped.
+/// - **Unix**: the child leads its own process group and termination signals
+///   that group. This is **best-effort**: a descendant that calls `setsid()` (or
+///   otherwise leaves the group) escapes cleanup. Daemonizing children are not
+///   supported by this API.
+pub async fn spawn_contained_process(
     program: &str,
     args: &[String],
     cwd: &Path,
@@ -428,7 +435,7 @@ pub async fn spawn_process_tree(
         env,
         arg0,
         inherited_fds,
-        PipeSpawnMode::ContainedProcessTree,
+        PipeSpawnMode::Contained,
     )
     .await
 }
