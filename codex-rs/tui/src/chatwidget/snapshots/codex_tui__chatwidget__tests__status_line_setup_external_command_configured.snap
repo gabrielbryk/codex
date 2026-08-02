@@ -1,0 +1,5 @@
+---
+source: tui/src/chatwidget/tests/status_surface_previews.rs
+expression: "lines_to_single_string(&cells[0])"
+---
+• An external status line command is configured. Remove `tui.status_line_command` from config.toml to edit built-in status line items.

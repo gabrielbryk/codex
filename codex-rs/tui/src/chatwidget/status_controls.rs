@@ -294,6 +294,15 @@ impl ChatWidget {
     }
 
     pub(super) fn open_status_line_setup(&mut self) {
+        if self.config.tui_status_line_command.is_some() {
+            self.add_info_message(
+                "An external status line command is configured. Remove `tui.status_line_command` from config.toml to edit built-in status line items."
+                    .to_string(),
+                /*hint*/ None,
+            );
+            return;
+        }
+
         let configured_status_line_items = self.configured_status_line_items();
         let view = StatusLineSetupView::new(
             Some(configured_status_line_items.as_slice()),

@@ -2230,26 +2230,37 @@ impl App {
                 items,
                 use_theme_colors,
             } => {
-                let ids = items.iter().map(ToString::to_string).collect::<Vec<_>>();
-                let items_edit = crate::legacy_core::config::edit::status_line_items_edit(&ids);
-                let colors_edit =
-                    crate::legacy_core::config::edit::status_line_use_colors_edit(use_theme_colors);
-                let apply_result = ConfigEditsBuilder::for_config(&self.config)
-                    .with_edits([items_edit, colors_edit])
-                    .apply()
-                    .await;
-                match apply_result {
-                    Ok(()) => {
-                        self.config.tui_status_line = Some(ids.clone());
-                        self.config.tui_status_line_use_colors = use_theme_colors;
-                        self.chat_widget.setup_status_line(items, use_theme_colors);
-                    }
-                    Err(err) => {
-                        let error = format_config_error(&err);
-                        tracing::error!(error = %error, "failed to persist status line settings; keeping previous selection");
-                        self.chat_widget.add_error_message(format!(
-                            "Failed to save status line settings: {error}"
-                        ));
+                if self.config.tui_status_line_command.is_some() {
+                    tracing::warn!(
+                        "refusing to persist built-in status line settings while an external status line command is configured"
+                    );
+                    self.chat_widget.add_error_message(
+                        "Built-in status line settings were not saved because `tui.status_line_command` is configured."
+                            .to_string(),
+                    );
+                } else {
+                    let ids = items.iter().map(ToString::to_string).collect::<Vec<_>>();
+                    let items_edit = crate::legacy_core::config::edit::status_line_items_edit(&ids);
+                    let colors_edit = crate::legacy_core::config::edit::status_line_use_colors_edit(
+                        use_theme_colors,
+                    );
+                    let apply_result = ConfigEditsBuilder::for_config(&self.config)
+                        .with_edits([items_edit, colors_edit])
+                        .apply()
+                        .await;
+                    match apply_result {
+                        Ok(()) => {
+                            self.config.tui_status_line = Some(ids.clone());
+                            self.config.tui_status_line_use_colors = use_theme_colors;
+                            self.chat_widget.setup_status_line(items, use_theme_colors);
+                        }
+                        Err(err) => {
+                            let error = format_config_error(&err);
+                            tracing::error!(error = %error, "failed to persist status line settings; keeping previous selection");
+                            self.chat_widget.add_error_message(format!(
+                                "Failed to save status line settings: {error}"
+                            ));
+                        }
                     }
                 }
             }
