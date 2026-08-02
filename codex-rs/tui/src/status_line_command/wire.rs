@@ -141,6 +141,7 @@ pub(crate) struct StatusLineCommandExtraUsage {
 pub(crate) struct StatusLineCommandPullRequest {
     pub(crate) number: u64,
     pub(crate) url: String,
+    /// Always serialized; `null` means the review state is unavailable in schema version 1.
     pub(crate) review_state: Option<String>,
 }
 

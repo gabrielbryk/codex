@@ -133,6 +133,19 @@ fn optional_usage_objects_and_raw_reset_epochs_are_preserved() {
 }
 
 #[test]
+fn unavailable_pr_review_state_is_explicitly_null() {
+    let mut input = minimal_input();
+    input.pr = Some(StatusLineCommandPullRequest {
+        number: 42,
+        url: "https://github.com/openai/codex/pull/42".to_string(),
+        review_state: None,
+    });
+
+    let actual = serde_json::to_value(input).expect("serialize input");
+    assert_eq!(actual["pr"]["review_state"], serde_json::Value::Null);
+}
+
+#[test]
 fn json_line_ends_with_one_newline() {
     let bytes = minimal_input().to_json_line().expect("serialize input");
     assert_eq!(bytes.last(), Some(&b'\n'));

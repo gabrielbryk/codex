@@ -157,6 +157,7 @@ async fn token_usage_update_uses_runtime_context_window() {
 async fn status_line_git_summary_items_render_values() {
     let (mut chat, _rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.status_line_git_summary = Some(StatusLineGitSummary {
+        repository: None,
         pull_request: Some(crate::branch_summary::StatusLinePullRequest {
             number: 20_252,
             url: "https://github.com/openai/codex/pull/20252".to_string(),
@@ -198,6 +199,7 @@ async fn raw_output_status_line_value_only_shows_when_enabled() {
 async fn status_line_branch_changes_render_no_changes() {
     let (mut chat, _rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.status_line_git_summary = Some(StatusLineGitSummary {
+        repository: None,
         pull_request: None,
         branch_change_stats: Some(crate::branch_summary::GitBranchDiffStats {
             additions: 0,
@@ -221,6 +223,7 @@ async fn stale_status_line_git_summary_update_is_ignored() {
         chat.status_line_async_owner,
         PathBuf::from("/other"),
         StatusLineGitSummary {
+            repository: None,
             pull_request: Some(crate::branch_summary::StatusLinePullRequest {
                 number: 20_252,
                 url: "https://github.com/openai/codex/pull/20252".to_string(),
