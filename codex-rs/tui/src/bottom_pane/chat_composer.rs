@@ -3726,6 +3726,9 @@ impl ChatComposer {
     }
 
     fn custom_footer_height(&self) -> Option<u16> {
+        if self.footer.plan_mode_nudge_visible {
+            return Some(1);
+        }
         if self.footer.flash_visible() {
             return Some(1);
         }
