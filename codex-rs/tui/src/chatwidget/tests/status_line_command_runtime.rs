@@ -13,6 +13,31 @@ fn install_command(chat: &mut ChatWidget, command: Vec<String>) {
     chat.status_line_command = Some(StatusLineCommandRuntime::new(std::env::current_dir().ok()));
 }
 
+fn switched_thread_session(cwd: AbsolutePathBuf) -> crate::session_state::ThreadSessionState {
+    crate::session_state::ThreadSessionState {
+        thread_id: ThreadId::new(),
+        forked_from_id: None,
+        fork_parent_title: None,
+        thread_name: None,
+        model: "gpt-5.6-sol".to_string(),
+        model_provider_id: "openai".to_string(),
+        service_tier: None,
+        approval_policy: codex_app_server_protocol::AskForApproval::Never,
+        approvals_reviewer: ApprovalsReviewer::User,
+        permission_profile: PermissionProfile::read_only(),
+        active_permission_profile: None,
+        runtime_workspace_roots: vec![cwd.clone()],
+        cwd,
+        instruction_source_paths: Vec::new(),
+        reasoning_effort: None,
+        collaboration_mode: None,
+        personality: None,
+        message_history: None,
+        network_proxy: None,
+        rollout_path: None,
+    }
+}
+
 async fn next_completion(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
 ) -> StatusLineCommandCompletion {
@@ -97,31 +122,57 @@ async fn thread_reset_clears_last_good_and_session_identity() {
 #[tokio::test]
 async fn thread_reset_during_debounce_prevents_formatter_spawn() {
     let temp = tempfile::tempdir().expect("temp dir");
-    let sentinel = temp.path().join("formatter-spawned");
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let old_cwd = temp.path().join("old-thread");
+    let new_cwd = temp.path().join("new-thread");
+    std::fs::create_dir_all(&old_cwd).expect("old cwd");
+    std::fs::create_dir_all(&new_cwd).expect("new cwd");
+    let old_cwd = old_cwd.abs();
+    let new_cwd = new_cwd.abs();
+    let sentinel = temp.path().join("old-formatter-spawned");
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     install_command(
         &mut chat,
         vec![
             "/bin/sh".to_string(),
             "-c".to_string(),
-            "printf spawned > \"$1\"; printf stale".to_string(),
+            concat!(
+                "IFS= read -r input; ",
+                "if printf '%s' \"$input\" | grep -F \"\\\"cwd\\\":\\\"$1\\\"\" >/dev/null; then ",
+                "printf spawned > \"$3\"; printf old-thread; ",
+                "elif printf '%s' \"$input\" | grep -F \"\\\"cwd\\\":\\\"$2\\\"\" >/dev/null; then ",
+                "printf new-thread; else exit 9; fi"
+            )
+            .to_string(),
             "status-line-test".to_string(),
+            old_cwd.to_string_lossy().into_owned(),
+            new_cwd.to_string_lossy().into_owned(),
             sentinel.to_string_lossy().into_owned(),
         ],
     );
+    chat.thread_id = Some(ThreadId::new());
+    chat.current_cwd = Some(old_cwd.to_path_buf());
+    chat.config.cwd = old_cwd.clone();
+    chat.config.workspace_roots = vec![old_cwd];
 
     chat.refresh_status_line();
-    chat.reset_status_line_command_for_thread();
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    chat.handle_thread_session(switched_thread_session(new_cwd));
+    let completion = next_completion(&mut rx).await;
 
     assert!(!sentinel.exists(), "formatter spawned after thread reset");
-    assert_eq!(status_line_text(&chat), None);
+    assert!(chat.apply_status_line_command_completion(completion));
+    assert_eq!(status_line_text(&chat), Some("new-thread".to_string()));
 }
 
 #[cfg(unix)]
 #[tokio::test]
 async fn stale_completion_does_not_detach_newer_process_from_cancellation() {
     let temp = tempfile::tempdir().expect("temp dir");
+    let old_cwd = temp.path().join("old-thread");
+    let new_cwd = temp.path().join("new-thread");
+    std::fs::create_dir_all(&old_cwd).expect("old cwd");
+    std::fs::create_dir_all(&new_cwd).expect("new cwd");
+    let old_cwd = old_cwd.abs();
+    let new_cwd = new_cwd.abs();
     let sentinel = temp.path().join("newer-completed");
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     install_command(
@@ -131,16 +182,23 @@ async fn stale_completion_does_not_detach_newer_process_from_cancellation() {
             "-c".to_string(),
             concat!(
                 "IFS= read -r input; ",
-                "case \"$input\" in ",
-                "*'\"status\":\"working\"'*) ",
-                "sleep 1; printf done > \"$1\"; printf newer ;; ",
-                "*) printf older ;; esac"
+                "if printf '%s' \"$input\" | grep -F \"\\\"cwd\\\":\\\"$2\\\"\" >/dev/null; then ",
+                "printf new-thread; ",
+                "elif printf '%s' \"$input\" | grep -F '\"status\":\"working\"' >/dev/null; then ",
+                "sleep 1; printf done > \"$3\"; printf newer; ",
+                "else printf older; fi"
             )
             .to_string(),
             "status-line-test".to_string(),
+            old_cwd.to_string_lossy().into_owned(),
+            new_cwd.to_string_lossy().into_owned(),
             sentinel.to_string_lossy().into_owned(),
         ],
     );
+    chat.thread_id = Some(ThreadId::new());
+    chat.current_cwd = Some(old_cwd.to_path_buf());
+    chat.config.cwd = old_cwd.clone();
+    chat.config.workspace_roots = vec![old_cwd];
     chat.status_state.terminal_title_status_kind = TerminalTitleStatusKind::Working;
     chat.refresh_status_line();
     let older = next_completion(&mut rx).await;
@@ -149,10 +207,13 @@ async fn stale_completion_does_not_detach_newer_process_from_cancellation() {
     chat.set_status_header("Working".to_string());
     tokio::time::sleep(std::time::Duration::from_millis(450)).await;
     assert!(!chat.apply_status_line_command_completion(older));
-    chat.reset_status_line_command_for_thread();
+    chat.handle_thread_session(switched_thread_session(new_cwd));
+    let new_thread = next_completion(&mut rx).await;
+    assert!(chat.apply_status_line_command_completion(new_thread));
     tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
 
     assert!(!sentinel.exists());
+    assert_eq!(status_line_text(&chat), Some("new-thread".to_string()));
 }
 
 #[tokio::test]
