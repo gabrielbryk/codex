@@ -95,6 +95,31 @@ async fn thread_reset_clears_last_good_and_session_identity() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn thread_reset_during_debounce_prevents_formatter_spawn() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let sentinel = temp.path().join("formatter-spawned");
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    install_command(
+        &mut chat,
+        vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "printf spawned > \"$1\"; printf stale".to_string(),
+            "status-line-test".to_string(),
+            sentinel.to_string_lossy().into_owned(),
+        ],
+    );
+
+    chat.refresh_status_line();
+    chat.reset_status_line_command_for_thread();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    assert!(!sentinel.exists(), "formatter spawned after thread reset");
+    assert_eq!(status_line_text(&chat), None);
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn stale_completion_does_not_detach_newer_process_from_cancellation() {
     let temp = tempfile::tempdir().expect("temp dir");
     let sentinel = temp.path().join("newer-completed");
