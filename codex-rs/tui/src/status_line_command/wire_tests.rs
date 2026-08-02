@@ -1,8 +1,13 @@
 use pretty_assertions::assert_eq;
+use ratatui::style::Color;
+use ratatui::style::Modifier;
 use serde_json::json;
 use uuid::Uuid;
 
 use super::*;
+use crate::status_line_command::parser::parse_status_line_command_output;
+
+const EXPORTER_V1_FULL_FIXTURE: &str = include_str!("fixtures/exporter_v1_full.json");
 
 fn minimal_input() -> StatusLineCommandInput {
     StatusLineCommandInput {
@@ -215,43 +220,59 @@ fn fully_populated_exporter_fixture_is_stable() {
         deletions: 3,
     });
 
-    let actual = serde_json::to_value(input).expect("serialize full fixture");
-    assert_eq!(actual["session_name"], "Status work");
+    let expected = serde_json::from_str::<serde_json::Value>(EXPORTER_V1_FULL_FIXTURE)
+        .expect("valid exporter fixture");
     assert_eq!(
-        actual["workspace"],
-        json!({
-            "current_dir": "/remote/workspace",
-            "project_dir": "/remote",
-            "added_dirs": ["/remote/shared"],
-            "repo": { "host": "github.com", "owner": "openai", "name": "codex" }
-        })
+        serde_json::to_value(input).expect("serialize full fixture"),
+        expected
     );
+}
+
+/// Deterministic stand-in for the pinned exporter's mutable `ccstatusline@latest`
+/// subprocess. It deliberately consumes only fields covered by the v1 fixture.
+fn render_exporter_fixture(input: &serde_json::Value) -> String {
+    let model = input["model"]["display_name"]
+        .as_str()
+        .expect("model display name");
+    let effort = input["effort"]["level"].as_str().expect("effort level");
+    let used = input["context_window"]["used_percentage"]
+        .as_f64()
+        .expect("used percentage");
+    let branch = input["codex"]["git_branch"].as_str().expect("git branch");
+    let pr_number = input["pr"]["number"].as_u64().expect("PR number");
+    let pr_url = input["pr"]["url"].as_str().expect("PR URL");
+
+    format!(
+        "\x1b[1;36m{model}\x1b[0m ({effort}) · {used:.0}%\n{branch} · \x1b]8;;{pr_url}\x1b\\PR #{pr_number}\x1b]8;;\x1b\\"
+    )
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)]
+fn exporter_fixture_stub_renders_accepted_status_line() {
+    let input = serde_json::from_str::<serde_json::Value>(EXPORTER_V1_FULL_FIXTURE)
+        .expect("valid exporter fixture");
+    let rendered = render_exporter_fixture(&input);
+    let parsed = parse_status_line_command_output(rendered.as_bytes()).expect("accepted output");
+
     assert_eq!(
-        actual["context_window"]["current_usage"],
-        json!({
-            "input_tokens": 100,
-            "output_tokens": 20,
-            "cache_creation_input_tokens": 10,
-            "cache_read_input_tokens": 5
-        })
+        parsed
+            .lines
+            .iter()
+            .map(|line| line.line.to_string())
+            .collect::<Vec<_>>(),
+        vec!["Terra (high) · 25%", "feature/status-line · PR #42"]
     );
-    assert_eq!(
-        actual["rate_limits"]["seven_day"]["resets_at"],
-        1_800_500_000_i64
+    assert_eq!(parsed.lines[0].line.spans[0].style.fg, Some(Color::Cyan));
+    assert!(
+        parsed.lines[0].line.spans[0]
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD)
     );
-    assert_eq!(actual["pr"]["review_state"], "approved");
-    assert_eq!(actual["codex"]["schema_version"], 1);
+    assert_eq!(parsed.lines[1].hyperlinks.len(), 1);
     assert_eq!(
-        actual["codex"]["workspace_headline"],
-        "Implementing status line"
-    );
-    assert_eq!(
-        actual["codex"]["task_progress"],
-        json!({ "completed": 2, "total": 3 })
-    );
-    assert_eq!(actual["codex"]["git_branch"], "feature/status-line");
-    assert_eq!(
-        actual["codex"]["branch_changes"],
-        json!({ "additions": 12, "deletions": 3 })
+        parsed.lines[1].hyperlinks[0].destination,
+        "https://github.com/openai/codex/pull/42"
     );
 }
