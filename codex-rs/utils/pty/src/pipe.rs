@@ -176,7 +176,12 @@ async fn spawn_process_with_stdin_mode(
     command.stderr(Stdio::piped());
 
     #[cfg(windows)]
-    let job = match crate::win::JobObject::create().map(Arc::new) {
+    let job = match match spawn_mode {
+        PipeSpawnMode::ContainedProcessTree => crate::win::JobObject::create_contained(),
+        PipeSpawnMode::Piped | PipeSpawnMode::NullStdin => crate::win::JobObject::create(),
+    }
+    .map(Arc::new)
+    {
         Ok(job) => Some(job),
         Err(err) => match spawn_mode {
             PipeSpawnMode::ContainedProcessTree => return Err(err.into()),
@@ -187,7 +192,9 @@ async fn spawn_process_with_stdin_mode(
         },
     };
     #[cfg(windows)]
-    if job.is_some() {
+    let suspended_spawn = matches!(spawn_mode, PipeSpawnMode::ContainedProcessTree);
+    #[cfg(windows)]
+    if job.is_some() && suspended_spawn {
         crate::win::configure_suspended_spawn(&mut command);
     }
     #[cfg(not(windows))]
@@ -206,7 +213,7 @@ async fn spawn_process_with_stdin_mode(
                 .and_then(|process_handle| job.assign_process(process_handle));
 
             if let Err(err) = assignment_result.as_ref()
-                && matches!(spawn_mode, PipeSpawnMode::ContainedProcessTree)
+                && suspended_spawn
             {
                 let _ = child.start_kill();
                 return Err(io::Error::new(
@@ -216,7 +223,7 @@ async fn spawn_process_with_stdin_mode(
                 .into());
             }
 
-            if let Err(err) = crate::win::resume_suspended_process(pid) {
+            if suspended_spawn && let Err(err) = crate::win::resume_suspended_process(pid) {
                 let _ = job.terminate();
                 let _ = child.start_kill();
                 return Err(io::Error::new(
