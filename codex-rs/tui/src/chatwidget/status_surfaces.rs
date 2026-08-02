@@ -603,7 +603,10 @@ impl ChatWidget {
         self.status_line_workspace_headline_pending_request_id = Some(request_id);
         self.status_line_workspace_headline_last_requested_at = Some(now);
         self.app_event_tx
-            .send(AppEvent::RefreshStatusLineWorkspaceHeadline { request_id });
+            .send(AppEvent::RefreshStatusLineWorkspaceHeadline {
+                owner: self.status_line_async_owner,
+                request_id,
+            });
     }
 
     fn status_line_workspace_headline_should_fetch(&self, now: Instant) -> bool {
@@ -638,10 +641,13 @@ impl ChatWidget {
 
     pub(crate) fn set_status_line_workspace_headline(
         &mut self,
+        owner: u64,
         request_id: u64,
         result: Result<crate::workspace_messages::WorkspaceHeadlineFetchResult, String>,
     ) -> bool {
-        if self.status_line_workspace_headline_pending_request_id != Some(request_id) {
+        if owner != self.status_line_async_owner
+            || self.status_line_workspace_headline_pending_request_id != Some(request_id)
+        {
             return false;
         }
         self.status_line_workspace_headline_pending_request_id = None;
