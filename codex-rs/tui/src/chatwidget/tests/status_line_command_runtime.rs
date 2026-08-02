@@ -214,6 +214,34 @@ async fn command_input_uses_latest_context_usage_instead_of_session_total() {
     );
 }
 
+#[tokio::test]
+async fn command_input_reports_origin_repository_without_a_pull_request() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    install_command(&mut chat, vec!["formatter".to_string()]);
+    chat.status_line_git_summary = Some(StatusLineGitSummary {
+        repository: Some(crate::branch_summary::StatusLineRepository {
+            host: "github.com".to_string(),
+            owner: "openai".to_string(),
+            name: "codex".to_string(),
+        }),
+        pull_request: None,
+        branch_change_stats: None,
+    });
+
+    let input = chat.status_line_command_input().expect("command input");
+    assert_eq!(
+        input.workspace.repo,
+        Some(
+            crate::status_line_command::wire::StatusLineCommandRepository {
+                host: "github.com".to_string(),
+                owner: "openai".to_string(),
+                name: "codex".to_string(),
+            }
+        )
+    );
+    assert_eq!(input.pr, None);
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn run_state_change_refreshes_command_input() {

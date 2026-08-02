@@ -221,19 +221,21 @@ impl ChatWidget {
         } else {
             (None, None)
         };
-        let pull_request = self
-            .status_line_git_summary
-            .as_ref()
-            .and_then(|summary| summary.pull_request.as_ref());
+        let git_summary = self.status_line_git_summary.as_ref();
+        let pull_request = git_summary.and_then(|summary| summary.pull_request.as_ref());
         let pr = pull_request.map(|pull_request| StatusLineCommandPullRequest {
             number: pull_request.number,
             url: pull_request.url.clone(),
             review_state: None,
         });
-        let repo = pull_request.and_then(|pull_request| repository_from_pr_url(&pull_request.url));
-        let branch_changes = self
-            .status_line_git_summary
-            .as_ref()
+        let repo = git_summary
+            .and_then(|summary| summary.repository.as_ref())
+            .map(|repository| StatusLineCommandRepository {
+                host: repository.host.clone(),
+                owner: repository.owner.clone(),
+                name: repository.name.clone(),
+            });
+        let branch_changes = git_summary
             .and_then(|summary| summary.branch_change_stats.as_ref())
             .map(|stats| StatusLineCommandBranchChanges {
                 additions: stats.additions,
@@ -314,19 +316,4 @@ impl ChatWidget {
             },
         })
     }
-}
-
-fn repository_from_pr_url(url: &str) -> Option<StatusLineCommandRepository> {
-    let url = url::Url::parse(url).ok()?;
-    let mut segments = url.path_segments()?;
-    let owner = segments.next()?.to_string();
-    let name = segments.next()?.trim_end_matches(".git").to_string();
-    if owner.is_empty() || name.is_empty() {
-        return None;
-    }
-    Some(StatusLineCommandRepository {
-        host: url.host_str()?.to_string(),
-        owner,
-        name,
-    })
 }
