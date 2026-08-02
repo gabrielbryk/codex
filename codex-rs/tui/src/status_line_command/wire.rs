@@ -6,10 +6,15 @@
 //! while the percentage and current-usage fields explicitly permit JSON null.
 
 use serde::Serialize;
+use serde::ser::Error as _;
 use uuid::Uuid;
 
 /// Current formatter input schema version.
 pub(crate) const STATUS_LINE_COMMAND_SCHEMA_VERSION: u8 = 1;
+/// Maximum serialized JSON-line payload accepted for formatter stdin.
+pub(crate) const MAX_STATUS_LINE_COMMAND_INPUT_BYTES: usize = 64 * 1024;
+/// Maximum backend-provided workspace headline retained in formatter input.
+pub(crate) const MAX_STATUS_LINE_WORKSPACE_HEADLINE_BYTES: usize = 1024;
 
 /// Stable identity generated once for the lifetime of a command-mode widget.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize)]
@@ -58,6 +63,11 @@ impl StatusLineCommandInput {
     /// Serialize one JSON object followed by a newline, ready for command stdin.
     pub(crate) fn to_json_line(&self) -> Result<Vec<u8>, serde_json::Error> {
         let mut bytes = serde_json::to_vec(self)?;
+        if bytes.len().saturating_add(/*rhs*/ 1) > MAX_STATUS_LINE_COMMAND_INPUT_BYTES {
+            return Err(serde_json::Error::custom(format!(
+                "status-line command input exceeds {MAX_STATUS_LINE_COMMAND_INPUT_BYTES} bytes"
+            )));
+        }
         bytes.push(b'\n');
         Ok(bytes)
     }

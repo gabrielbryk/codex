@@ -176,26 +176,55 @@ async fn same_cwd_thread_reset_rejects_old_dependency_results() {
 }
 
 #[tokio::test]
+async fn replacement_widget_rejects_old_widgets_same_cwd_dependency_results() {
+    let (old_chat, _old_rx, _old_op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let old_owner = old_chat.status_line_async_owner;
+    let (mut replacement, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    install_command(&mut replacement, vec!["formatter".to_string()]);
+    assert_ne!(replacement.status_line_async_owner, old_owner);
+    let cwd = PathBuf::from("/same-cwd");
+    replacement.status_line_branch_cwd = Some(cwd.clone());
+    replacement.status_line_branch_pending = true;
+    replacement.status_line_git_summary_cwd = Some(cwd.clone());
+    replacement.status_line_git_summary_pending = true;
+
+    replacement.set_status_line_branch(
+        old_owner,
+        cwd.clone(),
+        Some("old-widget-branch".to_string()),
+    );
+    replacement.set_status_line_git_summary(old_owner, cwd, StatusLineGitSummary::default());
+
+    assert_eq!(replacement.status_line_branch, None);
+    assert!(replacement.status_line_git_summary.is_none());
+    assert!(replacement.status_line_branch_pending);
+    assert!(replacement.status_line_git_summary_pending);
+}
+
+#[tokio::test]
 async fn command_input_uses_latest_context_usage_instead_of_session_total() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     install_command(&mut chat, vec!["formatter".to_string()]);
-    chat.token_info = Some(TokenUsageInfo {
-        total_token_usage: TokenUsage {
-            input_tokens: 900_000,
-            output_tokens: 80_000,
-            total_tokens: 980_000,
-            ..TokenUsage::default()
-        },
-        last_token_usage: TokenUsage {
-            input_tokens: 175_000,
-            cached_input_tokens: 120_000,
-            cache_write_input_tokens: 4_000,
-            output_tokens: 12_000,
-            total_tokens: 187_000,
-            ..TokenUsage::default()
-        },
-        model_context_window: Some(272_000),
-    });
+    handle_token_count(
+        &mut chat,
+        Some(TokenUsageInfo {
+            total_token_usage: TokenUsage {
+                input_tokens: 900_000,
+                output_tokens: 80_000,
+                total_tokens: 980_000,
+                ..TokenUsage::default()
+            },
+            last_token_usage: TokenUsage {
+                input_tokens: 175_000,
+                cached_input_tokens: 120_000,
+                cache_write_input_tokens: 4_000,
+                output_tokens: 12_000,
+                total_tokens: 187_000,
+                ..TokenUsage::default()
+            },
+            model_context_window: Some(272_000),
+        }),
+    );
 
     let input = chat.status_line_command_input().expect("command input");
     assert!(!input.exceeds_200k_tokens);
@@ -240,6 +269,25 @@ async fn command_input_reports_origin_repository_without_a_pull_request() {
         )
     );
     assert_eq!(input.pr, None);
+}
+
+#[tokio::test]
+async fn command_input_bounds_backend_workspace_headline_on_utf8_boundaries() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    install_command(&mut chat, vec!["formatter".to_string()]);
+    chat.status_line_workspace_headline = Some("é".repeat(1_000));
+
+    let headline = chat
+        .status_line_command_input()
+        .expect("command input")
+        .codex
+        .workspace_headline
+        .expect("workspace headline");
+    assert_eq!(
+        headline.len(),
+        crate::status_line_command::wire::MAX_STATUS_LINE_WORKSPACE_HEADLINE_BYTES
+    );
+    assert_eq!(headline.chars().count(), 512);
 }
 
 #[cfg(unix)]
