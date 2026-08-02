@@ -6,6 +6,8 @@ use crate::status_line_command::runner::StatusLineCommandApplyResult;
 use crate::status_line_command::runner::StatusLineCommandLifecycle;
 use crate::status_line_command::wire::*;
 
+const EXPORTER_V1_FULL_FIXTURE: &str = include_str!("fixtures/exporter_v1_full.json");
+
 fn input() -> StatusLineCommandInput {
     StatusLineCommandInput {
         cwd: "/remote".to_string(),
@@ -50,6 +52,79 @@ fn input() -> StatusLineCommandInput {
             branch_changes: None,
         },
     }
+}
+
+fn exporter_fixture_input() -> StatusLineCommandInput {
+    let mut input = input();
+    input.cwd = "/remote/workspace".to_string();
+    input.session_id = uuid::Uuid::parse_str("11111111-2222-4333-8444-555555555555")
+        .expect("valid UUID")
+        .into();
+    input.session_name = Some("Status work".to_string());
+    input.model = StatusLineCommandModel {
+        id: "gpt-5.6-terra".to_string(),
+        display_name: "Terra".to_string(),
+    };
+    input.workspace = StatusLineCommandWorkspace {
+        current_dir: "/remote/workspace".to_string(),
+        project_dir: Some("/remote".to_string()),
+        added_dirs: vec!["/remote/shared".to_string()],
+        repo: Some(StatusLineCommandRepository {
+            host: "github.com".to_string(),
+            owner: "openai".to_string(),
+            name: "codex".to_string(),
+        }),
+    };
+    input.fast_mode = true;
+    input.effort = Some(StatusLineCommandEffort {
+        level: "high".to_string(),
+    });
+    input.thinking.enabled = true;
+    input.context_window.total_input_tokens = 10;
+    input.context_window.total_output_tokens = 20;
+    input.context_window.used_percentage = Some(25.0);
+    input.context_window.remaining_percentage = Some(75.0);
+    input.context_window.current_usage = Some(StatusLineCommandCurrentUsage {
+        input_tokens: 100,
+        output_tokens: 20,
+        cache_creation_input_tokens: 10,
+        cache_read_input_tokens: 5,
+    });
+    input.rate_limits = Some(StatusLineCommandRateLimits {
+        five_hour: Some(StatusLineCommandRateLimitWindow {
+            used_percentage: 10.0,
+            resets_at: 1_800_000_000,
+        }),
+        seven_day: Some(StatusLineCommandRateLimitWindow {
+            used_percentage: 20.0,
+            resets_at: 1_800_500_000,
+        }),
+    });
+    input.extra_usage = Some(StatusLineCommandExtraUsage {
+        enabled: true,
+        used: 2.5,
+        limit: 50.0,
+    });
+    input.pr = Some(StatusLineCommandPullRequest {
+        number: 42,
+        url: "https://github.com/openai/codex/pull/42".to_string(),
+        review_state: Some("approved".to_string()),
+    });
+    input.codex.local_process_cwd = "/local/codex".to_string();
+    input.codex.status = "working".to_string();
+    input.codex.permissions = "workspace-write".to_string();
+    input.codex.service_tier = "fast".to_string();
+    input.codex.workspace_headline = Some("Implementing status line".to_string());
+    input.codex.task_progress = Some(StatusLineCommandTaskProgress {
+        completed: 2,
+        total: 3,
+    });
+    input.codex.git_branch = Some("feature/status-line".to_string());
+    input.codex.branch_changes = Some(StatusLineCommandBranchChanges {
+        additions: 12,
+        deletions: 3,
+    });
+    input
 }
 
 fn invocation() -> StatusLineCommandInvocation {
@@ -154,6 +229,48 @@ async fn command_runs_in_local_process_cwd_while_json_reports_remote_cwd() {
     assert_eq!(
         parsed.lines[0].line.to_string(),
         local.to_string_lossy().into_owned()
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn exporter_fixture_round_trips_through_real_command_stdin_and_stdout() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let captured_input = temp.path().join("captured-input.json");
+    let config = shell_config(
+        concat!(
+            "IFS= read -r input; printf '%s\\n' \"$input\" > \"$1\"; ",
+            "printf '\\033[1;36mTerra\\033[0m (high) · 25%%\\n",
+            "feature/status-line · \\033]8;;https://github.com/openai/codex/pull/42\\007",
+            "PR #42\\033]8;;\\007'"
+        ),
+        vec![
+            "status-line-test".to_string(),
+            captured_input.to_string_lossy().into_owned(),
+        ],
+    );
+
+    let outcome = execute(config, temp.path(), exporter_fixture_input()).await;
+    let StatusLineCommandOutcome::Success(parsed) = outcome else {
+        panic!("expected successful exporter fixture output");
+    };
+    let expected_value = serde_json::from_str::<serde_json::Value>(EXPORTER_V1_FULL_FIXTURE)
+        .expect("valid exporter fixture");
+    let mut expected_bytes = serde_json::to_vec(&expected_value).expect("serialize fixture");
+    expected_bytes.push(b'\n');
+
+    assert_eq!(std::fs::read(captured_input).unwrap(), expected_bytes);
+    assert_eq!(
+        parsed
+            .lines
+            .iter()
+            .map(|line| line.line.to_string())
+            .collect::<Vec<_>>(),
+        vec!["Terra (high) · 25%", "feature/status-line · PR #42"]
+    );
+    assert_eq!(
+        parsed.lines[1].hyperlinks[0].destination,
+        "https://github.com/openai/codex/pull/42"
     );
 }
 
