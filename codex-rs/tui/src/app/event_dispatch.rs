@@ -2251,6 +2251,14 @@ impl App {
                     tui.frame_requester().schedule_frame();
                 }
             }
+            AppEvent::StatusLineCommandFinished(completion) => {
+                if self
+                    .chat_widget
+                    .apply_status_line_command_completion(completion)
+                {
+                    tui.frame_requester().schedule_frame();
+                }
+            }
             AppEvent::StatusLineSetupCancelled => {
                 self.chat_widget.cancel_status_line_setup();
             }

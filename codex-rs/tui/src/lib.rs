@@ -175,8 +175,6 @@ mod startup_error;
 mod startup_hooks_review;
 mod status;
 mod status_indicator_widget;
-// The config/process/footer tracks consume this module when their commits are composed.
-#[allow(dead_code)]
 mod status_line_command;
 mod streaming;
 mod style;

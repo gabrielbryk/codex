@@ -10,6 +10,17 @@ use crate::chatwidget::limit_label_for_window;
 use crate::chatwidget::rate_limits::get_limits_duration;
 use crate::legacy_core::config::Config;
 use crate::status::format_tokens_compact;
+use crate::status_line_command::wire::STATUS_LINE_COMMAND_SCHEMA_VERSION;
+use crate::status_line_command::wire::StatusLineCommandBranchChanges;
+use crate::status_line_command::wire::StatusLineCommandCodex;
+use crate::status_line_command::wire::StatusLineCommandContextWindow;
+use crate::status_line_command::wire::StatusLineCommandEffort;
+use crate::status_line_command::wire::StatusLineCommandInput;
+use crate::status_line_command::wire::StatusLineCommandModel;
+use crate::status_line_command::wire::StatusLineCommandPullRequest;
+use crate::status_line_command::wire::StatusLineCommandRepository;
+use crate::status_line_command::wire::StatusLineCommandThinking;
+use crate::status_line_command::wire::StatusLineCommandWorkspace;
 use codex_app_server_protocol::AskForApproval;
 use codex_config::ConfigLayerSource;
 use codex_protocol::config_types::ApprovalsReviewer;
@@ -45,6 +56,7 @@ const TERMINAL_TITLE_ACTION_REQUIRED_PREFIX_HIDDEN: &str = "[ . ] Action Require
 /// refresh pass compute those shared concerns once, then render both surfaces
 /// from the same selection set.
 struct StatusSurfaceSelections {
+    status_line_command_enabled: bool,
     status_line_items: Vec<StatusLineItem>,
     invalid_status_line_items: Vec<String>,
     terminal_title_items: Vec<TerminalTitleItem>,
@@ -53,23 +65,28 @@ struct StatusSurfaceSelections {
 
 impl StatusSurfaceSelections {
     fn uses_git_branch(&self) -> bool {
-        self.status_line_items.contains(&StatusLineItem::GitBranch)
+        self.status_line_command_enabled
+            || self.status_line_items.contains(&StatusLineItem::GitBranch)
             || self
                 .terminal_title_items
                 .contains(&TerminalTitleItem::GitBranch)
     }
 
     fn uses_git_summary(&self) -> bool {
-        self.status_line_items
-            .contains(&StatusLineItem::PullRequestNumber)
+        self.status_line_command_enabled
+            || self
+                .status_line_items
+                .contains(&StatusLineItem::PullRequestNumber)
             || self
                 .status_line_items
                 .contains(&StatusLineItem::BranchChanges)
     }
 
     fn uses_workspace_headline(&self) -> bool {
-        self.status_line_items
-            .contains(&StatusLineItem::WorkspaceHeadline)
+        self.status_line_command_enabled
+            || self
+                .status_line_items
+                .contains(&StatusLineItem::WorkspaceHeadline)
     }
 }
 
@@ -90,6 +107,7 @@ impl ChatWidget {
         let (terminal_title_items, invalid_terminal_title_items) =
             self.terminal_title_items_with_invalids();
         StatusSurfaceSelections {
+            status_line_command_enabled: self.config.tui_status_line_command.is_some(),
             status_line_items,
             invalid_status_line_items,
             terminal_title_items,
@@ -175,6 +193,15 @@ impl ChatWidget {
     }
 
     fn refresh_status_line_from_selections(&mut self, selections: &StatusSurfaceSelections) {
+        if selections.status_line_command_enabled {
+            self.bottom_pane.set_status_line_enabled(/*enabled*/ true);
+            self.set_status_line_hyperlink(/*url*/ None);
+            if let Some(input) = self.status_line_command_input() {
+                self.schedule_status_line_command(input);
+            }
+            return;
+        }
+
         let enabled = !selections.status_line_items.is_empty();
         self.bottom_pane.set_status_line_enabled(enabled);
         if !enabled {
@@ -200,6 +227,99 @@ impl ChatWidget {
             .then(|| self.status_line_pull_request_url())
             .flatten();
         self.set_status_line_hyperlink(hyperlink_url);
+    }
+
+    fn status_line_command_input(&self) -> Option<StatusLineCommandInput> {
+        let local_process_cwd = self.status_line_command_local_cwd()?;
+        let session_cwd = self.status_line_cwd().to_string_lossy().into_owned();
+        let effort = self.effective_reasoning_effort();
+        let thinking_enabled = effort
+            .as_ref()
+            .is_some_and(|effort| effort != &ReasoningEffortConfig::None);
+        let effort = effort.and_then(|effort| {
+            (effort != ReasoningEffortConfig::None).then(|| StatusLineCommandEffort {
+                level: effort.as_str().to_string(),
+            })
+        });
+        let total_usage = self.status_line_total_usage();
+        let context_window_size = self
+            .status_line_context_window_size()
+            .unwrap_or_default()
+            .max(0) as u64;
+        let (used_percentage, remaining_percentage) = if self.token_info.is_some() {
+            (
+                self.status_line_context_used_percent()
+                    .map(|value| value as f64),
+                self.status_line_context_remaining_percent()
+                    .map(|value| value as f64),
+            )
+        } else {
+            (None, None)
+        };
+        let pull_request = self
+            .status_line_git_summary
+            .as_ref()
+            .and_then(|summary| summary.pull_request.as_ref());
+        let pr = pull_request.map(|pull_request| StatusLineCommandPullRequest {
+            number: pull_request.number,
+            url: pull_request.url.clone(),
+            review_state: None,
+        });
+        let repo = pull_request.and_then(|pull_request| repository_from_pr_url(&pull_request.url));
+        let branch_changes = self
+            .status_line_git_summary
+            .as_ref()
+            .and_then(|summary| summary.branch_change_stats.as_ref())
+            .map(|stats| StatusLineCommandBranchChanges {
+                additions: stats.additions,
+                deletions: stats.deletions,
+            });
+
+        Some(StatusLineCommandInput {
+            cwd: session_cwd.clone(),
+            session_id: self.status_line_command.as_ref()?.lifecycle_session_id(),
+            session_name: self.thread_name.clone(),
+            model: StatusLineCommandModel {
+                id: self.current_model().to_string(),
+                display_name: self.model_display_name().to_string(),
+            },
+            workspace: StatusLineCommandWorkspace {
+                current_dir: session_cwd,
+                project_dir: None,
+                added_dirs: Vec::new(),
+                repo,
+            },
+            version: CODEX_CLI_VERSION.to_string(),
+            fast_mode: self.current_service_tier() == Some(ServiceTier::Fast.request_value()),
+            exceeds_200k_tokens: total_usage.input_tokens.max(0) > 200_000,
+            effort,
+            thinking: StatusLineCommandThinking {
+                enabled: thinking_enabled,
+            },
+            context_window: StatusLineCommandContextWindow {
+                total_input_tokens: total_usage.input_tokens.max(0) as u64,
+                total_output_tokens: total_usage.output_tokens.max(0) as u64,
+                context_window_size,
+                used_percentage,
+                remaining_percentage,
+                current_usage: None,
+            },
+            rate_limits: None,
+            extra_usage: None,
+            pr,
+            codex: StatusLineCommandCodex {
+                schema_version: STATUS_LINE_COMMAND_SCHEMA_VERSION,
+                local_process_cwd: local_process_cwd.to_string_lossy().into_owned(),
+                status: self.run_state_status_text().to_lowercase(),
+                permissions: permissions_display(&self.config),
+                approval_mode: approval_mode_display(&self.config),
+                service_tier: self.current_service_tier().unwrap_or("default").to_string(),
+                workspace_headline: self.status_line_workspace_headline.clone(),
+                task_progress: None,
+                git_branch: self.status_line_branch.clone(),
+                branch_changes,
+            },
+        })
     }
 
     /// Clears the terminal title Codex most recently wrote, if any.
@@ -602,10 +722,11 @@ impl ChatWidget {
     pub(super) fn refresh_status_line_if_workspace_headline_due(&mut self) {
         let now = Instant::now();
         if self.status_line_workspace_headline_should_fetch(now)
-            && self
-                .status_line_items_with_invalids()
-                .0
-                .contains(&StatusLineItem::WorkspaceHeadline)
+            && (self.config.tui_status_line_command.is_some()
+                || self
+                    .status_line_items_with_invalids()
+                    .0
+                    .contains(&StatusLineItem::WorkspaceHeadline))
         {
             self.refresh_status_line();
         }
@@ -635,10 +756,11 @@ impl ChatWidget {
         }
 
         if !self.status_line_workspace_messages_disabled
-            && self
-                .status_line_items_with_invalids()
-                .0
-                .contains(&StatusLineItem::WorkspaceHeadline)
+            && (self.config.tui_status_line_command.is_some()
+                || self
+                    .status_line_items_with_invalids()
+                    .0
+                    .contains(&StatusLineItem::WorkspaceHeadline))
         {
             self.frame_requester
                 .schedule_frame_in(crate::workspace_messages::WORKSPACE_HEADLINE_REFRESH_INTERVAL);
@@ -1131,6 +1253,21 @@ fn approval_mode_display(config: &Config) -> String {
     }
 
     config.permissions.approval_policy.value().to_string()
+}
+
+fn repository_from_pr_url(url: &str) -> Option<StatusLineCommandRepository> {
+    let url = url::Url::parse(url).ok()?;
+    let mut segments = url.path_segments()?;
+    let owner = segments.next()?.to_string();
+    let name = segments.next()?.trim_end_matches(".git").to_string();
+    if owner.is_empty() || name.is_empty() {
+        return None;
+    }
+    Some(StatusLineCommandRepository {
+        host: url.host_str()?.to_string(),
+        owner,
+        name,
+    })
 }
 
 fn parse_items_with_invalids<T>(ids: impl IntoIterator<Item = String>) -> (Vec<T>, Vec<String>)
