@@ -272,6 +272,57 @@ async fn command_input_reports_origin_repository_without_a_pull_request() {
 }
 
 #[tokio::test]
+async fn command_input_reports_session_project_and_added_workspace_roots() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    install_command(&mut chat, vec!["formatter".to_string()]);
+    let project_dir = test_path_buf("/session/project").abs();
+    let shared_dir = test_path_buf("/session/shared").abs();
+    let tools_dir = test_path_buf("/session/tools").abs();
+    chat.current_cwd = Some(project_dir.to_path_buf());
+    chat.config.cwd = project_dir.clone();
+    chat.config.workspace_roots = vec![project_dir.clone(), shared_dir.clone(), tools_dir.clone()];
+
+    let workspace = chat
+        .status_line_command_input()
+        .expect("command input")
+        .workspace;
+    assert_eq!(
+        workspace,
+        crate::status_line_command::wire::StatusLineCommandWorkspace {
+            current_dir: project_dir.to_string_lossy().into_owned(),
+            project_dir: Some(project_dir.to_string_lossy().into_owned()),
+            added_dirs: vec![
+                shared_dir.to_string_lossy().into_owned(),
+                tools_dir.to_string_lossy().into_owned(),
+            ],
+            repo: None,
+        }
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn command_status_line_does_not_append_active_agent_label() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    install_command(
+        &mut chat,
+        vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "printf command-owned".to_string(),
+        ],
+    );
+    chat.set_active_agent_label(Some("Robie [explorer]".to_string()));
+
+    chat.refresh_status_line();
+    assert!(chat.apply_status_line_command_completion(next_completion(&mut rx).await));
+
+    let rendered = render_bottom_popup(&chat, /*width*/ 80);
+    assert!(rendered.contains("command-owned"));
+    assert!(!rendered.contains("Robie [explorer]"));
+}
+
+#[tokio::test]
 async fn command_input_bounds_backend_workspace_headline_on_utf8_boundaries() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     install_command(&mut chat, vec!["formatter".to_string()]);

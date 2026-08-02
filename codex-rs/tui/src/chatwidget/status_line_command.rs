@@ -198,6 +198,14 @@ impl ChatWidget {
     pub(super) fn status_line_command_input(&self) -> Option<StatusLineCommandInput> {
         let local_process_cwd = self.status_line_command_local_cwd()?;
         let session_cwd = self.status_line_cwd().to_string_lossy().into_owned();
+        let project_dir = self.config.cwd.to_string_lossy().into_owned();
+        let added_dirs = self
+            .config
+            .workspace_roots
+            .iter()
+            .filter(|root| *root != &self.config.cwd)
+            .map(|root| root.to_string_lossy().into_owned())
+            .collect();
         let effort = self.effective_reasoning_effort();
         let thinking_enabled = effort
             .as_ref()
@@ -277,8 +285,8 @@ impl ChatWidget {
             },
             workspace: StatusLineCommandWorkspace {
                 current_dir: session_cwd,
-                project_dir: None,
-                added_dirs: Vec::new(),
+                project_dir: Some(project_dir),
+                added_dirs,
                 repo,
             },
             version: CODEX_CLI_VERSION.to_string(),

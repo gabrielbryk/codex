@@ -91,9 +91,14 @@ impl ChatWidget {
 
     /// Forwards the contextual active-agent label into the bottom-pane footer pipeline.
     ///
-    /// `ChatWidget` stays a pass-through here so `App` remains the owner of "which thread is the
-    /// user actually looking at?" and the footer stack remains a pure renderer of that decision.
+    /// External formatter output owns the complete passive status region, so command mode
+    /// suppresses the label instead of appending UI-owned text to the formatter's final row.
     pub(crate) fn set_active_agent_label(&mut self, active_agent_label: Option<String>) {
+        let active_agent_label = if self.config.tui_status_line_command.is_some() {
+            None
+        } else {
+            active_agent_label
+        };
         self.bottom_pane.set_active_agent_label(active_agent_label);
     }
 

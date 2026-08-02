@@ -184,6 +184,8 @@ impl ChatWidget {
     fn refresh_status_line_from_selections(&mut self, selections: &StatusSurfaceSelections) {
         if selections.status_line_command_enabled {
             self.bottom_pane.set_status_line_enabled(/*enabled*/ true);
+            self.bottom_pane
+                .set_active_agent_label(/*active_agent_label*/ None);
             self.set_status_line_hyperlink(/*url*/ None);
             if let Some(input) = self.status_line_command_input() {
                 self.schedule_status_line_command(input);
