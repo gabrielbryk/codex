@@ -69,7 +69,11 @@ impl ChatWidget {
 
     /// Sets the currently rendered footer status-line value.
     pub(crate) fn set_status_line(&mut self, status_line: Option<Line<'static>>) {
-        self.bottom_pane.set_status_line(status_line);
+        self.set_status_lines(status_line.into_iter().collect());
+    }
+
+    pub(crate) fn set_status_lines(&mut self, status_lines: Vec<Line<'static>>) {
+        self.bottom_pane.set_status_lines(status_lines);
     }
 
     /// Sets the terminal hyperlink target for the currently rendered footer status line.
