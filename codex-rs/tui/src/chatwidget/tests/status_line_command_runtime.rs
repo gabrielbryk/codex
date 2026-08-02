@@ -361,22 +361,56 @@ async fn command_input_reports_origin_repository_without_a_pull_request() {
 }
 
 #[tokio::test]
-async fn command_input_reports_session_project_and_added_workspace_roots() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    install_command(&mut chat, vec!["formatter".to_string()]);
-    let project_dir = test_path_buf("/session/project").abs();
-    let shared_dir = test_path_buf("/session/shared").abs();
-    let tools_dir = test_path_buf("/session/tools").abs();
+async fn formatter_stdin_reports_resumed_workspace_without_local_cwd_leak() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let local_formatter_cwd = temp.path().join("local-formatter-cwd");
+    let project_dir = temp.path().join("remote-resumed-project");
+    let shared_dir = temp.path().join("remote-shared");
+    let tools_dir = temp.path().join("remote-tools");
+    for path in [&local_formatter_cwd, &project_dir, &shared_dir, &tools_dir] {
+        std::fs::create_dir_all(path).expect("workspace directory");
+    }
+    let captured_input = temp.path().join("captured-input.json");
+    #[cfg(unix)]
+    let command = vec![
+        "/bin/sh".to_string(),
+        "-c".to_string(),
+        "IFS= read -r input; printf '%s\\n' \"$input\" > \"$1\"; printf ok".to_string(),
+        "status-line-test".to_string(),
+        captured_input.to_string_lossy().into_owned(),
+    ];
+    #[cfg(windows)]
+    let command = vec![
+        "powershell.exe".to_string(),
+        "-NoLogo".to_string(),
+        "-NoProfile".to_string(),
+        "-NonInteractive".to_string(),
+        "-Command".to_string(),
+        concat!(
+            "$input = [Console]::In.ReadToEnd(); ",
+            "[IO.File]::WriteAllText($args[0], $input, [Text.UTF8Encoding]::new($false)); ",
+            "[Console]::Out.Write('ok')"
+        )
+        .to_string(),
+        captured_input.to_string_lossy().into_owned(),
+    ];
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    install_command(&mut chat, command);
+    chat.status_line_command = Some(StatusLineCommandRuntime::new(Some(
+        local_formatter_cwd.clone(),
+    )));
+    let project_dir = project_dir.abs();
+    let shared_dir = shared_dir.abs();
+    let tools_dir = tools_dir.abs();
     chat.handle_thread_session(switched_thread_session(
         project_dir.clone(),
         vec![project_dir.clone(), shared_dir.clone(), tools_dir.clone()],
     ));
+    let completion = next_completion(&mut rx).await;
+    assert!(chat.apply_status_line_command_completion(completion));
+    assert_eq!(status_line_text(&chat), Some("ok".to_string()));
 
-    let stdin = chat
-        .status_line_command_input()
-        .expect("command input")
-        .to_json_line()
-        .expect("serialize formatter stdin");
+    let stdin = std::fs::read(captured_input).expect("captured formatter stdin");
     let input: serde_json::Value = serde_json::from_slice(&stdin).expect("formatter stdin JSON");
     assert_eq!(
         input["workspace"],
@@ -388,6 +422,14 @@ async fn command_input_reports_session_project_and_added_workspace_roots() {
                 tools_dir.to_string_lossy().into_owned(),
             ],
         })
+    );
+    assert_eq!(
+        input["codex"]["local_process_cwd"],
+        local_formatter_cwd.to_string_lossy().into_owned()
+    );
+    assert_ne!(
+        input["workspace"]["current_dir"],
+        input["codex"]["local_process_cwd"]
     );
 }
 
