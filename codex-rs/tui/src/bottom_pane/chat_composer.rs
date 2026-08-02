@@ -4542,15 +4542,15 @@ impl ChatComposer {
                     } else {
                         Vec::new()
                     };
-                    let transition_visible = status_line_active
+                    let status_line_visible = status_line_active
                         && !self.footer.flash_visible()
                         && self.footer.hint_override.is_none();
-                    let transition_active = transition_visible
+                    let transition_active = status_line_visible
                         && self
                             .effort_status_line_transition
                             .as_ref()
                             .is_some_and(|transition| !transition.is_finished());
-                    if transition_visible
+                    if status_line_visible
                         && let Some(transition) = &self.effort_status_line_transition
                         && !transition.is_finished()
                     {
@@ -4750,7 +4750,7 @@ impl ChatComposer {
                     if show_right && let Some(line) = &right_line {
                         render_context_right(hint_rect, buf, line);
                     }
-                    if transition_visible && !truncated_status_hyperlink_lines.is_empty() {
+                    if status_line_visible && !truncated_status_hyperlink_lines.is_empty() {
                         let prefix: Span<'static> = " ".repeat(FOOTER_INDENT_COLS).into();
                         let lines = prefix_hyperlink_lines(
                             truncated_status_hyperlink_lines,
@@ -4759,12 +4759,12 @@ impl ChatComposer {
                         );
                         mark_buffer_hyperlinks(buf, hint_rect, &lines, /*scroll_rows*/ 0);
                     }
-                    if transition_visible
+                    if status_line_visible
                         && let Some(url) = self.footer.status_line_hyperlink_url.as_deref()
                     {
                         mark_underlined_hyperlink(buf, hint_rect, url);
                     }
-                    if transition_visible
+                    if status_line_visible
                         && let Some(transition) = &self.effort_status_line_transition
                         && !transition.is_finished()
                         && let Some(frame_requester) = &self.frame_requester
