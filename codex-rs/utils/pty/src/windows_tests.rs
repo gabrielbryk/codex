@@ -4,6 +4,7 @@ use super::find_python;
 use super::wait_for_output_contains;
 use crate::TerminalSize;
 use crate::spawn_pipe_process_no_stdin;
+use crate::spawn_piped_contained_process;
 use crate::spawn_pty_process;
 use std::collections::HashMap;
 use std::os::windows::io::AsRawHandle;
@@ -81,15 +82,23 @@ async fn assert_terminate_kills_descendant(
         "import pathlib,time; print('{READY_MARKER}',flush=True); time.sleep(1); pathlib.Path(bytes.fromhex('{}').decode()).write_text('survived')",
         utf8_hex(&marker.to_string_lossy())
     );
-    // Exercise descendants created after the best-effort pipe assignment,
-    // without making the test depend on winning the intentionally accepted race.
     let code = format!(
-        "import subprocess,sys,time; time.sleep(0.5); code=bytes.fromhex('{}').decode(); subprocess.Popen([sys.executable,'-u','-c',code]); time.sleep(60)",
+        "import subprocess,sys,time; code=bytes.fromhex('{}').decode(); subprocess.Popen([sys.executable,'-u','-c',code]); time.sleep(60)",
         utf8_hex(&child_code)
     );
     let args = vec!["-u".to_string(), "-c".to_string(), code];
     let spawned = if backend == "pipe" {
-        spawn_pipe_process_no_stdin(python, &args, Path::new("."), env, /*arg0*/ &None, &[]).await?
+        let spawned = spawn_piped_contained_process(
+            python,
+            &args,
+            Path::new("."),
+            env,
+            /*arg0*/ &None,
+            &[],
+        )
+        .await?;
+        spawned.session.close_stdin();
+        spawned
     } else {
         spawn_pty_process(
             python,
@@ -170,9 +179,53 @@ async fn assert_normal_exit_preserves_descendant(
     Ok(())
 }
 
+async fn assert_strict_session_drop_kills_descendant(
+    python: &str,
+    env: &HashMap<String, String>,
+) -> anyhow::Result<()> {
+    let marker_base = std::env::temp_dir().join(format!(
+        "codex-strict-job-drop-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    ));
+    let ready_marker = marker_base.with_extension("ready");
+    let survival_marker = marker_base.with_extension("survived");
+    let child_code = format!(
+        "import pathlib,time; pathlib.Path(bytes.fromhex('{}').decode()).write_text('ready'); time.sleep(1); pathlib.Path(bytes.fromhex('{}').decode()).write_text('survived')",
+        utf8_hex(&ready_marker.to_string_lossy()),
+        utf8_hex(&survival_marker.to_string_lossy())
+    );
+    let code = format!(
+        "import pathlib,subprocess,sys,time; code=bytes.fromhex('{}').decode(); ready=pathlib.Path(bytes.fromhex('{}').decode()); subprocess.Popen([sys.executable,'-u','-c',code],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,creationflags=subprocess.DETACHED_PROCESS|subprocess.CREATE_NEW_PROCESS_GROUP); deadline=time.time()+10\nwhile not ready.exists() and time.time()<deadline: time.sleep(.05)\nsys.exit(0 if ready.exists() else 2)",
+        utf8_hex(&child_code),
+        utf8_hex(&ready_marker.to_string_lossy())
+    );
+    let args = vec!["-u".to_string(), "-c".to_string(), code];
+    let spawned =
+        spawn_piped_contained_process(python, &args, Path::new("."), env, /*arg0*/ &None, &[])
+            .await?;
+    spawned.session.close_stdin();
+    let (session, output_rx, exit_rx) = combine_spawned_output(spawned);
+    let (_, exit_code) = collect_output_until_exit(output_rx, exit_rx, /*timeout_ms*/ 10_000).await;
+    assert_eq!(
+        exit_code, 0,
+        "strict process-tree root did not exit normally"
+    );
+    assert!(ready_marker.exists(), "strict descendant never started");
+
+    drop(session);
+
+    let survived = wait_for_path(&survival_marker, Duration::from_secs(2)).await;
+    let _ = std::fs::remove_file(ready_marker);
+    let _ = std::fs::remove_file(survival_marker);
+    assert!(!survived, "strict descendant survived session drop");
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn terminate_kills_descendants_for_best_effort_pipe_and_atomic_conpty() -> anyhow::Result<()>
-{
+async fn terminate_kills_descendants_for_atomic_pipe_and_conpty() -> anyhow::Result<()> {
     let Some(python) = find_python() else {
         eprintln!("python not found; skipping Windows process-tree termination test");
         return Ok(());
@@ -298,6 +351,16 @@ async fn rejected_job_assignment_resumes_existing_job_member() -> anyhow::Result
     assert_eq!(status.code(), Some(1));
     tokio::time::timeout(Duration::from_secs(10), existing_member.wait()).await??;
     Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn strict_pipe_drop_kills_descendants_after_root_exit() -> anyhow::Result<()> {
+    let Some(python) = find_python() else {
+        eprintln!("python not found; skipping strict Windows process-tree drop test");
+        return Ok(());
+    };
+    let env: HashMap<String, String> = std::env::vars().collect();
+    assert_strict_session_drop_kills_descendant(&python, &env).await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

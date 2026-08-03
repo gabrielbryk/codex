@@ -41,16 +41,24 @@ pub struct JobObject {
 impl JobObject {
     /// Creates a Job Object configured to terminate all members when its last handle closes.
     pub fn create() -> io::Result<Self> {
+        Self::create_with_limit_flags(
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK,
+        )
+    }
+
+    /// Creates a Job Object whose descendants cannot request to break away.
+    pub(crate) fn create_contained() -> io::Result<Self> {
+        Self::create_with_limit_flags(JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)
+    }
+
+    fn create_with_limit_flags(limit_flags: u32) -> io::Result<Self> {
         let handle = unsafe { CreateJobObjectW(std::ptr::null_mut(), std::ptr::null()) };
         if handle.is_null() {
             return Err(io::Error::last_os_error());
         }
         let handle = unsafe { OwnedHandle::from_raw_handle(handle.cast()) };
 
-        Self::set_limit_flags(
-            &handle,
-            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK,
-        )?;
+        Self::set_limit_flags(&handle, limit_flags)?;
 
         Ok(Self {
             handle,
@@ -106,7 +114,7 @@ impl JobObject {
         Ok(())
     }
 
-    /// Assigns a running process to this job.
+    /// Assigns a process to this job.
     ///
     /// Assignment is not retroactive: descendants created before this call
     /// completes are not guaranteed to become members of the job.
