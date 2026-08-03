@@ -9,11 +9,11 @@ use ratatui::style::Modifier;
 use ratatui::style::Style;
 use ratatui::text::Span;
 use thiserror::Error;
-use unicode_width::UnicodeWidthChar;
-use unicode_width::UnicodeWidthStr;
 use url::Url;
 
 use crate::terminal_hyperlinks::HyperlinkLine;
+use crate::width::char_width;
+use crate::width::display_width;
 
 pub(crate) const MAX_STATUS_LINE_COMMAND_BYTES: usize = 8 * 1024;
 pub(crate) const MAX_STATUS_LINE_COMMAND_ROWS: usize = 3;
@@ -154,10 +154,13 @@ impl<'a> Parser<'a> {
             return Err(StatusLineCommandParseError::ForbiddenInvisible(ch.into()));
         }
 
-        let width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        // Measure with the crate's own width helpers, not raw `unicode-width`. Ratatui reserves a
+        // cell for halfwidth sound marks (U+FF9E/U+FF9F) where `unicode-width` reports zero, so
+        // raw measurement would undercount a label's rendered cells and let it exceed the bound.
+        let width = char_width(ch);
         if self.hyperlink.is_some() {
             self.hyperlink_label.push(ch);
-            if UnicodeWidthStr::width(self.hyperlink_label.as_str()) > MAX_HYPERLINK_LABEL_CELLS {
+            if display_width(&self.hyperlink_label) > MAX_HYPERLINK_LABEL_CELLS {
                 return Err(StatusLineCommandParseError::HyperlinkLabelTooLong);
             }
         }

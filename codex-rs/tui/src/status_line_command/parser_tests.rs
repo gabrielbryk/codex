@@ -129,3 +129,21 @@ fn hyperlink_label_limit_uses_grapheme_aware_terminal_width() {
     let parsed = parse_status_line_command_output(output.as_bytes()).expect("512-cell label");
     assert_eq!(parsed.lines[0].line.to_string(), label);
 }
+
+#[test]
+fn hyperlink_label_limit_counts_halfwidth_sound_marks_as_cells() {
+    // Ratatui reserves a cell for U+FF9E/U+FF9F; `unicode-width` reports zero for both. Measuring
+    // with the raw crate would score this label as 0 cells and admit it, even though it renders
+    // one cell past the bound.
+    let label = "\u{FF9E}".repeat(MAX_HYPERLINK_LABEL_CELLS + 1);
+    let output = format!("\x1b]8;;https://example.com\x07{label}\x1b]8;;\x07");
+    assert_eq!(
+        parse_status_line_command_output(output.as_bytes()),
+        Err(StatusLineCommandParseError::HyperlinkLabelTooLong)
+    );
+
+    // Exactly at the bound still parses, so the guard is not simply rejecting all sound marks.
+    let label = "\u{FF9E}".repeat(MAX_HYPERLINK_LABEL_CELLS);
+    let output = format!("\x1b]8;;https://example.com\x07{label}\x1b]8;;\x07");
+    parse_status_line_command_output(output.as_bytes()).expect("512-cell sound-mark label");
+}
