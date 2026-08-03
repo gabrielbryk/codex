@@ -11,6 +11,10 @@ mod windows_input;
 
 pub const DEFAULT_OUTPUT_BYTES_CAP: usize = 1024 * 1024;
 
+/// Spawn a piped process with the strongest cleanup each platform offers:
+/// Job Object whole-tree termination on Windows, best-effort process-group
+/// termination on Unix.
+pub use pipe::spawn_contained_process as spawn_piped_contained_process;
 /// Spawn a non-interactive process using regular pipes for stdin/stdout/stderr.
 pub use pipe::spawn_process as spawn_pipe_process;
 /// Spawn a non-interactive process using regular pipes, but close stdin immediately.
