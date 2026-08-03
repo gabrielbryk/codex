@@ -69,6 +69,8 @@ pub(crate) const RATE_LIMIT_STALE_THRESHOLD_MINUTES: i64 = 15;
 pub(crate) struct RateLimitWindowDisplay {
     /// Percent used for the window.
     pub used_percent: f64,
+    /// Raw Unix epoch seconds retained for machine-readable status integrations.
+    pub resets_at_epoch_seconds: Option<i64>,
     /// Human-readable local reset time.
     pub resets_at: Option<String>,
     /// Window length in minutes when provided by the server.
@@ -85,6 +87,7 @@ impl RateLimitWindowDisplay {
 
         Self {
             used_percent: f64::from(window.used_percent),
+            resets_at_epoch_seconds: window.resets_at,
             resets_at,
             window_minutes: window.window_duration_mins,
         }
@@ -423,14 +426,31 @@ mod tests {
     use super::StatusRateLimitData;
     use super::compose_rate_limit_data_many;
     use chrono::Local;
+    use codex_app_server_protocol::RateLimitWindow;
     use pretty_assertions::assert_eq;
 
     fn window(used_percent: f64) -> RateLimitWindowDisplay {
         RateLimitWindowDisplay {
             used_percent,
+            resets_at_epoch_seconds: None,
             resets_at: Some("soon".to_string()),
             window_minutes: Some(300),
         }
+    }
+
+    #[test]
+    fn display_window_retains_raw_reset_epoch() {
+        let resets_at = 1_900_000_000;
+        let display = RateLimitWindowDisplay::from_window(
+            &RateLimitWindow {
+                used_percent: 42,
+                window_duration_mins: Some(300),
+                resets_at: Some(resets_at),
+            },
+            Local::now(),
+        );
+
+        assert_eq!(display.resets_at_epoch_seconds, Some(resets_at));
     }
 
     #[test]
@@ -487,11 +507,13 @@ mod tests {
             captured_at: now,
             primary: Some(RateLimitWindowDisplay {
                 used_percent: 20.0,
+                resets_at_epoch_seconds: None,
                 resets_at: Some("soon".to_string()),
                 window_minutes: Some(60),
             }),
             secondary: Some(RateLimitWindowDisplay {
                 used_percent: 40.0,
+                resets_at_epoch_seconds: None,
                 resets_at: Some("later".to_string()),
                 window_minutes: Some(2 * 60),
             }),

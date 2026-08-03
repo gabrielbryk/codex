@@ -1,0 +1,8 @@
+---
+source: tui/src/bottom_pane/chat_composer_status_line_tests.rs
+expression: terminal.backend()
+---
+"                                                                        "
+"› please make a plan for this                                           "
+"                                                                        "
+"  Create a plan?  shift + tab use Plan mode   esc dismiss               "
