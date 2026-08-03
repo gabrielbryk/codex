@@ -123,21 +123,20 @@ where
 }
 
 #[derive(Clone, Copy)]
-enum PipeStdinMode {
+enum PipeSpawnMode {
     Piped,
-    Null,
+    NullStdin,
+    Contained,
 }
 
-/// On Windows, process-tree containment is best-effort because Tokio returns
-/// only after the root process starts, so job assignment cannot be atomic.
 async fn spawn_process_with_stdin_mode(
     program: &str,
     args: &[String],
     cwd: &Path,
     env: &HashMap<String, String>,
     arg0: &Option<String>,
-    stdin_mode: PipeStdinMode,
     inherited_fds: &[i32],
+    spawn_mode: PipeSpawnMode,
 ) -> Result<SpawnedProcess> {
     if program.is_empty() {
         anyhow::bail!("missing program for pipe spawn");
@@ -175,11 +174,11 @@ async fn spawn_process_with_stdin_mode(
     for arg in args {
         command.arg(arg);
     }
-    match stdin_mode {
-        PipeStdinMode::Piped => {
+    match spawn_mode {
+        PipeSpawnMode::Piped | PipeSpawnMode::Contained => {
             command.stdin(Stdio::piped());
         }
-        PipeStdinMode::Null => {
+        PipeSpawnMode::NullStdin => {
             command.stdin(Stdio::null());
         }
     }
@@ -187,30 +186,74 @@ async fn spawn_process_with_stdin_mode(
     command.stderr(Stdio::piped());
 
     #[cfg(windows)]
-    let job = crate::win::JobObject::create().map(Arc::new);
+    let job = match match spawn_mode {
+        PipeSpawnMode::Contained => crate::win::JobObject::create_contained(),
+        PipeSpawnMode::Piped | PipeSpawnMode::NullStdin => crate::win::JobObject::create(),
+    }
+    .map(Arc::new)
+    {
+        Ok(job) => Some(job),
+        Err(err) => match spawn_mode {
+            PipeSpawnMode::Contained => return Err(err.into()),
+            PipeSpawnMode::Piped | PipeSpawnMode::NullStdin => {
+                log::warn!("Windows pipe process tree containment unavailable: {err}");
+                None
+            }
+        },
+    };
+    #[cfg(windows)]
+    let suspended_spawn = matches!(spawn_mode, PipeSpawnMode::Contained);
+    #[cfg(windows)]
+    if job.is_some() && suspended_spawn {
+        crate::win::configure_suspended_spawn(&mut command);
+    }
+    #[cfg(not(windows))]
+    let _ = spawn_mode;
+
     let mut child = command.spawn()?;
     #[cfg(windows)]
     let windows_terminator = {
-        // Accept the small race: a descendant created between spawn and
-        // assignment is not guaranteed to join the job and can escape termination.
         let pid = child
             .id()
             .ok_or_else(|| io::Error::other("missing child pid"))?;
-        let assigned_job = job.and_then(|job| {
-            let process_handle = child
+        if let Some(job) = job {
+            let assignment_result = child
                 .raw_handle()
-                .ok_or_else(|| io::Error::other("missing child process handle"))?;
-            job.assign_process(process_handle)?;
-            Ok(job)
-        });
-        match assigned_job {
-            Ok(job) => WindowsChildTerminator::Job(job),
-            Err(err) => {
-                log::warn!(
-                    "Windows pipe process tree containment unavailable for pid {pid}: {err}"
-                );
-                WindowsChildTerminator::Process(pid)
+                .ok_or_else(|| io::Error::other("missing child process handle"))
+                .and_then(|process_handle| job.assign_process(process_handle));
+
+            if let Err(err) = assignment_result.as_ref()
+                && suspended_spawn
+            {
+                let _ = child.start_kill();
+                return Err(io::Error::new(
+                    err.kind(),
+                    format!("failed to contain suspended process {pid}: {err}"),
+                )
+                .into());
             }
+
+            if suspended_spawn && let Err(err) = crate::win::resume_suspended_process(pid) {
+                let _ = job.terminate();
+                let _ = child.start_kill();
+                return Err(io::Error::new(
+                    err.kind(),
+                    format!("failed to resume contained process {pid}: {err}"),
+                )
+                .into());
+            }
+
+            match assignment_result {
+                Ok(()) => WindowsChildTerminator::Job(job),
+                Err(err) => {
+                    log::warn!(
+                        "Windows pipe process tree containment unavailable for pid {pid}: {err}"
+                    );
+                    WindowsChildTerminator::Process(pid)
+                }
+            }
+        } else {
+            WindowsChildTerminator::Process(pid)
         }
     };
     #[cfg(unix)]
@@ -272,9 +315,12 @@ async fn spawn_process_with_stdin_mode(
     let exit_code = Arc::new(StdMutex::new(None));
     let wait_exit_code = Arc::clone(&exit_code);
     #[cfg(windows)]
-    let wait_job = match &windows_terminator {
-        WindowsChildTerminator::Job(job) => Some(Arc::clone(job)),
-        WindowsChildTerminator::Process(_) => None,
+    let wait_job = match (&windows_terminator, spawn_mode) {
+        (WindowsChildTerminator::Job(job), PipeSpawnMode::Piped | PipeSpawnMode::NullStdin) => {
+            Some(Arc::clone(job))
+        }
+        (WindowsChildTerminator::Job(_), PipeSpawnMode::Contained)
+        | (WindowsChildTerminator::Process(_), _) => None,
     };
     let wait_handle: JoinHandle<()> = tokio::spawn(async move {
         let code = match child.wait().await {
@@ -340,8 +386,8 @@ pub async fn spawn_process(
         cwd,
         env,
         arg0,
-        PipeStdinMode::Piped,
         inherited_fds,
+        PipeSpawnMode::Piped,
     )
     .await
 }
@@ -362,8 +408,44 @@ pub async fn spawn_process_no_stdin(
         cwd,
         env,
         arg0,
-        PipeStdinMode::Null,
         inherited_fds,
+        PipeSpawnMode::NullStdin,
+    )
+    .await
+}
+
+/// Spawn a non-interactive process contained as tightly as the platform allows,
+/// terminable through the returned [`ProcessHandle`].
+///
+/// Containment strength is platform-specific and is *not* uniform:
+///
+/// - **Windows**: the child is created suspended, assigned to a Job Object that
+///   forbids breakaway, and only then resumed, so no descendant can escape
+///   during spawn. Termination kills the whole tree. Unlike [`spawn_process`],
+///   this function fails rather than falling back to root-process-only
+///   termination when Job Object containment cannot be established. Descendants
+///   remain owned by the returned session after the root exits and are
+///   terminated when that session is terminated or dropped.
+/// - **Unix**: the child leads its own process group and termination signals
+///   that group. This is **best-effort**: a descendant that calls `setsid()` (or
+///   otherwise leaves the group) escapes cleanup. Daemonizing children are not
+///   supported by this API.
+pub async fn spawn_contained_process(
+    program: &str,
+    args: &[String],
+    cwd: &Path,
+    env: &HashMap<String, String>,
+    arg0: &Option<String>,
+    inherited_fds: &[i32],
+) -> Result<SpawnedProcess> {
+    spawn_process_with_stdin_mode(
+        program,
+        args,
+        cwd,
+        env,
+        arg0,
+        inherited_fds,
+        PipeSpawnMode::Contained,
     )
     .await
 }

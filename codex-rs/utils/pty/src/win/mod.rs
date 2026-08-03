@@ -45,11 +45,14 @@ pub(crate) mod conpty;
 mod job;
 mod procthreadattr;
 mod psuedocon;
+mod suspended;
 
 pub use conpty::ConPtySystem;
 pub use job::JobObject;
 pub use psuedocon::PsuedoCon;
 pub use psuedocon::conpty_supported;
+pub(crate) use suspended::configure_suspended_spawn;
+pub(crate) use suspended::resume_suspended_process;
 
 #[derive(Debug)]
 pub struct WinChild {
