@@ -11,6 +11,8 @@ use crate::combine_output_receivers;
 use crate::spawn_from_driver;
 use crate::spawn_pipe_process;
 use crate::spawn_pipe_process_no_stdin;
+#[cfg(unix)]
+use crate::spawn_piped_contained_process;
 use crate::spawn_pty_process;
 
 #[cfg(windows)]
@@ -959,6 +961,46 @@ fn pty_terminate_reaps_child_when_waiter_is_queued() -> anyhow::Result<()> {
 
         Ok(())
     })
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn piped_contained_terminate_kills_background_children_in_same_process_group()
+-> anyhow::Result<()> {
+    let env_map: HashMap<String, String> = std::env::vars().collect();
+    let marker = "__codex_pipe_contained_bg_pid:";
+    let script = format!("sleep 1000 & bg=$!; echo {marker}$bg; wait");
+    let (program, args) = shell_command(&script);
+    let spawned =
+        spawn_piped_contained_process(&program, &args, Path::new("."), &env_map, &None, &[])
+            .await?;
+    spawned.session.close_stdin();
+    let (session, mut output_rx, _exit_rx) = combine_spawned_output(spawned);
+
+    let bg_pid = match wait_for_marker_pid(&mut output_rx, marker, /*timeout_ms*/ 2_000).await {
+        Ok(pid) => pid,
+        Err(err) => {
+            session.terminate();
+            return Err(err);
+        }
+    };
+    assert!(
+        process_exists(bg_pid)?,
+        "expected background child pid {bg_pid} to exist before terminate"
+    );
+
+    session.terminate();
+
+    let exited = wait_for_process_exit(bg_pid, /*timeout_ms*/ 3_000).await?;
+    if !exited {
+        let _ = unsafe { libc::kill(bg_pid, libc::SIGKILL) };
+    }
+    assert!(
+        exited,
+        "background child pid {bg_pid} survived process-group terminate()"
+    );
+
+    Ok(())
 }
 
 #[cfg(unix)]
