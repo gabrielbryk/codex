@@ -1,0 +1,81 @@
+{
+  "cwd": "/remote/workspace",
+  "session_id": "11111111-2222-4333-8444-555555555555",
+  "session_name": "Status work",
+  "model": {
+    "id": "gpt-5.6-terra",
+    "display_name": "Terra"
+  },
+  "workspace": {
+    "current_dir": "/remote/workspace",
+    "project_dir": "/remote",
+    "added_dirs": [
+      "/remote/shared"
+    ],
+    "repo": {
+      "host": "github.com",
+      "owner": "openai",
+      "name": "codex"
+    }
+  },
+  "version": "0.146.0",
+  "fast_mode": true,
+  "exceeds_200k_tokens": false,
+  "effort": {
+    "level": "high"
+  },
+  "thinking": {
+    "enabled": true
+  },
+  "context_window": {
+    "total_input_tokens": 10,
+    "total_output_tokens": 20,
+    "context_window_size": 272000,
+    "used_percentage": 25.0,
+    "remaining_percentage": 75.0,
+    "current_usage": {
+      "input_tokens": 100,
+      "output_tokens": 20,
+      "cache_creation_input_tokens": 10,
+      "cache_read_input_tokens": 5
+    }
+  },
+  "rate_limits": {
+    "five_hour": {
+      "used_percentage": 10.0,
+      "resets_at": 1800000000
+    },
+    "seven_day": {
+      "used_percentage": 20.0,
+      "resets_at": 1800500000
+    }
+  },
+  "extra_usage": {
+    "enabled": true,
+    "used": 2.5,
+    "limit": 50.0
+  },
+  "pr": {
+    "number": 42,
+    "url": "https://github.com/openai/codex/pull/42",
+    "review_state": "approved"
+  },
+  "codex": {
+    "schema_version": 1,
+    "local_process_cwd": "/local/codex",
+    "status": "working",
+    "permissions": "workspace-write",
+    "approval_mode": "on-request",
+    "service_tier": "fast",
+    "workspace_headline": "Implementing status line",
+    "task_progress": {
+      "completed": 2,
+      "total": 3
+    },
+    "git_branch": "feature/status-line",
+    "branch_changes": {
+      "additions": 12,
+      "deletions": 3
+    }
+  }
+}

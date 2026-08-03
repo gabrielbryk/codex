@@ -3542,6 +3542,15 @@
           },
           "type": "array"
         },
+        "status_line_command": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/TuiStatusLineCommand"
+            }
+          ],
+          "default": null,
+          "description": "External command that renders the complete TUI status line.\n\nThis cannot be combined with `status_line`."
+        },
         "status_line_use_colors": {
           "default": true,
           "description": "Color status line items with colors derived from the active syntax theme. Defaults to `true`.",
@@ -4371,6 +4380,32 @@
           "type": "string"
         }
       ]
+    },
+    "TuiStatusLineCommand": {
+      "additionalProperties": false,
+      "description": "Configuration for an external command that renders the complete TUI status line.",
+      "properties": {
+        "command": {
+          "description": "Executable followed by literal arguments. Codex does not invoke a shell.",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "timeout_ms": {
+          "default": 5000,
+          "description": "Maximum command execution time in milliseconds.",
+          "format": "uint64",
+          "maximum": 30000.0,
+          "minimum": 250.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
     },
     "TuiVimNormalKeymap": {
       "additionalProperties": false,
