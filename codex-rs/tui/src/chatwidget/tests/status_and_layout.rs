@@ -14,11 +14,13 @@ fn enable_test_ambient_pet(chat: &mut ChatWidget) {
     chat.install_test_ambient_pet_for_tests(/*animations_enabled*/ false);
 }
 
-fn take_workspace_headline_request_id(
+fn take_workspace_headline_request(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
-) -> u64 {
+) -> (u64, u64) {
     match rx.try_recv() {
-        Ok(AppEvent::RefreshStatusLineWorkspaceHeadline { request_id }) => request_id,
+        Ok(AppEvent::RefreshStatusLineWorkspaceHeadline { owner, request_id }) => {
+            (owner, request_id)
+        }
         event => panic!("expected workspace headline refresh, got {event:?}"),
     }
 }
@@ -203,6 +205,7 @@ async fn token_usage_update_uses_runtime_context_window() {
 async fn status_line_git_summary_items_render_values() {
     let (mut chat, _rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.status_line_git_summary = Some(StatusLineGitSummary {
+        repository: None,
         pull_request: Some(crate::branch_summary::StatusLinePullRequest {
             number: 20_252,
             url: "https://github.com/openai/codex/pull/20252".to_string(),
@@ -244,6 +247,7 @@ async fn raw_output_status_line_value_only_shows_when_enabled() {
 async fn status_line_branch_changes_render_no_changes() {
     let (mut chat, _rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.status_line_git_summary = Some(StatusLineGitSummary {
+        repository: None,
         pull_request: None,
         branch_change_stats: Some(crate::branch_summary::GitBranchDiffStats {
             additions: 0,
@@ -264,8 +268,10 @@ async fn stale_status_line_git_summary_update_is_ignored() {
     chat.status_line_git_summary_pending = true;
 
     chat.set_status_line_git_summary(
+        chat.status_line_async_owner,
         PathBuf::from("/other"),
         StatusLineGitSummary {
+            repository: None,
             pull_request: Some(crate::branch_summary::StatusLinePullRequest {
                 number: 20_252,
                 url: "https://github.com/openai/codex/pull/20252".to_string(),
@@ -278,7 +284,7 @@ async fn stale_status_line_git_summary_update_is_ignored() {
     );
 
     assert!(chat.status_line_git_summary.is_none());
-    assert!(!chat.status_line_git_summary_pending);
+    assert!(chat.status_line_git_summary_pending);
 }
 
 #[tokio::test]
@@ -2894,9 +2900,11 @@ async fn workspace_headline_update_applies_feature_disabled_result() {
     chat.config.tui_status_line = Some(vec!["workspace-headline".to_string()]);
     chat.status_line_workspace_headline = Some("Old headline".to_string());
     let request_id = 3;
+    let owner = chat.status_line_async_owner;
     chat.status_line_workspace_headline_pending_request_id = Some(request_id);
 
     assert!(chat.set_status_line_workspace_headline(
+        owner,
         request_id,
         Ok(crate::workspace_messages::WorkspaceHeadlineFetchResult::FeatureDisabled),
     ));
@@ -2910,9 +2918,11 @@ async fn workspace_headline_update_applies_available_headline() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.config.tui_status_line = Some(vec!["workspace-headline".to_string()]);
     let request_id = 4;
+    let owner = chat.status_line_async_owner;
     chat.status_line_workspace_headline_pending_request_id = Some(request_id);
 
     assert!(chat.set_status_line_workspace_headline(
+        owner,
         request_id,
         Ok(
             crate::workspace_messages::WorkspaceHeadlineFetchResult::Available(Some(
@@ -2926,6 +2936,52 @@ async fn workspace_headline_update_applies_available_headline() {
         Some("Fresh workspace headline".to_string())
     );
     assert!(!chat.status_line_workspace_messages_disabled);
+}
+
+#[tokio::test]
+async fn replacement_widget_rejects_stale_workspace_headline_result() {
+    let (old_chat, _old_rx, _old_op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let old_owner = old_chat.status_line_async_owner;
+    let old_request_id = old_chat.next_status_line_workspace_headline_request_id;
+    let (mut replacement, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let replacement_owner = replacement.status_line_async_owner;
+    let replacement_request_id = replacement.next_status_line_workspace_headline_request_id;
+
+    assert_ne!(replacement_owner, old_owner);
+    assert_eq!(replacement_request_id, old_request_id);
+    replacement.config.tui_status_line = Some(vec!["workspace-headline".to_string()]);
+    replacement.status_line_workspace_headline_pending_request_id = Some(replacement_request_id);
+
+    assert!(!replacement.set_status_line_workspace_headline(
+        old_owner,
+        old_request_id,
+        Ok(
+            crate::workspace_messages::WorkspaceHeadlineFetchResult::Available(Some(
+                "stale workspace headline".to_string(),
+            )),
+        ),
+    ));
+    assert_eq!(
+        (
+            replacement.status_line_workspace_headline.clone(),
+            replacement.status_line_workspace_headline_pending_request_id,
+        ),
+        (None, Some(replacement_request_id))
+    );
+
+    assert!(replacement.set_status_line_workspace_headline(
+        replacement_owner,
+        replacement_request_id,
+        Ok(
+            crate::workspace_messages::WorkspaceHeadlineFetchResult::Available(Some(
+                "current workspace headline".to_string(),
+            )),
+        ),
+    ));
+    assert_eq!(
+        replacement.status_line_workspace_headline,
+        Some("current workspace headline".to_string())
+    );
 }
 
 #[tokio::test]
@@ -2963,7 +3019,8 @@ async fn workspace_headline_fetch_allows_backend_auth_without_chatgpt_account() 
         /*has_chatgpt_account*/ false, /*has_codex_backend_auth*/ true,
     );
 
-    let request_id = take_workspace_headline_request_id(&mut rx);
+    let (owner, request_id) = take_workspace_headline_request(&mut rx);
+    assert_eq!(owner, chat.status_line_async_owner);
     assert_eq!(
         chat.status_line_workspace_headline_pending_request_id,
         Some(request_id)
@@ -2973,6 +3030,7 @@ async fn workspace_headline_fetch_allows_backend_auth_without_chatgpt_account() 
 #[tokio::test]
 async fn account_update_discards_stale_workspace_headline_results() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let owner = chat.status_line_async_owner;
     chat.config.tui_status_line = Some(vec!["workspace-headline".to_string()]);
 
     chat.update_account_state(
@@ -2984,7 +3042,7 @@ async fn account_update_discards_stale_workspace_headline_results() {
         /*has_chatgpt_account*/ true,
         /*has_codex_backend_auth*/ true,
     );
-    let stale_request_id = take_workspace_headline_request_id(&mut rx);
+    let (stale_owner, stale_request_id) = take_workspace_headline_request(&mut rx);
 
     chat.update_account_state(
         Some(StatusAccountDisplay::ChatGpt {
@@ -2995,10 +3053,12 @@ async fn account_update_discards_stale_workspace_headline_results() {
         /*has_chatgpt_account*/ true,
         /*has_codex_backend_auth*/ true,
     );
-    let current_request_id = take_workspace_headline_request_id(&mut rx);
+    let (current_owner, current_request_id) = take_workspace_headline_request(&mut rx);
 
+    assert_eq!((stale_owner, current_owner), (owner, owner));
     assert_ne!(stale_request_id, current_request_id);
     assert!(!chat.set_status_line_workspace_headline(
+        owner,
         stale_request_id,
         Ok(
             crate::workspace_messages::WorkspaceHeadlineFetchResult::Available(Some(
@@ -3016,6 +3076,7 @@ async fn account_update_discards_stale_workspace_headline_results() {
     );
 
     assert!(chat.set_status_line_workspace_headline(
+        owner,
         current_request_id,
         Ok(
             crate::workspace_messages::WorkspaceHeadlineFetchResult::Available(Some(
@@ -3024,6 +3085,7 @@ async fn account_update_discards_stale_workspace_headline_results() {
         ),
     ));
     assert!(!chat.set_status_line_workspace_headline(
+        owner,
         stale_request_id,
         Ok(crate::workspace_messages::WorkspaceHeadlineFetchResult::FeatureDisabled),
     ));
@@ -3193,6 +3255,32 @@ async fn status_line_fast_mode_footer_snapshot() {
         .expect("draw fast-mode footer");
     assert_chatwidget_snapshot!(
         "status_line_fast_mode_footer",
+        normalized_backend_snapshot(terminal.backend())
+    );
+}
+
+#[tokio::test]
+async fn external_status_line_command_footer_snapshot() {
+    use ratatui::Terminal;
+
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.show_welcome_banner = false;
+    chat.config.tui_status_line_command = Some(codex_config::types::TuiStatusLineCommand {
+        command: vec!["formatter".to_string()],
+        timeout_ms: 1_000,
+    });
+    chat.set_status_lines(vec![Line::from("s(m)").magenta(), "ctx 42%".into()]);
+    chat.bottom_pane.set_status_line_enabled(/*enabled*/ true);
+    chat.set_active_agent_label(Some("Robie [explorer]".to_string()));
+
+    let width = 80;
+    let height = chat.desired_height(width);
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("create terminal");
+    terminal
+        .draw(|frame| chat.render(frame.area(), frame.buffer_mut()))
+        .expect("draw external status-line footer");
+    assert_chatwidget_snapshot!(
+        "external_status_line_command_footer",
         normalized_backend_snapshot(terminal.backend())
     );
 }

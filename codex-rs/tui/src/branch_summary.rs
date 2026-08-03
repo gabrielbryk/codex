@@ -37,10 +37,20 @@ pub(crate) struct GitBranchDiffStats {
 /// missing fields as omitted optional UI rather than as a hard lookup failure.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct StatusLineGitSummary {
+    /// Repository identity parsed from the `origin` remote independently of pull-request state.
+    pub(crate) repository: Option<StatusLineRepository>,
     /// Open pull request associated with the current branch or HEAD commit.
     pub(crate) pull_request: Option<StatusLinePullRequest>,
     /// Additions and deletions between `HEAD` and the repository default branch merge base.
     pub(crate) branch_change_stats: Option<GitBranchDiffStats>,
+}
+
+/// Repository identity exposed to status-line formatters.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct StatusLineRepository {
+    pub(crate) host: String,
+    pub(crate) owner: String,
+    pub(crate) name: String,
 }
 
 /// Open GitHub pull request shown by the `pull-request-number` status-line item.
@@ -111,23 +121,69 @@ pub(crate) async fn current_branch_name(
     Some(output.stdout.trim().to_string()).filter(|name| !name.is_empty())
 }
 
-/// Resolves PR and branch-change metadata for one status-line working directory.
+/// Resolves repository, PR, and branch-change metadata for one status-line working directory.
 ///
-/// The PR and diff-stat probes run concurrently because each is independent and both are optional.
+/// The probes run concurrently because each is independent and all are optional.
 /// The returned summary is suitable for caching by `cwd`; callers should discard it if the active
 /// status-line cwd changes before the async lookup completes.
 pub(crate) async fn status_line_git_summary(
     runner: &dyn WorkspaceCommandExecutor,
     cwd: &Path,
 ) -> StatusLineGitSummary {
-    let (pull_request, branch_change_stats) = tokio::join!(
+    let (repository, pull_request, branch_change_stats) = tokio::join!(
+        origin_repository(runner, cwd),
         open_pull_request(runner, cwd),
         branch_diff_stats_to_default_branch(runner, cwd),
     );
     StatusLineGitSummary {
+        repository,
         pull_request,
         branch_change_stats,
     }
+}
+
+/// Resolves repository identity from the `origin` remote without requiring GitHub CLI or a PR.
+async fn origin_repository(
+    runner: &dyn WorkspaceCommandExecutor,
+    cwd: &Path,
+) -> Option<StatusLineRepository> {
+    let output = run_git_command(runner, cwd, &["remote", "get-url", "origin"])
+        .await
+        .ok()?;
+    if !output.success() {
+        return None;
+    }
+
+    repository_from_remote_url(&output.stdout)
+}
+
+fn repository_from_remote_url(remote_url: &str) -> Option<StatusLineRepository> {
+    let remote_url = remote_url.trim();
+    let parsed_url = url::Url::parse(remote_url)
+        .ok()
+        .and_then(|url| Some((url.host_str()?.to_string(), url.path().to_string())));
+    let (host, path) = if let Some(parsed_url) = parsed_url {
+        parsed_url
+    } else {
+        let without_user = remote_url
+            .rsplit_once('@')
+            .map_or(remote_url, |(_, rest)| rest);
+        let (host, path) = without_user.split_once(':')?;
+        (host.to_string(), path.to_string())
+    };
+    let path = path.trim_matches('/');
+    let mut segments = path.split('/');
+    let owner = segments.next()?;
+    let name = segments.next()?.trim_end_matches(".git");
+    if host.is_empty() || owner.is_empty() || name.is_empty() || segments.next().is_some() {
+        return None;
+    }
+
+    Some(StatusLineRepository {
+        host,
+        owner: owner.to_string(),
+        name: name.to_string(),
+    })
 }
 
 /// Counts committed line changes between `HEAD` and the repository default branch.
@@ -518,6 +574,46 @@ mod tests {
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::Mutex;
+
+    #[test]
+    fn repository_parser_supports_common_origin_remote_formats() {
+        let expected = Some(StatusLineRepository {
+            host: "github.com".to_string(),
+            owner: "openai".to_string(),
+            name: "codex".to_string(),
+        });
+
+        assert_eq!(
+            repository_from_remote_url("https://github.com/openai/codex.git\n"),
+            expected
+        );
+        assert_eq!(
+            repository_from_remote_url("ssh://git@github.com/openai/codex.git"),
+            expected
+        );
+        assert_eq!(
+            repository_from_remote_url("git@github.com:openai/codex.git"),
+            expected
+        );
+    }
+
+    #[tokio::test]
+    async fn origin_repository_does_not_require_an_open_pull_request() {
+        let runner = FakeRunner::new(vec![response(
+            &["git", "remote", "get-url", "origin"],
+            /*exit_code*/ 0,
+            "git@github.com:openai/codex.git\n",
+        )]);
+
+        assert_eq!(
+            origin_repository(&runner, Path::new("/repo")).await,
+            Some(StatusLineRepository {
+                host: "github.com".to_string(),
+                owner: "openai".to_string(),
+                name: "codex".to_string(),
+            })
+        );
+    }
 
     #[tokio::test]
     async fn branch_diff_stats_prefers_remote_default_ref_over_stale_local_branch() {
