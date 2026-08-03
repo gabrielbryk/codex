@@ -28,6 +28,7 @@ use codex_config::config_toml::RealtimeAudioConfig;
 use codex_config::config_toml::RealtimeConfig;
 use codex_config::config_toml::ThreadStoreToml;
 use codex_config::config_toml::validate_model_providers;
+use codex_config::format_config_layer_source;
 use codex_config::loader::load_config_layers_state;
 use codex_config::loader::project_trust_key;
 use codex_config::permissions_toml::PermissionsToml;
@@ -36,6 +37,8 @@ use codex_config::types::ApprovalsReviewer;
 use codex_config::types::AuthCredentialsStoreMode;
 use codex_config::types::AuthKeyringBackendKind;
 use codex_config::types::History;
+use codex_config::types::MAX_TUI_STATUS_LINE_COMMAND_TIMEOUT_MS;
+use codex_config::types::MIN_TUI_STATUS_LINE_COMMAND_TIMEOUT_MS;
 use codex_config::types::McpServerConfig;
 use codex_config::types::McpServerDisabledReason;
 use codex_config::types::MemoriesConfig;
@@ -50,6 +53,7 @@ use codex_config::types::ToolSuggestDiscoverable;
 use codex_config::types::TuiKeymap;
 use codex_config::types::TuiNotificationSettings;
 use codex_config::types::TuiPetAnchor;
+use codex_config::types::TuiStatusLineCommand;
 use codex_config::types::UriBasedFileOpener;
 use codex_config::types::WindowsSandboxModeToml;
 use codex_core_plugins::PluginLoadOutcome;
@@ -776,6 +780,9 @@ pub struct Config {
     ///
     /// When unset, the TUI defaults to: `model-with-reasoning` and `current-dir`.
     pub tui_status_line: Option<Vec<String>>,
+
+    /// External command that renders the complete TUI status line.
+    pub tui_status_line_command: Option<TuiStatusLineCommand>,
 
     /// Whether to color status line items with colors from the active syntax theme.
     pub tui_status_line_use_colors: bool,
@@ -3155,6 +3162,73 @@ fn validate_multi_agent_v2_tool_namespace(namespace: Option<&str>) -> std::io::R
     Ok(())
 }
 
+fn validate_tui_status_line_config(
+    tui: Option<&codex_config::types::Tui>,
+    config_layer_stack: &ConfigLayerStack,
+) -> std::io::Result<()> {
+    let Some(tui) = tui else {
+        return Ok(());
+    };
+
+    if tui.status_line.is_some() && tui.status_line_command.is_some() {
+        let source = |key: &str| {
+            config_layer_stack
+                .layers_high_to_low()
+                .into_iter()
+                .find(|layer| {
+                    layer
+                        .config
+                        .get("tui")
+                        .and_then(toml::Value::as_table)
+                        .is_some_and(|tui| tui.contains_key(key))
+                })
+                .map(|layer| {
+                    format_config_layer_source(&layer.name, codex_config::CONFIG_TOML_FILE)
+                })
+        };
+        let status_line_source = source("status_line")
+            .map(|source| format!(" from {source}"))
+            .unwrap_or_default();
+        let command_source = source("status_line_command")
+            .map(|source| format!(" from {source}"))
+            .unwrap_or_default();
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "`tui.status_line`{status_line_source} and `tui.status_line_command`{command_source} are mutually exclusive in the effective configuration; remove one"
+            ),
+        ));
+    }
+
+    let Some(command) = tui.status_line_command.as_ref() else {
+        return Ok(());
+    };
+    if command.command.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "`tui.status_line_command.command` must contain at least one argv element",
+        ));
+    }
+    if command.command[0].is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "`tui.status_line_command.command[0]` must not be empty",
+        ));
+    }
+    if !(MIN_TUI_STATUS_LINE_COMMAND_TIMEOUT_MS..=MAX_TUI_STATUS_LINE_COMMAND_TIMEOUT_MS)
+        .contains(&command.timeout_ms)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "`tui.status_line_command.timeout_ms` must be between {MIN_TUI_STATUS_LINE_COMMAND_TIMEOUT_MS} and {MAX_TUI_STATUS_LINE_COMMAND_TIMEOUT_MS} milliseconds"
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
 impl Config {
     #[cfg(test)]
     async fn load_from_base_config_with_overrides(
@@ -3309,6 +3383,8 @@ impl Config {
                 ),
             ));
         }
+
+        validate_tui_status_line_config(cfg.tui.as_ref(), &config_layer_stack)?;
 
         let tool_suggest = resolve_tool_suggest_config(&cfg, &config_layer_stack);
         let feature_overrides = FeatureOverrides {
@@ -4279,6 +4355,10 @@ impl Config {
                 .map(|t| t.alternate_screen)
                 .unwrap_or_default(),
             tui_status_line: cfg.tui.as_ref().and_then(|t| t.status_line.clone()),
+            tui_status_line_command: cfg
+                .tui
+                .as_ref()
+                .and_then(|t| t.status_line_command.clone()),
             tui_status_line_use_colors: cfg
                 .tui
                 .as_ref()
