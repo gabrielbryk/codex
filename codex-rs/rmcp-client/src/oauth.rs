@@ -914,6 +914,17 @@ fn delete_oauth_tokens_from_file_if_stale(
         None => return Ok(false),
     };
 
+    // Mirror the host/executor collision guard `delete_oauth_tokens_from_file` applies. This
+    // function is the delete path `persist_if_needed` actually takes, so without the same check an
+    // executor-keyed eviction could remove a host-owned credential — exactly what upstream's
+    // fail-closed environment isolation is meant to prevent.
+    if key.starts_with("executor:")
+        && !key.contains('|')
+        && store.get(key).is_some_and(|entry| !entry.executor_owned)
+    {
+        anyhow::bail!("executor OAuth credential key conflicts with a host-owned credential");
+    }
+
     let Some(entry) = store.get(key) else {
         return Ok(false);
     };
@@ -1603,6 +1614,43 @@ mod tests {
         assert!(
             super::load_oauth_tokens_from_file(&on_disk.server_name, &on_disk.url)?.is_some(),
             "rotated credential should remain on disk"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn delete_if_stale_refuses_executor_key_colliding_with_host_credential() -> Result<()> {
+        let _env = TempCodexHome::new();
+        // A legacy host entry (no `executor_owned` marker) parked under an executor-shaped key,
+        // and otherwise perfectly deletable: no refresh token left to protect it. Only the
+        // host/executor collision guard should stop the eviction.
+        let url = "https://example.com/mcp";
+        let key = super::compute_store_key("executor:colliding-server", url)?;
+        let mut store = FallbackFile::new();
+        store.insert(
+            key.clone(),
+            super::FallbackTokenEntry {
+                server_name: "executor:colliding-server".to_string(),
+                server_url: url.to_string(),
+                client_id: "client".to_string(),
+                access_token: "access".to_string(),
+                expires_at: Some(0),
+                refresh_token: None,
+                scopes: Vec::new(),
+                executor_owned: false,
+            },
+        );
+        super::write_fallback_file(&store)?;
+
+        let error = super::delete_oauth_tokens_from_file_if_stale(&key, None)
+            .expect_err("executor-keyed delete must fail closed against a host-owned entry");
+        assert!(
+            error.to_string().contains("conflicts with a host-owned"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            super::read_fallback_file_unlocked()?.is_some_and(|store| store.contains_key(&key)),
+            "host-owned credential must survive a refused executor-keyed delete"
         );
         Ok(())
     }
