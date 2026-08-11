@@ -593,26 +593,30 @@ async fn turn_and_completed_response_spans_record_token_usage() {
 
     mount_sse_once(
         &server,
-        sse(vec![serde_json::json!({
-            "type": "response.completed",
-            "response": {
-                "id": "resp1",
-                "usage": {
-                    "input_tokens": 3,
-                    "input_tokens_details": {
-                        "cached_tokens": 1,
-                        "cache_write_tokens": 2
-                    },
-                    "output_tokens": 5,
-                    "output_tokens_details": { "reasoning_tokens": 2 },
-                    "total_tokens": 9
+        sse(vec![
+            ev_message_item_added("msg-added", "hello"),
+            serde_json::json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp1",
+                    "usage": {
+                        "input_tokens": 3,
+                        "input_tokens_details": {
+                            "cached_tokens": 1,
+                            "cache_write_tokens": 2
+                        },
+                        "output_tokens": 5,
+                        "output_tokens_details": { "reasoning_tokens": 2 },
+                        "total_tokens": 9
+                    }
                 }
-            }
-        })]),
+            }),
+        ]),
     )
     .await;
 
     let test = test_codex()
+        .with_model("gpt-5.4")
         .with_config(|config| {
             config.model_reasoning_effort = Some(ReasoningEffort::High);
             config
@@ -654,6 +658,25 @@ async fn turn_and_completed_response_spans_record_token_usage() {
     );
     assert!(
         logs.lines().any(|line| {
+            line.contains("codex.llm_request{")
+                && line.contains("gen_ai.request.model=gpt-5.4")
+                && line.contains("codex.request.reasoning_effort=high")
+                && line.contains("codex.request.attempt=1")
+                && line.contains("codex.request.attempt_group=\"first\"")
+                && line.contains("codex.request.outcome=\"success\"")
+                && line.contains("codex.request.duration_ms=")
+                && line.contains("codex.request.ttft_ms=")
+                && line.contains("gen_ai.usage.input_tokens=3")
+                && line.contains("gen_ai.usage.cache_read.input_tokens=1")
+                && line.contains("gen_ai.usage.cache_write.input_tokens=2")
+                && line.contains("gen_ai.usage.output_tokens=5")
+                && line.contains("codex.usage.reasoning_output_tokens=2")
+                && line.contains("codex.usage.total_tokens=9")
+        }),
+        "missing request-level model latency and usage span\nlogs:\n{logs}"
+    );
+    assert!(
+        logs.lines().any(|line| {
             line.contains("turn{otel.name=\"session_task.turn\"")
                 && line.contains("codex.turn.reasoning_effort=high")
                 && line.contains("codex.turn.token_usage.input_tokens=3")
@@ -665,6 +688,78 @@ async fn turn_and_completed_response_spans_record_token_usage() {
                 && line.contains("codex.turn.token_usage.total_tokens=9")
         }),
         "missing regular turn span token usage\nlogs:\n{logs}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn model_request_spans_record_retry_attempts_and_outcomes() {
+    let buffer: &'static Mutex<Vec<u8>> = Box::leak(Box::new(Mutex::new(Vec::new())));
+    let subscriber = tracing_subscriber::fmt()
+        .with_level(true)
+        .with_ansi(false)
+        .with_max_level(Level::TRACE)
+        .with_span_events(FmtSpan::FULL)
+        .with_writer(MockWriter::new(buffer))
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let server = start_mock_server().await;
+    mount_response_once(
+        &server,
+        sse_response(sse(vec![ev_message_item_added(
+            "msg-incomplete",
+            "partial",
+        )])),
+    )
+    .await;
+    mount_response_once(
+        &server,
+        sse_response(sse(vec![ev_completed("resp-retry-success")])),
+    )
+    .await;
+
+    let TestCodex { codex, .. } = test_codex()
+        .with_model("gpt-5.4")
+        .with_config(|config| {
+            config.model_provider.request_max_retries = Some(0);
+            config.model_provider.stream_max_retries = Some(1);
+            config
+                .features
+                .disable(Feature::GhostCommit)
+                .expect("test config should allow feature update");
+        })
+        .build(&server)
+        .await
+        .unwrap();
+
+    codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "hello".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await
+        .unwrap();
+
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    let logs = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
+    assert!(
+        logs.lines().any(|line| {
+            line.contains("codex.llm_request{")
+                && line.contains("codex.request.attempt=1")
+                && line.contains("codex.request.attempt_group=\"first\"")
+                && line.contains("codex.request.outcome=\"error\"")
+        }),
+        "missing failed first model request attempt\nlogs:\n{logs}"
+    );
+    assert!(
+        logs.lines().any(|line| {
+            line.contains("codex.llm_request{")
+                && line.contains("codex.request.attempt=2")
+                && line.contains("codex.request.attempt_group=\"retry\"")
+                && line.contains("codex.request.outcome=\"success\"")
+        }),
+        "missing successful retry model request attempt\nlogs:\n{logs}"
     );
 }
 

@@ -111,6 +111,19 @@ pub struct SessionTelemetry {
 }
 
 impl SessionTelemetry {
+    /// Adds correlation and account identity to a request span. Collectors must
+    /// map the account to a bounded label and remove the raw identity before
+    /// exporting the trace to shared storage.
+    pub fn record_llm_request_identity(&self, llm_request_span: &Span) {
+        llm_request_span.record("session.id", self.metadata.conversation_id.to_string());
+        if let Some(account_id) = self.metadata.account_id.as_deref() {
+            llm_request_span.record("user.account_id", account_id);
+        }
+        if let Some(account_email) = self.metadata.account_email.as_deref() {
+            llm_request_span.record("user.email", account_email);
+        }
+    }
+
     pub fn with_auth_env(mut self, auth_env: AuthEnvTelemetryMetadata) -> Self {
         self.metadata.auth_env = auth_env;
         self
@@ -487,6 +500,33 @@ impl SessionTelemetry {
             }
             _ => {}
         }
+    }
+
+    /// Records response usage on the request-level span that owns provider latency.
+    pub fn record_llm_request_response(&self, llm_request_span: &Span, event: &ResponseEvent) {
+        let ResponseEvent::Completed {
+            token_usage: Some(token_usage),
+            ..
+        } = event
+        else {
+            return;
+        };
+
+        llm_request_span.record("gen_ai.usage.input_tokens", token_usage.input_tokens);
+        llm_request_span.record(
+            "gen_ai.usage.cache_read.input_tokens",
+            token_usage.cached_input(),
+        );
+        llm_request_span.record(
+            "gen_ai.usage.cache_write.input_tokens",
+            token_usage.cache_write_input_tokens,
+        );
+        llm_request_span.record("gen_ai.usage.output_tokens", token_usage.output_tokens);
+        llm_request_span.record(
+            "codex.usage.reasoning_output_tokens",
+            token_usage.reasoning_output_tokens,
+        );
+        llm_request_span.record("codex.usage.total_tokens", token_usage.total_tokens);
     }
 
     #[allow(clippy::too_many_arguments)]
