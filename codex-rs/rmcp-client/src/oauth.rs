@@ -908,7 +908,7 @@ fn delete_oauth_tokens_from_file_if_stale(
     key: &str,
     expected: Option<&StoredOAuthTokens>,
 ) -> Result<bool> {
-    let _store_lock = OAuthStoreLock::acquire(OAuthStore::File)?;
+    let _store_lock = OAuthStoreLock::acquire_for_write(OAuthStore::File)?;
     let mut store = match read_fallback_file_unlocked()? {
         Some(store) => store,
         None => return Ok(false),
