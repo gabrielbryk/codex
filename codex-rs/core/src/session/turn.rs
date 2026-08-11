@@ -1378,6 +1378,7 @@ async fn run_sampling_request(
     );
     let max_retries = turn_context.provider.info().stream_max_retries();
     let mut retry_state = ResponsesStreamRetryState::default();
+    let mut request_attempt = 1_u64;
     let mut initial_input = Some(input);
     let mut original_input = None;
     let mut executed_tool_calls_by_output = HashMap::new();
@@ -1414,6 +1415,7 @@ async fn run_sampling_request(
             Arc::clone(&turn_diff_tracker),
             &prompt,
             cancellation_token.child_token(),
+            request_attempt,
         )
         .await
         {
@@ -1454,6 +1456,7 @@ async fn run_sampling_request(
             ResponsesStreamRequest::Sampling,
         )
         .await?;
+        request_attempt = request_attempt.saturating_add(1);
         turn_context.turn_timing_state.record_sampling_retry();
     }
 }
@@ -2205,6 +2208,7 @@ async fn try_run_sampling_request(
     turn_diff_tracker: SharedTurnDiffTracker,
     prompt: &Prompt,
     cancellation_token: CancellationToken,
+    request_attempt: u64,
 ) -> CodexResult<SamplingRequestResult> {
     let turn_context = Arc::clone(&step_context.turn);
     feedback_tags!(
@@ -2226,7 +2230,41 @@ async fn try_run_sampling_request(
         .features
         .enabled(Feature::ConcurrentReasoningSummaries)
         && turn_context.provider.info().is_openai();
-    let mut stream = client_session
+    let reasoning_effort = step_context
+        .reasoning_effort
+        .clone()
+        .or_else(|| step_context.model_info.default_reasoning_level.clone())
+        .map(|effort| effort.to_string())
+        .unwrap_or_else(|| "default".to_string());
+    let request_started_at = std::time::Instant::now();
+    let request_attempt_group = if request_attempt == 1 {
+        "first"
+    } else {
+        "retry"
+    };
+    let llm_request_span = trace_span!(
+        "codex.llm_request",
+        gen_ai.request.model = %step_context.model_info.slug,
+        codex.request.reasoning_effort = %reasoning_effort,
+        codex.request.attempt = request_attempt,
+        codex.request.attempt_group = request_attempt_group,
+        codex.request.duration_ms = field::Empty,
+        codex.request.ttft_ms = field::Empty,
+        codex.request.outcome = field::Empty,
+        session.id = field::Empty,
+        user.account_id = field::Empty,
+        user.email = field::Empty,
+        gen_ai.usage.input_tokens = field::Empty,
+        gen_ai.usage.cache_read.input_tokens = field::Empty,
+        gen_ai.usage.cache_write.input_tokens = field::Empty,
+        gen_ai.usage.output_tokens = field::Empty,
+        codex.usage.reasoning_output_tokens = field::Empty,
+        codex.usage.total_tokens = field::Empty,
+    );
+    sess.services
+        .session_telemetry
+        .record_llm_request_identity(&llm_request_span);
+    let stream_result = client_session
         .stream(
             prompt,
             &step_context.model_info,
@@ -2239,7 +2277,26 @@ async fn try_run_sampling_request(
         )
         .instrument(trace_span!("stream_request"))
         .or_cancel(&cancellation_token)
-        .await??;
+        .await;
+    let mut stream = match stream_result {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(err)) => {
+            llm_request_span.record("codex.request.outcome", "error");
+            llm_request_span.record(
+                "codex.request.duration_ms",
+                request_started_at.elapsed().as_millis() as u64,
+            );
+            return Err(err);
+        }
+        Err(codex_async_utils::CancelErr::Cancelled) => {
+            llm_request_span.record("codex.request.outcome", "cancelled");
+            llm_request_span.record(
+                "codex.request.duration_ms",
+                request_started_at.elapsed().as_millis() as u64,
+            );
+            return Err(CodexErr::TurnAborted);
+        }
+    };
     let mut in_flight: FuturesOrdered<BoxFuture<'static, CodexResult<ResponseInputItem>>> =
         FuturesOrdered::new();
     let mut needs_follow_up = false;
@@ -2253,19 +2310,15 @@ async fn try_run_sampling_request(
     let mut should_emit_token_count = false;
     const MAX_ANALYTICS_TOOL_CALL_IDS_PER_RESPONSE: usize = 256;
     let mut analytics_tool_call_ids = Vec::new();
-    let reasoning_effort = step_context
-        .reasoning_effort
-        .clone()
-        .or_else(|| step_context.model_info.default_reasoning_level.clone())
-        .map(|effort| effort.to_string())
-        .unwrap_or_else(|| "default".to_string());
     let plan_mode = turn_context.mode == ModeKind::Plan;
     let mut assistant_message_stream_parsers = AssistantMessageStreamParsers::new(plan_mode);
     let mut plan_mode_state = plan_mode.then(|| PlanModeStreamState::new(&turn_context.sub_id));
     let defer_streamed_turn_items_for_contributors =
         !sess.services.extensions.turn_item_contributors().is_empty();
     let mut active_item_is_streaming_to_client = false;
-    let receiving_span = trace_span!("receiving_stream");
+    let receiving_span = trace_span!(parent: &llm_request_span, "receiving_stream");
+    let mut recorded_ttft = false;
+    let mut provider_completed = false;
     let outcome: CodexResult<SamplingRequestResult> = loop {
         let handle_responses = trace_span!(
             parent: &receiving_span,
@@ -2307,6 +2360,16 @@ async fn try_run_sampling_request(
         sess.services
             .session_telemetry
             .record_responses(&handle_responses, &event);
+        sess.services
+            .session_telemetry
+            .record_llm_request_response(&llm_request_span, &event);
+        if !recorded_ttft && matches!(event, ResponseEvent::OutputItemAdded(_)) {
+            llm_request_span.record(
+                "codex.request.ttft_ms",
+                request_started_at.elapsed().as_millis() as u64,
+            );
+            recorded_ttft = true;
+        }
         record_turn_ttft_metric(&turn_context, &event).await;
 
         match event {
@@ -2560,6 +2623,7 @@ async fn try_run_sampling_request(
                 token_usage,
                 end_turn,
             } => {
+                provider_completed = true;
                 sess.services
                     .analytics_events_client
                     .track_code_mode_tool_call(
@@ -2750,6 +2814,23 @@ async fn try_run_sampling_request(
             }
         }
     };
+    let request_outcome = if provider_completed {
+        "success"
+    } else if matches!(
+        outcome.as_ref().err().map(CodexErr::details),
+        Some(CodexErrorDetails::TurnAborted)
+    ) {
+        "cancelled"
+    } else {
+        "error"
+    };
+    llm_request_span.record("codex.request.outcome", request_outcome);
+    llm_request_span.record(
+        "codex.request.duration_ms",
+        request_started_at.elapsed().as_millis() as u64,
+    );
+    drop(receiving_span);
+    drop(llm_request_span);
     drop(sampling_timing_guard);
 
     flush_assistant_text_segments_all(
