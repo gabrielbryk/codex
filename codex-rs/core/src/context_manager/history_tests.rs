@@ -1594,13 +1594,19 @@ fn backfill_missing_call_outputs_persists_repair_once() {
     let injected = h.backfill_missing_call_outputs();
 
     assert_eq!(injected, vec![synthetic_output.clone()]);
-    assert_eq!(h.raw_items(), vec![call.clone(), synthetic_output.clone()]);
+    assert_eq!(
+        h.raw_items().cloned().collect::<Vec<_>>(),
+        vec![call.clone(), synthetic_output.clone()]
+    );
 
     // The repair is durable, so a later pass finds nothing to inject and cannot re-log.
     let second_pass = h.backfill_missing_call_outputs();
 
     assert_eq!(second_pass, Vec::new());
-    assert_eq!(h.raw_items(), vec![call.clone(), synthetic_output.clone()]);
+    assert_eq!(
+        h.raw_items().cloned().collect::<Vec<_>>(),
+        vec![call.clone(), synthetic_output.clone()]
+    );
     assert_eq!(
         h.clone().for_prompt(&default_input_modalities()),
         vec![call, synthetic_output]
