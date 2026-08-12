@@ -14,11 +14,20 @@ use crate::context::ContextualUserFragment;
 use crate::context::UnsupportedMedia;
 use crate::util::error_or_panic;
 use tracing::info;
+use tracing::warn;
 
 // Changing this value would change model-visible IDs and invalidate prompt caches.
 const SYNTHETIC_OUTPUT_ID_NAMESPACE: Uuid = Uuid::from_u128(0x90d38d3e_6a5b_4d52_bfe2_2f1e634bfac4);
 
-pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItemEnvelope>) {
+/// Inserts a synthetic "aborted" output after every call whose real output is missing and
+/// returns the injected items in insertion order.
+///
+/// Callers that only normalize an outgoing request discard the repair, so the same orphaned
+/// call is re-detected on the next pass. Callers that own durable history should persist the
+/// returned items so the repair survives retries, later turns, and resumes.
+pub(crate) fn ensure_call_outputs_present(
+    items: &mut Vec<ResponseItemEnvelope>,
+) -> Vec<ResponseItem> {
     let mut function_output_ids = HashSet::new();
     let mut tool_search_output_ids = HashSet::new();
     let mut custom_tool_output_ids = HashSet::new();
@@ -87,9 +96,10 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItemEnvelope>)
             ResponseItem::CustomToolCall { id, call_id, .. }
                 if !custom_tool_output_ids.contains(call_id.as_str()) =>
             {
-                error_or_panic(format!(
-                    "Custom tool call output is missing for call id: {call_id}"
-                ));
+                // Deliberately not `error_or_panic`: history owners repair this in place, but
+                // request-only normalization (compaction, prompt debug) still re-detects the
+                // same orphan on every pass, so a repeat must not escalate to an error.
+                warn!("Custom tool call output is missing for call id: {call_id}");
                 missing_outputs_to_insert.push((
                     idx,
                     ResponseItemEnvelope::new(ResponseItem::CustomToolCallOutput {
@@ -131,10 +141,17 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItemEnvelope>)
         custom_tool_output_ids,
     ));
 
+    let injected: Vec<ResponseItem> = missing_outputs_to_insert
+        .iter()
+        .map(|(_, output_item)| output_item.item.clone())
+        .collect();
+
     // Insert synthetic outputs in reverse index order to avoid re-indexing.
     for (idx, output_item) in missing_outputs_to_insert.into_iter().rev() {
         items.insert(idx + 1, output_item);
     }
+
+    injected
 }
 
 /// Derives a stable ID for a prompt-only output from its source call's item ID.

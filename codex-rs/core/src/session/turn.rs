@@ -368,8 +368,11 @@ pub(crate) async fn run_turn(
                 .record_step_world_state_if_changed(&world_state, step_context.as_ref())
                 .await?;
 
-            // Construct the input that we will send to the model.
+            // Construct the input that we will send to the model. Repair orphaned tool calls
+            // in the durable history first so the synthetic outputs are recorded once instead
+            // of being re-derived for every request.
             let sampling_request_input: Vec<ResponseItem> = async {
+                sess.backfill_missing_call_outputs().await;
                 sess.clone_history()
                     .await
                     .for_prompt(&step_context.model_info.input_modalities)
@@ -1382,6 +1385,9 @@ async fn run_sampling_request(
         let prompt_input = if let Some(input) = initial_input.take() {
             input
         } else {
+            // Retries rebuild the prompt from history; persist the orphan repair so a call
+            // that lost its output is not re-detected on every retry.
+            sess.backfill_missing_call_outputs().await;
             sess.clone_history()
                 .await
                 .for_prompt(&step_context.model_info.input_modalities)
