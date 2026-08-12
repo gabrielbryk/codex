@@ -21,6 +21,14 @@ socket inode, loaded source hash, routing revision, and a stable-socket RPC prob
 an unreadable connection inventory as empty. A failed replacement restores the old listener first,
 then lets replacement-accepted streams drain before cleanup.
 
+The `/proc/<pid>/fd` accounting reconcile runs in a dedicated user oneshot that deliberately has no
+systemd mount namespace. `PrivateTmp`, `ProtectSystem`, and `ProtectHome` make those same-UID
+descriptor links unreadable on this host; the broader generation rollout remains sandboxed in its
+separate service. Finalization requires two zero-connection samples separated by a bounded
+confirmation window. All socket-health writers classify persisted handover and failback phases as
+`starting`, preventing a legacy direct app-server from claiming the temporarily absent canonical
+pathname.
+
 TUI process replacement, automatic reconnect/reattach, and mid-turn connection migration remain
 later phases. Natural-drain v1 keeps each accepted connection on its original server and therefore
 preserves live work without changing TUI code. Remote control now transfers exactly once at the
