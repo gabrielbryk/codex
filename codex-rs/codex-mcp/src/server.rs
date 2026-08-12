@@ -55,6 +55,18 @@ impl EffectiveMcpServer {
     pub fn is_agent_plugin(&self) -> bool {
         self.agent_plugin
     }
+
+    /// Adds runtime-only attribution to a local stdio server's environment.
+    ///
+    /// This is intentionally applied after configuration resolution so host
+    /// process-placement metadata never becomes persisted user configuration.
+    pub fn with_stdio_runtime_env(mut self, name: &str, value: String) -> Self {
+        if let McpServerTransportConfig::Stdio { env, .. } = &mut self.config.transport {
+            env.get_or_insert_with(HashMap::new)
+                .insert(name.to_string(), value);
+        }
+        self
+    }
 }
 
 pub(crate) fn has_explicit_http_authorization(config: &McpServerConfig) -> bool {
