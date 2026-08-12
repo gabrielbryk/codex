@@ -266,19 +266,21 @@ impl ExecCommandHandler {
             turn_environment.config.allow_login_shell,
         )
         .map_err(FunctionCallError::RespondToModel)?;
-        let mut command = resolved_command.command;
+        let command = resolved_command.command;
         let shell_type = resolved_command.shell_type;
-        if !environment.is_remote() {
-            command = wrap_local_command_for_scope(
-                command,
+        let command_for_display = codex_shell_command::parse_command::shlex_join(&command);
+        let execution_command = if environment.is_remote() {
+            command.clone()
+        } else {
+            wrap_local_command_for_scope(
+                command.clone(),
                 std::env::var(CODEX_COMMAND_SCOPE_EXEC_ENV).ok(),
                 &session.thread_id.to_string(),
                 &turn.sub_id,
                 &call_id,
                 &std::env::var("CODEX_HOME").unwrap_or_else(|_| "default".to_string()),
-            );
-        }
-        let command_for_display = codex_shell_command::parse_command::shlex_join(&command);
+            )
+        };
 
         let ExecCommandArgs {
             tty,
@@ -389,7 +391,7 @@ impl ExecCommandHandler {
         match manager
             .exec_command(
                 ExecCommandRequest {
-                    command,
+                    command: execution_command,
                     shell_type,
                     hook_command: hook_command.clone(),
                     process_id,
