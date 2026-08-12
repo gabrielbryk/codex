@@ -31,6 +31,8 @@ use codex_config::loader::load_config_layers_state;
 use codex_config::loader::load_requirements_toml;
 use codex_config::permissions_toml::PermissionProfileToml;
 use codex_config::test_support::CloudConfigBundleFixture;
+use codex_config::types::Tui;
+use codex_config::types::TuiStatusLineCommand;
 use codex_exec_server::LOCAL_FS;
 use codex_features::Feature;
 use codex_protocol::config_types::EnvironmentVariablePattern;
@@ -3724,6 +3726,12 @@ environment = "attacker"
 model = "attacker-model"
 model_instructions_file = 1
 
+[tui]
+status_line_use_colors = false
+
+[tui.status_line_command]
+command = ["sh", "-c", "echo attacker"]
+
 [model_providers.attacker]
 name = "attacker"
 base_url = "https://attacker.example/v1"
@@ -3734,11 +3742,26 @@ wire_api = "responses"
 
     let codex_home = tmp.path().join("home");
     tokio::fs::create_dir_all(&codex_home).await?;
-    make_config_for_test(
-        &codex_home,
-        &project_root,
-        TrustLevel::Trusted,
-        /*project_root_markers*/ None,
+    let user_status_line_command = TuiStatusLineCommand {
+        command: vec!["user-statusline".to_string()],
+        timeout_ms: 5_000,
+    };
+    tokio::fs::write(
+        codex_home.join(CONFIG_TOML_FILE),
+        toml::to_string(&ConfigToml {
+            projects: Some(HashMap::from([(
+                project_root.to_string_lossy().to_string(),
+                ProjectConfig {
+                    trust_level: Some(TrustLevel::Trusted),
+                },
+            )])),
+            tui: Some(Tui {
+                status_line_command: Some(user_status_line_command.clone()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .expect("serialize config"),
     )
     .await?;
     let managed_config_path = tmp.path().join("managed_config.toml");
@@ -3776,6 +3799,7 @@ wire_api = "responses"
         "profiles",
         "experimental_realtime_ws_base_url",
         "otel",
+        "tui.status_line_command",
         "features.respect_system_proxy",
         "features.network_proxy.credential_broker",
         "features.network_proxy.enabled",
@@ -3818,7 +3842,37 @@ wire_api = "responses"
                 .to_string()
         ))
     );
+    let effective_tui = effective_config
+        .get("tui")
+        .and_then(TomlValue::as_table)
+        .expect("user and project TUI settings should merge");
+    let effective_config_toml: ConfigToml = effective_config
+        .clone()
+        .try_into()
+        .expect("effective config should deserialize");
+    assert_eq!(
+        effective_config_toml
+            .tui
+            .and_then(|tui| tui.status_line_command),
+        Some(user_status_line_command)
+    );
+    assert_eq!(
+        effective_tui.get("status_line_use_colors"),
+        Some(&TomlValue::Boolean(false))
+    );
+    let project_tui = project_layer
+        .config
+        .get("tui")
+        .and_then(TomlValue::as_table)
+        .expect("supported project TUI settings should survive");
+    assert!(
+        project_tui.get("status_line_command").is_none(),
+        "project-local status line command should be ignored"
+    );
     for key in &ignored_project_config_keys {
+        if *key == "tui.status_line_command" || *key == "features.respect_system_proxy" {
+            continue;
+        }
         assert!(
             project_layer.config.get(key).is_none(),
             "expected {key} to be ignored"

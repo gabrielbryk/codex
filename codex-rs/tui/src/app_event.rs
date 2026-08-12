@@ -578,6 +578,7 @@ pub(crate) enum AppEvent {
 
     /// Fetch workspace messages for the status-line headline item.
     RefreshStatusLineWorkspaceHeadline {
+        owner: u64,
         request_id: u64,
     },
 
@@ -1246,19 +1247,24 @@ pub(crate) enum AppEvent {
 
     /// Async update of the current git branch for status line rendering.
     StatusLineBranchUpdated {
+        owner: u64,
         cwd: PathBuf,
         branch: Option<String>,
     },
     /// Async update of Git summary fields for status line rendering.
     StatusLineGitSummaryUpdated {
+        owner: u64,
         cwd: PathBuf,
         summary: crate::chatwidget::StatusLineGitSummary,
     },
     /// Async update of the workspace notification headline for status line rendering.
     StatusLineWorkspaceHeadlineUpdated {
+        owner: u64,
         request_id: u64,
         result: Result<crate::workspace_messages::WorkspaceHeadlineFetchResult, String>,
     },
+    /// Local external formatter completion, guarded by widget owner and generation.
+    StatusLineCommandFinished(crate::status_line_command::runner::StatusLineCommandCompletion),
     /// Apply a user-confirmed status-line item ordering/selection.
     StatusLineSetup {
         items: Vec<StatusLineItem>,

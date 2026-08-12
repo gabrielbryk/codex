@@ -143,6 +143,35 @@ pub(crate) fn visible_lines_ref(lines: &[HyperlinkLine]) -> Vec<Line<'_>> {
         .collect()
 }
 
+/// Preserve source hyperlink ranges that remain inside a visible prefix-transformed line.
+///
+/// Footer layout may append context or truncate with an ellipsis after the formatter output. The
+/// common visible prefix keeps the original column coordinates stable while excluding links that
+/// were truncated away.
+pub(crate) fn remap_hyperlinks_to_visible_line(
+    source: &HyperlinkLine,
+    line: Line<'static>,
+) -> HyperlinkLine {
+    let source_text = line_text(&source.line);
+    let visible_text = line_text(&line);
+    let common_prefix = source_text
+        .chars()
+        .zip(visible_text.chars())
+        .take_while(|(source, visible)| source == visible)
+        .map(|(ch, _)| ch)
+        .collect::<String>();
+    let common_width = display_width(&common_prefix);
+    let hyperlinks = source
+        .hyperlinks
+        .iter()
+        .filter_map(|link| {
+            let columns = link.columns.start..link.columns.end.min(common_width);
+            (columns.start < columns.end).then(|| link.with_columns(columns))
+        })
+        .collect();
+    HyperlinkLine { line, hyperlinks }
+}
+
 pub(crate) fn plain_hyperlink_lines(lines: Vec<Line<'static>>) -> Vec<HyperlinkLine> {
     lines.into_iter().map(HyperlinkLine::new).collect()
 }
@@ -766,6 +795,26 @@ mod tests {
                     )],
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn visible_prefix_remap_clips_a_truncated_hyperlink() {
+        let mut source = HyperlinkLine::new(Line::from("prefix linked tail"));
+        source.hyperlinks.push(TerminalHyperlink::web(
+            /*columns*/ 7..13,
+            "https://example.com".to_string(),
+        ));
+
+        assert_eq!(
+            remap_hyperlinks_to_visible_line(&source, Line::from("prefix lin…")),
+            HyperlinkLine {
+                line: Line::from("prefix lin…"),
+                hyperlinks: vec![TerminalHyperlink::web(
+                    /*columns*/ 7..10,
+                    "https://example.com".to_string(),
+                )],
+            }
         );
     }
 

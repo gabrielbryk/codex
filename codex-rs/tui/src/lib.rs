@@ -183,6 +183,7 @@ mod startup_orchestration;
 mod startup_preflight;
 mod status;
 mod status_indicator_widget;
+mod status_line_command;
 mod streaming;
 mod style;
 mod task_mentions;
