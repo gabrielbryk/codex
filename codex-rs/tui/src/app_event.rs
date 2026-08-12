@@ -51,6 +51,7 @@ use crate::chatwidget::ConnectorScopeGeneration;
 use crate::chatwidget::ThreadUsageOutcome;
 use crate::chatwidget::UserMessage;
 use crate::goal_files::GoalDraft;
+use codex_app_server_client::ReconnectEpoch;
 use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::ServerIdentity;
 use codex_config::types::ApprovalsReviewer;
@@ -230,6 +231,7 @@ pub(crate) enum AppEvent {
         result: Result<(), String>,
     },
     AppServerReconnected {
+        epoch: ReconnectEpoch,
         previous: Option<ServerIdentity>,
         current: Option<ServerIdentity>,
     },

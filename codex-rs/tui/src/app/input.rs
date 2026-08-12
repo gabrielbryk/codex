@@ -3,6 +3,7 @@
 //! This module owns global key bindings that sit above ChatWidget, including transcript overlay
 //! entry, Ctrl-L clear, external editor launch, and agent navigation shortcuts.
 
+use super::displayed_thread_transition::DisplayedThreadTransitionReason;
 use super::*;
 use crate::app_backtrack::SIDE_EDIT_PREVIOUS_UNAVAILABLE_MESSAGE;
 
@@ -201,7 +202,12 @@ impl App {
                 .await
             {
                 let _ = self
-                    .select_agent_thread_and_discard_side(tui, app_server, thread_id)
+                    .select_agent_thread_and_discard_side(
+                        tui,
+                        app_server,
+                        thread_id,
+                        DisplayedThreadTransitionReason::AdjacentThreadNavigation,
+                    )
                     .await;
             }
             return;
@@ -218,7 +224,12 @@ impl App {
                 .await
             {
                 let _ = self
-                    .select_agent_thread_and_discard_side(tui, app_server, thread_id)
+                    .select_agent_thread_and_discard_side(
+                        tui,
+                        app_server,
+                        thread_id,
+                        DisplayedThreadTransitionReason::AdjacentThreadNavigation,
+                    )
                     .await;
             }
             return;

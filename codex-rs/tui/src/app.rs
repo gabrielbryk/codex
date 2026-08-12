@@ -216,6 +216,7 @@ pub(crate) mod app_server_requests;
 mod background_requests;
 mod config_persistence;
 mod connector_mentions;
+mod displayed_thread_transition;
 mod event_dispatch;
 mod file_change_approvals;
 mod history_pagination;
