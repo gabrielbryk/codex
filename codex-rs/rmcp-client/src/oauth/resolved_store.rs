@@ -14,7 +14,7 @@ use super::OAuthStoreLockFailure;
 use super::StoredOAuthTokens;
 use super::compute_store_key;
 use super::delete_oauth_tokens_from_direct_keyring;
-use super::delete_oauth_tokens_from_file;
+use super::delete_oauth_tokens_from_file_if_stale;
 use super::delete_oauth_tokens_from_secrets_keyring;
 use super::load_oauth_tokens_from_file;
 use super::load_oauth_tokens_from_file_with_lock_held;
@@ -108,17 +108,24 @@ impl ResolvedOAuthCredentialStore {
         }
     }
 
-    /// Deletes credentials only from this already-resolved authority.
-    pub(crate) fn delete<K: KeyringStore + Clone + 'static>(
+    /// Deletes credentials only from this already-resolved authority, refusing to evict a File
+    /// entry that still holds a usable refresh token or that no longer matches `expected` (the
+    /// token last held in memory).
+    ///
+    /// This guards the `None` persist branch against a transient in-memory refresh miss wiping a
+    /// still-valid on-disk refresh token. Keyring entries are stored per-credential and are not
+    /// subject to that aggregate-store race, so their behavior matches [`Self::delete`].
+    pub(crate) fn delete_if_stale<K: KeyringStore + Clone + 'static>(
         self,
         keyring_store: &K,
         server_name: &str,
         url: &str,
+        expected: Option<&StoredOAuthTokens>,
     ) -> Result<bool> {
         match self {
             Self::File => {
                 let key = compute_store_key(server_name, url)?;
-                delete_oauth_tokens_from_file(&key)
+                delete_oauth_tokens_from_file_if_stale(&key, expected)
             }
             Self::Keyring(AuthKeyringBackendKind::Direct) => {
                 delete_oauth_tokens_from_direct_keyring(keyring_store, server_name, url)

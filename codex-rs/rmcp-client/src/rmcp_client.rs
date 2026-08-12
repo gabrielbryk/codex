@@ -984,6 +984,16 @@ impl RmcpClient {
         Ok(())
     }
 
+    /// Reactive recovery for a live 401: forces an authoritative OAuth refresh (bypassing the
+    /// expiry gate) so the caller can retry the rejected operation once. No-op when the transport
+    /// is not OAuth-backed.
+    async fn refresh_oauth_after_unauthorized(&self) -> Result<()> {
+        if let Some(runtime) = self.oauth_persistor().await {
+            runtime.refresh_after_unauthorized().await?;
+        }
+        Ok(())
+    }
+
     async fn create_pending_transport(
         transport_recipe: &TransportRecipe,
     ) -> Result<PendingTransport> {
@@ -1286,6 +1296,26 @@ impl RmcpClient {
                 .await
                 .map_err(Into::into)
             }
+            Err(error) if Self::is_auth_required_401(&error) => {
+                // A live 401 means the access token was rejected mid-session — early server-side
+                // revocation, a missing/incorrect stored expiry, or clock skew that the proactive
+                // pre-refresh could not see. Force an authoritative refresh and retry the operation
+                // exactly once against the same service (the shared AuthorizationManager now holds
+                // the refreshed token). A dead refresh token surfaces as AuthorizationRequired and
+                // propagates here so the user is prompted to reauthorize. The Fix-#1 delete guard
+                // ensures a failed refresh never evicts a still-valid stored refresh token.
+                self.refresh_oauth_after_unauthorized().await?;
+                let recovered_service = self.service().await?;
+                Self::run_service_operation_with_transient_retries(
+                    recovered_service,
+                    label,
+                    timeout,
+                    self.elicitation_pause_state.clone(),
+                    &operation,
+                )
+                .await
+                .map_err(Into::into)
+            }
             Err(error) => Err(error.into()),
         }
     }
@@ -1405,6 +1435,22 @@ impl RmcpClient {
                     )
                 )
             })
+    }
+
+    /// Detects a live `401 Unauthorized` (RMCP `AuthRequired`) surfaced by the streamable HTTP
+    /// transport during an in-session operation, so it can be recovered by an authoritative OAuth
+    /// refresh + single retry rather than propagating to the user.
+    fn is_auth_required_401(error: &ClientOperationError) -> bool {
+        let ClientOperationError::Service(rmcp::service::ServiceError::TransportSend(error)) =
+            error
+        else {
+            return false;
+        };
+
+        error
+            .error
+            .downcast_ref::<StreamableHttpError<StreamableHttpClientAdapterError>>()
+            .is_some_and(|error| matches!(error, StreamableHttpError::AuthRequired(_)))
     }
 
     async fn reinitialize_after_session_expiry(
