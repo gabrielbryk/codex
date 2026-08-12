@@ -14302,6 +14302,13 @@
       ],
       "type": "object"
     },
+    "ServerGenerationState": {
+      "enum": [
+        "accepting",
+        "draining"
+      ],
+      "type": "string"
+    },
     "ServerNotification": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "description": "Notification sent from the server to the client.",

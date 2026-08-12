@@ -16,6 +16,7 @@ use crate::extensions::thread_extensions;
 use crate::external_agent_migration::ExternalAgentConfigRequestProcessor;
 use crate::external_agent_migration::ExternalAgentConfigRequestProcessorArgs;
 use crate::fs_watch::FsWatchManager;
+use crate::generation_lifecycle::GenerationLifecycle;
 use crate::outgoing_message::ConnectionId;
 use crate::outgoing_message::ConnectionRequestId;
 use crate::outgoing_message::OutgoingMessageSender;
@@ -113,6 +114,7 @@ pub(crate) struct MessageProcessor {
     external_agent_config_processor: ExternalAgentConfigRequestProcessor,
     feedback_processor: FeedbackRequestProcessor,
     fs_processor: FsRequestProcessor,
+    generation_lifecycle: GenerationLifecycle,
     git_processor: GitRequestProcessor,
     initialize_processor: InitializeRequestProcessor,
     marketplace_processor: MarketplaceRequestProcessor,
@@ -432,6 +434,7 @@ impl MessageProcessor {
             state_db.clone(),
             Arc::clone(&goal_service),
         );
+        let generation_lifecycle = GenerationLifecycle::from_environment();
         let thread_processor = ThreadRequestProcessor::new(
             auth_manager.clone(),
             Arc::clone(&thread_manager),
@@ -449,6 +452,7 @@ impl MessageProcessor {
             log_db,
             Arc::clone(&skills_watcher),
             config_warnings,
+            generation_lifecycle.clone(),
         );
         let turn_processor = TurnRequestProcessor::new(
             auth_manager.clone(),
@@ -514,6 +518,7 @@ impl MessageProcessor {
             external_agent_config_processor,
             feedback_processor,
             fs_processor,
+            generation_lifecycle,
             git_processor,
             initialize_processor,
             marketplace_processor,
@@ -896,12 +901,37 @@ impl MessageProcessor {
             connection_id,
             request_id: codex_request.id().clone(),
         };
+        let _admission_permit = self
+            .generation_lifecycle
+            .admit_request(&codex_request)
+            .await?;
 
         let result: Result<Option<ClientResponsePayload>, JSONRPCErrorError> = match codex_request {
             ClientRequest::Initialize { .. } => {
                 panic!("Initialize should be handled before initialized request dispatch");
             }
             ClientRequest::ServerDiagnostics { .. } => Ok(Some(read_server_diagnostics().into())),
+            ClientRequest::ServerDrainStart { params, .. } => {
+                self.generation_lifecycle
+                    .begin(params.replacement_generation)
+                    .await?;
+                self.thread_processor
+                    .server_drain_status()
+                    .await
+                    .map(|response| Some(response.into()))
+            }
+            ClientRequest::ServerDrainStatus { .. } => self
+                .thread_processor
+                .server_drain_status()
+                .await
+                .map(|response| Some(ClientResponsePayload::ServerDrainStatus(response))),
+            ClientRequest::ServerDrainCancel { .. } => {
+                self.generation_lifecycle.cancel().await?;
+                self.thread_processor
+                    .server_drain_status()
+                    .await
+                    .map(|response| Some(ClientResponsePayload::ServerDrainCancel(response)))
+            }
             ClientRequest::ConfigRead { params, .. } => self
                 .config_processor
                 .read(params)
