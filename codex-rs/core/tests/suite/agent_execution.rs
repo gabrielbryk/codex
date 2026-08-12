@@ -18,7 +18,10 @@ use std::time::Duration;
 const FIRST_PROMPT: &str = "spawn the first worker";
 const FIRST_TASK: &str = "first worker task";
 const SECOND_TASK: &str = "second worker task";
+const MULTI_AGENT_V1_NAMESPACE: &str = "multi_agent_v1";
 const MULTI_AGENT_V2_NAMESPACE: &str = "collaboration";
+const WAIT_PROMPT: &str = "wait on the worker";
+const MISSING_THREAD_ID: &str = "019f0000-0000-7000-8000-000000000000";
 
 fn body_contains(request: &wiremock::Request, text: &str) -> bool {
     serde_json::from_slice::<serde_json::Value>(&request.body)
@@ -327,6 +330,68 @@ async fn v2_residency_reload_preserves_inherited_environment_and_tools() -> Resu
     };
     let reloaded_tools = worker_tools(&reloaded_worker_request);
     assert!(reloaded_tools.to_string().contains("### `exec_command`"));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn v1_wait_agent_fails_fast_on_missing_target() -> Result<()> {
+    let server = start_mock_server().await;
+    let wait_args = serde_json::to_string(&json!({
+        "targets": [MISSING_THREAD_ID],
+        // An hour: the wait must fail on the missing target instead of honoring this.
+        "timeout_ms": 3_600_000,
+    }))?;
+    mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| body_contains(request, WAIT_PROMPT),
+        sse(vec![
+            ev_response_created("wait-response"),
+            ev_function_call_with_namespace(
+                "wait-call",
+                MULTI_AGENT_V1_NAMESPACE,
+                "wait_agent",
+                &wait_args,
+            ),
+            ev_completed("wait-response"),
+        ]),
+    )
+    .await;
+    let followup = mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| has_function_call_output(request, "wait-call"),
+        sse(vec![
+            ev_response_created("wait-followup-response"),
+            ev_assistant_message("wait-followup-message", "target is gone"),
+            ev_completed("wait-followup-response"),
+        ]),
+    )
+    .await;
+
+    let mut builder = test_codex().with_config(|config| {
+        config
+            .features
+            .enable(Feature::Collab)
+            .expect("test config should allow feature update");
+    });
+    let test = builder.build(&server).await?;
+    test.submit_turn(WAIT_PROMPT).await?;
+
+    let wait_output = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(output) = followup.function_call_output_text("wait-call") {
+                return output;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+    assert_eq!(
+        wait_output,
+        format!(
+            "agent with id {MISSING_THREAD_ID} not found; it is gone and will not report a status"
+        )
+    );
 
     Ok(())
 }

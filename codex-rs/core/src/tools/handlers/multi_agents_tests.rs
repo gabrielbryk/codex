@@ -3239,7 +3239,7 @@ async fn multi_agent_v2_wait_agent_accepts_explicit_timeout_at_configured_max() 
 }
 
 #[tokio::test]
-async fn wait_agent_returns_not_found_for_missing_agents() {
+async fn wait_agent_errors_for_missing_agents() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
     session.services.agent_control = manager.agent_control();
@@ -3254,24 +3254,15 @@ async fn wait_agent_returns_not_found_for_missing_agents() {
             "timeout_ms": 10_000
         })),
     );
-    let output = WaitAgentHandler::default()
-        .handle(invocation)
-        .await
-        .expect("wait_agent should succeed");
-    let (content, success) = expect_text_output(output);
-    let result: wait::WaitAgentResult =
-        serde_json::from_str(&content).expect("wait_agent result should be json");
+    let Err(err) = WaitAgentHandler::default().handle(invocation).await else {
+        panic!("wait_agent should reject targets that no longer exist");
+    };
     assert_eq!(
-        result,
-        wait::WaitAgentResult {
-            status: HashMap::from([
-                (id_a.to_string(), AgentStatus::NotFound),
-                (id_b.to_string(), AgentStatus::NotFound),
-            ]),
-            timed_out: false
-        }
+        err,
+        FunctionCallError::RespondToModel(format!(
+            "agent with id {id_a}, {id_b} not found; it is gone and will not report a status"
+        ))
     );
-    assert_eq!(success, None);
 }
 
 #[tokio::test]
