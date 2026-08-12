@@ -417,6 +417,33 @@ async fn restore_thread_input_state_restores_pending_steers_without_downgrading_
 }
 
 #[tokio::test]
+async fn steer_overload_keeps_message_and_surfaces_nonfatal_warning() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.input_queue.pending_steers.push_back(PendingSteer {
+        user_message: UserMessage::from("keep this steer"),
+        history_record: UserMessageHistoryRecord::UserMessageText,
+        compare_key: PendingSteerCompareKey {
+            message: "keep this steer".to_string(),
+            image_count: 0,
+        },
+    });
+
+    chat.handle_steer_overload();
+
+    assert!(chat.input_queue.pending_steers.is_empty());
+    assert_eq!(
+        chat.queued_user_message_texts(),
+        vec!["keep this steer".to_string()]
+    );
+    let cells = drain_insert_history(&mut rx);
+    assert_eq!(cells.len(), 1);
+    assert_chatwidget_snapshot!(
+        "steer_overload_nonfatal_warning",
+        lines_to_single_string(&cells[0]).trim(),
+    );
+}
+
+#[tokio::test]
 async fn steer_enter_queues_while_plan_stream_is_active() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.thread_id = Some(ThreadId::new());

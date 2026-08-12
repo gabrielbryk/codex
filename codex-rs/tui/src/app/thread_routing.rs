@@ -5,6 +5,8 @@
 //! when the visible thread changes.
 
 use super::session_lifecycle::ThreadAttachPresentation;
+use super::steer_retry::SteerRequestOutcome;
+use super::steer_retry::retry_turn_steer;
 use super::*;
 use crate::chatwidget::ThreadInputStateRestoreMode;
 use crate::session_resume::read_session_model;
@@ -665,12 +667,20 @@ impl App {
                     let mut steer_turn_id = turn_id;
                     let mut retried_after_turn_mismatch = false;
                     loop {
-                        match app_server
-                            .turn_steer(thread_id, steer_turn_id.clone(), items.to_vec())
-                            .await
-                        {
-                            Ok(_) => return Ok(true),
-                            Err(error) => {
+                        let outcome = retry_turn_steer(async || {
+                            app_server
+                                .turn_steer(thread_id, steer_turn_id.clone(), items.to_vec())
+                                .await
+                        })
+                        .await;
+                        match outcome {
+                            SteerRequestOutcome::Success(_) => return Ok(true),
+                            SteerRequestOutcome::PersistentOverload(error) => {
+                                tracing::warn!(error = %error, "turn/steer remained overloaded");
+                                self.chat_widget.handle_steer_overload();
+                                return Ok(true);
+                            }
+                            SteerRequestOutcome::Failed(error) => {
                                 if let Some(turn_error) =
                                     active_turn_not_steerable_turn_error(&error)
                                 {

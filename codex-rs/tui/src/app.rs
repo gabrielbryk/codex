@@ -233,6 +233,7 @@ mod session_lifecycle;
 mod side;
 mod startup;
 mod startup_prompts;
+mod steer_retry;
 mod thread_event_buffer;
 mod thread_events;
 mod thread_goal_actions;

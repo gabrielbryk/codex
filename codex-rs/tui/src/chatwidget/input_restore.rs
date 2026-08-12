@@ -223,6 +223,19 @@ impl ChatWidget {
         true
     }
 
+    pub(crate) fn handle_steer_overload(&mut self) {
+        if self.enqueue_rejected_steer() {
+            self.add_error_message(
+                "Codex is busy. Your message was kept and will be retried after the current turn."
+                    .to_string(),
+            );
+        } else {
+            self.add_error_message(
+                "Codex is busy. Wait a moment, then submit your message again.".to_string(),
+            );
+        }
+    }
+
     /// Handle a turn aborted due to user interrupt (Esc), budget exhaustion,
     /// or review completion.
     /// When there are queued user messages, restore them into the composer
