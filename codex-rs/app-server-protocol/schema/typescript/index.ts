@@ -74,6 +74,7 @@ export type { ResourceTemplate } from "./ResourceTemplate";
 export type { ResponseItem } from "./ResponseItem";
 export type { ResponseItemId } from "./ResponseItemId";
 export type { ReviewDecision } from "./ReviewDecision";
+export type { ServerIdentity } from "./ServerIdentity";
 export type { ServerNotification } from "./ServerNotification";
 export type { ServerNotificationEnvelope } from "./ServerNotificationEnvelope";
 export type { ServerRequest } from "./ServerRequest";

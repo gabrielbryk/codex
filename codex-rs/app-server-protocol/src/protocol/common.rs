@@ -507,6 +507,29 @@ client_request_definitions! {
         serialization: None,
         response: v2::ServerDiagnosticsResponse,
     },
+    #[experimental("server/drain/start")]
+    /// Stop admitting new work and release idle thread writers.
+    ServerDrainStart => "server/drain/start" {
+        params: v2::ServerDrainStartParams,
+        serialization: global("server-lifecycle"),
+        response: v2::ServerDrainResponse,
+    },
+    #[experimental("server/drain/status")]
+    /// Read drain progress and release newly idle thread writers.
+    ServerDrainStatus => "server/drain/status" {
+        params: v2::ServerDrainStatusParams,
+        serialization: global("server-lifecycle"),
+        manual_payload_conversion: manual,
+        response: v2::ServerDrainResponse,
+    },
+    #[experimental("server/drain/cancel")]
+    /// Cancel a drain before any thread writer has been released.
+    ServerDrainCancel => "server/drain/cancel" {
+        params: v2::ServerDrainCancelParams,
+        serialization: global("server-lifecycle"),
+        manual_payload_conversion: manual,
+        response: v2::ServerDrainResponse,
+    },
 
     /// NEW APIs
     // Thread lifecycle

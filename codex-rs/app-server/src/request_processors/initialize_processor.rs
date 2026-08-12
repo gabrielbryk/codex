@@ -1,19 +1,47 @@
+use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
 use axum::http::HeaderValue;
 use codex_analytics::AppServerRpcTransport;
+use codex_app_server_protocol::ServerIdentity;
 use codex_login::default_client::SetOriginatorError;
 use codex_login::default_client::USER_AGENT_SUFFIX;
 use codex_login::default_client::get_codex_user_agent;
 use codex_login::default_client::set_default_client_residency_requirement;
 use codex_login::default_client::set_default_originator;
+use uuid::Uuid;
 
 use super::*;
 use crate::message_processor::ConnectionSessionState;
 use crate::message_processor::InitializedConnectionSessionState;
 
 const NON_ORIGINATING_CLIENT_NAMES: &[&str] = &["codex_app_server_daemon", "codex-backend"];
+const GENERATION_ID_ENV_VAR: &str = "CODEX_APP_SERVER_GENERATION_ID";
+const SOURCE_SHA_ENV_VAR: &str = "CODEX_APP_SERVER_SOURCE_SHA";
+const GENERATION_PROTOCOL_REVISION: u32 = 1;
+static INSTANCE_ID: OnceLock<String> = OnceLock::new();
+
+fn managed_server_identity() -> Option<ServerIdentity> {
+    let generation = std::env::var(GENERATION_ID_ENV_VAR).ok()?;
+    let source_sha = std::env::var(SOURCE_SHA_ENV_VAR).ok()?;
+    if generation.is_empty() || source_sha.is_empty() {
+        return None;
+    }
+    Some(ServerIdentity {
+        instance_id: INSTANCE_ID
+            .get_or_init(|| Uuid::new_v4().to_string())
+            .clone(),
+        generation,
+        source_sha,
+        protocol_revision: GENERATION_PROTOCOL_REVISION,
+        capabilities: vec![
+            "serverIdentityV1".to_string(),
+            "serverDrainV1".to_string(),
+            "threadWriterLeaseV1".to_string(),
+        ],
+    })
+}
 
 #[derive(Clone)]
 pub(crate) struct InitializeRequestProcessor {
@@ -144,6 +172,7 @@ impl InitializeRequestProcessor {
             codex_home,
             platform_family: std::env::consts::FAMILY.to_string(),
             platform_os: std::env::consts::OS.to_string(),
+            server_identity: managed_server_identity(),
         };
 
         self.outgoing

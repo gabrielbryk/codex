@@ -3211,6 +3211,18 @@
           "description": "Operating system for the running app-server target, for example `\"macos\"`, `\"linux\"`, or `\"windows\"`.",
           "type": "string"
         },
+        "serverIdentity": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ServerIdentity"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Identity of a host-managed rolling app-server generation.\n\nThis is null for ordinary stdio and unmanaged app-server processes."
+        },
         "userAgent": {
           "type": "string"
         }
@@ -4348,6 +4360,43 @@
           "type": "string"
         }
       ]
+    },
+    "ServerIdentity": {
+      "properties": {
+        "capabilities": {
+          "description": "Rolling-generation behaviors supported by this server.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "generation": {
+          "description": "Host lifecycle generation backed by an immutable package.",
+          "type": "string"
+        },
+        "instanceId": {
+          "description": "Unique identity for this process start.",
+          "type": "string"
+        },
+        "protocolRevision": {
+          "description": "Reviewed compatibility revision for rolling-generation behavior.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "sourceSha": {
+          "description": "Exact source commit recorded by the package builder.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "capabilities",
+        "generation",
+        "instanceId",
+        "protocolRevision",
+        "sourceSha"
+      ],
+      "type": "object"
     },
     "ServerNotification": {
       "$schema": "http://json-schema.org/draft-07/schema#",
@@ -18985,6 +19034,13 @@
           "id"
         ],
         "type": "object"
+      },
+      "ServerGenerationState": {
+        "enum": [
+          "accepting",
+          "draining"
+        ],
+        "type": "string"
       },
       "ServerRequestResolvedNotification": {
         "$schema": "http://json-schema.org/draft-07/schema#",

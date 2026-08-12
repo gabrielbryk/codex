@@ -2,14 +2,21 @@
 
 ## Status
 
-Proposed on 2026-08-12. This is an internal implementation guide for Gabe's
+Natural-drain v1 implemented on 2026-08-12. This is an internal implementation guide for Gabe's
 local Codex fork and its source-owned host lifecycle tooling. It deliberately
 lives outside the user-facing `docs/` tree.
 
-The project is not implemented yet. The current active-turn guard remains the
-only supported deployment path until the milestones and acceptance gates below
-are complete. The first deployment of the stable router also requires one
-traditional zero-active-turn cutover.
+The implemented first release covers server identity, synchronized drain
+admission, existing cross-process thread writer locks, private generation
+sockets, a protocol-blind stable router, durable rollout/reconciliation, Fork
+Fleet deployment, and runtime diagnostics. The first deployment of the stable
+router still requires one traditional zero-active-turn cutover and is queued
+until that guard passes.
+
+TUI process replacement, automatic reconnect/reattach, remote-control transfer,
+and mid-turn connection migration remain later phases. Natural-drain v1 keeps
+each accepted connection on its original server and therefore preserves live
+work without changing TUI code.
 
 ## Executive decision
 
@@ -18,10 +25,9 @@ Use a hybrid design:
 - external tooling owns the stable control socket, app-server generations,
   health checks, promotion, rollback, process scopes, and package pointers;
 - Codex app-server adds a small backward-compatible identity and drain API;
-- the remote app-server client reports reconnection and server-generation
-  changes;
-- the TUI reattaches its thread after transport reconnection and can replace
-  its own executable at a safe turn boundary.
+- natural-drain v1 makes no TUI or app-server-client changes;
+- later phases may add reconnect/reattach and safe-boundary TUI replacement
+  without changing the external router contract.
 
 A raw external socket router is sufficient to preserve existing connections
 while new connections move to a candidate generation. It is not sufficient to
@@ -51,10 +57,9 @@ The target experience is a rolling local upgrade:
 1. Start and validate a candidate app-server beside the current generation.
 2. Route new clients to the candidate without disturbing existing connections.
 3. Let active turns finish on the old generation.
-4. Move each capable TUI at its own safe boundary, preserving terminal and
-   composer state.
-5. Retire the old generation only when it owns no active work or connections.
-6. Roll back new connections immediately if the candidate is unhealthy.
+4. Let each old TUI disconnect naturally after its work is complete.
+5. Retire the old generation only when it owns no loaded threads or connections.
+6. Add active TUI migration and rollback automation in a later phase.
 
 ## Existing behavior and reusable foundations
 
@@ -119,7 +124,8 @@ when it cannot prove that a component is unchanged.
   requests while a candidate server starts and new connections move to it.
 - Allow new and idle clients to use the candidate immediately instead of
   waiting for unrelated active turns.
-- Upgrade an existing TUI in the same terminal pane at a safe boundary.
+- Keep active TUI processes usable without requiring them to reconnect or
+  replace their executable in v1.
 - Preserve the current backward-compatible app-server v2 contract for clients
   that do not understand draining or generations.
 - Make promotion, drain, retirement, and rollback observable and auditable.
@@ -218,34 +224,30 @@ the proof the candidate must validate before `thread/resume`.
 
 ```text
 ~/.codex/packages/standalone/
-    client-current -> releases/local-new
-    server-current -> releases/local-new
-    current -> client-current
+    current -> releases/local-new
     releases/
         local-old/
         local-new/
 
 ~/.codex/app-server-control/
     app-server-control.sock
-    router.pid.json
-    routing-state.json
     generations/
         old/
             app-server.sock
-            generation.json
-            pid.json
-            stderr.log
+            daemon/app-server.pid
         new/
             app-server.sock
-            generation.json
-            pid.json
-            stderr.log
+            daemon/app-server.pid
+
+~/.local/state/codex-app-server/
+    routing-state.json
+    router-status.json
+    desired-generation.json
 ```
 
-`current` remains a compatibility alias for normal CLI/TUI launches. The
-lifecycle must resolve the server executable from `server-current`, not from
-the client pointer. Updating `client-current` must not implicitly restart the
-managed app-server.
+`current` remains the normal CLI/TUI selection. Each routing-state generation
+records its immutable `packagePath`, so changing `current` does not change or
+restart a running server generation.
 
 Every state file is written atomically, is owner-only, and records an explicit
 schema version. PID records retain the current PID plus process-start-time
@@ -268,7 +270,7 @@ The initialize response should add optional, backward-compatible fields:
     "protocolRevision": 1,
     "capabilities": [
       "serverDrainV1",
-      "reconnectThreadResumeV1"
+      "threadWriterLeaseV1"
     ]
   }
 }
@@ -305,17 +307,11 @@ Add backward-compatible, capability-gated app-server v2 methods:
 - `server/drain/status`
 - `server/drain/cancel`
 
-Add notifications:
-
-- `server/draining`
-- `server/drainCompleted`
-
-Suggested states:
+Natural-drain v1 uses polling and does not add notifications. States are:
 
 ```text
 Accepting
 Draining { generation, target_generation, started_at }
-DrainComplete
 ```
 
 The status response reports at minimum:
@@ -336,7 +332,6 @@ The server must keep accepting operations required to finish existing work:
 - approval and elicitation responses;
 - server-request responses;
 - thread reads, history reads, and status requests;
-- `thread/resume` for a client rejoining work owned by this generation;
 - explicit drain status and cancellation operations.
 
 It must reject requests that create new durable work, including at least:
@@ -354,10 +349,15 @@ processor immediately before work creation, not only in external tooling. That
 closes the race where an active-turn probe reaches zero just before a new turn
 starts.
 
-Drain is complete only when the generation has no active turn, unresolved
-server request, active connection requiring migration, or remote-control work
-that cannot be transferred. Loaded idle threads alone do not block retirement
-after all clients have detached and persistence is flushed.
+Drain status unloads each non-active thread through the existing bounded
+shutdown/removal path, which releases its `$CODEX_HOME/thread-writer-locks`
+file lock. Retirement requires both no loaded threads and no router connections.
+Cancellation is allowed only before the first writer is released.
+
+Because v1 does not migrate connections, `thread/resume` is rejected on a
+draining generation. A TUI whose transport fails during drain may need to wait
+for the old ownership to release and resume through the new generation; seamless
+mid-drain reconnect is part of the later reattachment phase.
 
 ## Remote client reconnect behavior
 
@@ -484,27 +484,18 @@ The stable router must fail closed:
 
 ### Codex fork
 
-Likely code surfaces:
+Implemented code surfaces:
 
 - `codex-rs/app-server-protocol/src/protocol/v1.rs`: additive initialize
   identity, unless a compatibility-preserving v2-owned representation can be
   exposed through the existing initialize response.
-- `codex-rs/app-server-protocol/src/protocol/v2/`: drain request, response,
-  notification, identity, and structured error types.
+- `codex-rs/app-server-protocol/src/protocol/v2/server_lifecycle.rs`: drain
+  request and response types.
 - `codex-rs/app-server-protocol/src/protocol/common.rs`: method mappings.
-- `codex-rs/app-server/src/drain.rs`: focused process-local drain state and
+- `codex-rs/app-server/src/generation_lifecycle.rs`: focused process-local drain state and
   admission decisions.
 - `codex-rs/app-server/src/request_processors/`: drain RPC processor and narrow
   admission checks at work-creation owners.
-- `codex-rs/app-server-client/src/remote.rs`: identity tracking, explicit
-  reconnect, and successful reconnect reporting.
-- `codex-rs/app-server-client/src/lib.rs`: public client event and request-handle
-  surface.
-- `codex-rs/tui/src/app_server_session.rs`: thread reattachment facade.
-- `codex-rs/tui/src/upgrade_handoff/`: envelope, validation, platform process
-  replacement, and recovery.
-- `codex-rs/tui/src/app/`: safe-boundary coordination and restored state
-  application.
 - `codex-rs/app-server-daemon/`: generation-aware native status only where it
   belongs in cross-platform lifecycle reporting; host-specific routing policy
   remains external.
@@ -517,13 +508,11 @@ API.
 
 Canonical owner: `~/workspace/personal/tooling/claude-process-guard`.
 
-Likely additions and changes:
+Implemented additions and changes:
 
 - new `bin/codex-app-server-router`;
-- generation-aware `bin/codex-app-server-reconcile`;
-- tracked wrapper changes that resolve `client-current` and `server-current`
-  independently without weakening scope escape;
-- router and generation liveness helpers;
+- new `bin/codex-app-server-rollout` and reconciliation timer;
+- immutable per-generation package, socket, and daemon directories;
 - user-systemd router unit and transient generation scope integration;
 - source-owned manifests and tests;
 - compatibility migration from the current one-PID state.
@@ -535,7 +524,7 @@ truth.
 
 Canonical owner: the Worklens `libs/fork-fleet` source tree.
 
-Change package activation from a single-link mutation into an explicit staged
+Extend package activation with an explicit `--rollout` staged
 deployment operation:
 
 ```text
@@ -553,6 +542,12 @@ The maintain/upgrade skill must continue to use the old active-turn-deferred
 path until the runtime reports all required capabilities.
 
 ## Staged delivery
+
+Natural-drain v1 deliberately combines the smallest safe subset of the earlier
+stages: existing writer-lock proof, initialize identity, server drain/admission,
+the blind router, generation lifecycle, and Fork Fleet deployment. The TUI and
+remote-client portions below remain the roadmap rather than acceptance criteria
+for v1.
 
 Each stage is independently reviewable and should remain below the repository's
 change-size guidance. Avoid combining Codex protocol, TUI process replacement,

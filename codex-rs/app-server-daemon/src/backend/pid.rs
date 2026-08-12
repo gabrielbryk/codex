@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::io::SeekFrom;
 use std::path::Path;
 use std::path::PathBuf;
@@ -32,6 +33,9 @@ pub(crate) struct PidBackend {
     pid_file: PathBuf,
     lock_file: PathBuf,
     command_kind: PidCommandKind,
+    socket_path: Option<PathBuf>,
+    generation_id: Option<String>,
+    source_sha: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,7 +134,22 @@ impl PidBackend {
             command_kind: PidCommandKind::AppServer {
                 remote_control_enabled,
             },
+            socket_path: None,
+            generation_id: None,
+            source_sha: None,
         }
+    }
+
+    pub(crate) fn with_app_server_runtime(
+        mut self,
+        socket_path: PathBuf,
+        generation_id: Option<String>,
+        source_sha: Option<String>,
+    ) -> Self {
+        self.socket_path = Some(socket_path);
+        self.generation_id = generation_id;
+        self.source_sha = source_sha;
+        self
     }
 
     pub(crate) fn new_update_loop(codex_bin: PathBuf, pid_file: PathBuf) -> Self {
@@ -140,6 +159,9 @@ impl PidBackend {
             pid_file,
             lock_file,
             command_kind: PidCommandKind::UpdateLoop,
+            socket_path: None,
+            generation_id: None,
+            source_sha: None,
         }
     }
 
@@ -212,9 +234,7 @@ impl PidBackend {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::from(stderr_log.into_std().await));
-        if let Some((key, value)) = self.command_env() {
-            command.env(key, value);
-        }
+        command.envs(self.command_env());
 
         #[cfg(unix)]
         {
@@ -456,28 +476,61 @@ impl PidBackend {
     }
 
     #[cfg(unix)]
-    fn command_args(&self) -> Vec<&'static str> {
+    fn command_args(&self) -> Vec<OsString> {
         match self.command_kind {
             PidCommandKind::AppServer {
                 remote_control_enabled: true,
-            } => vec!["app-server", "--remote-control", "--listen", "unix://"],
+            } => vec![
+                "app-server".into(),
+                "--remote-control".into(),
+                "--listen".into(),
+                self.listen_address(),
+            ],
             PidCommandKind::AppServer {
                 remote_control_enabled: false,
-            } => vec!["app-server", "--listen", "unix://"],
-            PidCommandKind::UpdateLoop => vec!["app-server", "daemon", "pid-update-loop"],
+            } => vec![
+                "app-server".into(),
+                "--listen".into(),
+                self.listen_address(),
+            ],
+            PidCommandKind::UpdateLoop => {
+                vec![
+                    "app-server".into(),
+                    "daemon".into(),
+                    "pid-update-loop".into(),
+                ]
+            }
         }
     }
 
     #[cfg(unix)]
-    fn command_env(&self) -> Option<(&'static str, &'static str)> {
-        match self.command_kind {
+    fn command_env(&self) -> Vec<(OsString, OsString)> {
+        let mut env = Vec::new();
+        if matches!(
+            self.command_kind,
             PidCommandKind::AppServer {
                 remote_control_enabled: false,
-            } => Some((REMOTE_CONTROL_DISABLED_ENV_VAR, "1")),
-            PidCommandKind::AppServer {
-                remote_control_enabled: true,
             }
-            | PidCommandKind::UpdateLoop => None,
+        ) {
+            env.push((REMOTE_CONTROL_DISABLED_ENV_VAR.into(), "1".into()));
+        }
+        if let Some(generation_id) = self.generation_id.as_ref() {
+            env.push((
+                "CODEX_APP_SERVER_GENERATION_ID".into(),
+                generation_id.into(),
+            ));
+        }
+        if let Some(source_sha) = self.source_sha.as_ref() {
+            env.push(("CODEX_APP_SERVER_SOURCE_SHA".into(), source_sha.into()));
+        }
+        env
+    }
+
+    #[cfg(unix)]
+    fn listen_address(&self) -> OsString {
+        match self.socket_path.as_ref() {
+            Some(socket_path) => format!("unix://{}", socket_path.display()).into(),
+            None => "unix://".into(),
         }
     }
 
