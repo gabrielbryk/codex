@@ -12,6 +12,7 @@ higher-level session logic.
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::future::Future;
 use std::io::Error as IoError;
 use std::io::ErrorKind;
 use std::io::Result as IoResult;
@@ -47,6 +48,7 @@ use tokio::io::AsyncWrite;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
+use tokio::time::Instant;
 use tokio::time::timeout;
 use tokio_tungstenite::MaybeTlsStream;
 use tokio_tungstenite::WebSocketStream;
@@ -63,6 +65,27 @@ use url::Url;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(10);
+const RECONNECT_DELAY: Duration = Duration::from_millis(250);
+/// How long an in-flight replay-safe request may stay parked across reconnects
+/// before it is failed with the transport error that parked it. Keeping this
+/// short bounds how long a caller can be blocked by a server that never comes
+/// back, while still covering a momentary daemon restart.
+const PARKED_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+/// A parked request is re-sent at most this many times. A second disconnect
+/// before the response arrives fails it with the original transport error, so a
+/// server that dies while handling the request cannot be hammered forever.
+const MAX_REQUEST_REPLAY_ATTEMPTS: u32 = 1;
+/// Methods that are safe to re-send after a reconnect.
+///
+/// Replay is only sound for requests the server can recognize as a duplicate,
+/// so this list is deliberately tiny. `turn/start` qualifies because the client
+/// stamps every submission with a `clientUserMessageId` that the server uses as
+/// an idempotency key; a replay of an already-processed submission returns the
+/// original response instead of starting a second turn. Requests without that
+/// key are never replayed (see [`ReplayState::for_request`]).
+const REPLAYABLE_REQUEST_METHODS: &[&str] = &["turn/start"];
+/// Wire name of the `TurnStartParams::client_user_message_id` idempotency key.
+const CLIENT_USER_MESSAGE_ID_FIELD: &str = "clientUserMessageId";
 const REMOTE_APP_SERVER_MAX_WEBSOCKET_MESSAGE_SIZE: usize = 128 << 20;
 // Tungstenite still needs an HTTP request URI for the WebSocket handshake;
 // the bytes travel over the Unix socket, not TCP.
@@ -148,6 +171,80 @@ enum RemoteClientCommand {
     },
 }
 
+/// Bookkeeping for a request that has been handed to the worker but has not
+/// been answered yet.
+struct PendingRequest {
+    response_tx: oneshot::Sender<IoResult<RequestResult>>,
+    /// `Some` when the request may be re-sent across a reconnect.
+    replay: Option<ReplayState>,
+}
+
+impl PendingRequest {
+    /// Deadline after which a currently parked request gives up, if it is
+    /// parked at all.
+    fn parked_deadline(&self) -> Option<Instant> {
+        Some(self.replay.as_ref()?.parked.as_ref()?.deadline)
+    }
+
+    /// Error to fail this request with, preferring the transport error that
+    /// originally parked it so give-up semantics match a non-parked failure.
+    fn give_up_error(&self) -> IoError {
+        match self
+            .replay
+            .as_ref()
+            .and_then(|replay| replay.parked.as_ref())
+        {
+            Some(parked) => IoError::new(parked.err_kind, parked.err_message.clone()),
+            None => IoError::new(
+                ErrorKind::TimedOut,
+                "remote app-server request timed out while reconnecting",
+            ),
+        }
+    }
+}
+
+/// Replay bookkeeping for a request whose method is known to be idempotent.
+struct ReplayState {
+    request: Box<JSONRPCRequest>,
+    attempts_remaining: u32,
+    /// `Some` while the request is parked waiting for a reconnect.
+    parked: Option<ParkedRequest>,
+}
+
+/// Snapshot taken when a request is parked, so that giving up later reports the
+/// transport error that caused the disconnect rather than a synthetic one.
+struct ParkedRequest {
+    deadline: Instant,
+    err_kind: ErrorKind,
+    err_message: String,
+}
+
+impl ReplayState {
+    /// Returns replay bookkeeping when `request` is safe to re-send verbatim
+    /// after a reconnect, and `None` otherwise.
+    fn for_request(request: &JSONRPCRequest) -> Option<Self> {
+        if !REPLAYABLE_REQUEST_METHODS.contains(&request.method.as_str()) {
+            return None;
+        }
+        // Without an idempotency key the server cannot recognize the replay as
+        // a duplicate, so re-sending would start a second turn.
+        let has_idempotency_key = request
+            .params
+            .as_ref()
+            .and_then(|params| params.get(CLIENT_USER_MESSAGE_ID_FIELD))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|key| !key.is_empty());
+        if !has_idempotency_key {
+            return None;
+        }
+        Some(Self {
+            request: Box::new(request.clone()),
+            attempts_remaining: MAX_REQUEST_REPLAY_ATTEMPTS,
+            parked: None,
+        })
+    }
+}
+
 pub struct RemoteAppServerClient {
     command_tx: mpsc::Sender<RemoteClientCommand>,
     event_rx: mpsc::UnboundedReceiver<AppServerEvent>,
@@ -171,15 +268,35 @@ impl RemoteAppServerClient {
                 websocket_url,
                 auth_token,
             } => {
+                let reconnect_websocket_url = websocket_url.clone();
+                let reconnect_auth_token = auth_token.clone();
                 let (endpoint, stream) =
                     connect_websocket_endpoint(websocket_url, auth_token).await?;
-                Self::connect_with_stream(channel_capacity, endpoint, stream, initialize_params)
-                    .await
+                Self::connect_with_stream(
+                    channel_capacity,
+                    endpoint,
+                    stream,
+                    initialize_params,
+                    move || {
+                        connect_websocket_endpoint(
+                            reconnect_websocket_url.clone(),
+                            reconnect_auth_token.clone(),
+                        )
+                    },
+                )
+                .await
             }
             RemoteAppServerEndpoint::UnixSocket { socket_path } => {
+                let reconnect_socket_path = socket_path.clone();
                 let (endpoint, stream) = connect_unix_socket_endpoint(socket_path).await?;
-                Self::connect_with_stream(channel_capacity, endpoint, stream, initialize_params)
-                    .await
+                Self::connect_with_stream(
+                    channel_capacity,
+                    endpoint,
+                    stream,
+                    initialize_params,
+                    move || connect_unix_socket_endpoint(reconnect_socket_path.clone()),
+                )
+                .await
             }
         }
     }
@@ -192,20 +309,23 @@ impl RemoteAppServerClient {
         self.codex_home.as_deref()
     }
 
-    async fn connect_with_stream<S>(
+    async fn connect_with_stream<S, Reconnect, ReconnectFuture>(
         channel_capacity: usize,
         endpoint: String,
         stream: WebSocketStream<S>,
         initialize_params: InitializeParams,
+        mut reconnect: Reconnect,
     ) -> IoResult<Self>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+        Reconnect: FnMut() -> ReconnectFuture + Send + 'static,
+        ReconnectFuture: Future<Output = IoResult<(String, WebSocketStream<S>)>> + Send,
     {
         let mut stream = stream;
         let (pending_events, server_version, codex_home) = initialize_remote_connection(
             &mut stream,
             &endpoint,
-            initialize_params,
+            initialize_params.clone(),
             INITIALIZE_TIMEOUT,
         )
         .await?;
@@ -213,15 +333,16 @@ impl RemoteAppServerClient {
         let (command_tx, mut command_rx) = mpsc::channel::<RemoteClientCommand>(channel_capacity);
         let (event_tx, event_rx) = mpsc::unbounded_channel::<AppServerEvent>();
         let worker_handle = tokio::spawn(async move {
-            let mut pending_requests =
-                HashMap::<RequestId, oneshot::Sender<IoResult<RequestResult>>>::new();
-            let mut worker_exit_error: Option<(ErrorKind, String)> = None;
+            let mut pending_requests = HashMap::<RequestId, PendingRequest>::new();
+            let mut endpoint = endpoint;
+            let mut stream = stream;
+            let mut reconnect_attempt = 0u32;
             loop {
                 tokio::select! {
                     command = command_rx.recv() => {
                         let Some(command) = command else {
                             let _ = stream.close(None).await;
-                            break;
+                            return;
                         };
                         match command {
                             RemoteClientCommand::Request { request, response_tx } => {
@@ -233,7 +354,11 @@ impl RemoteAppServerClient {
                                     )));
                                     continue;
                                 }
-                                pending_requests.insert(request_id.clone(), response_tx);
+                                let replay = ReplayState::for_request(request.as_ref());
+                                pending_requests.insert(
+                                    request_id.clone(),
+                                    PendingRequest { response_tx, replay },
+                                );
                                 if let Err(err) = write_jsonrpc_message(
                                     &mut stream,
                                     JSONRPCMessage::Request(*request),
@@ -245,17 +370,30 @@ impl RemoteAppServerClient {
                                     let message = format!(
                                         "remote app server at `{endpoint}` write failed: {err_message}"
                                     );
-                                    if let Some(response_tx) = pending_requests.remove(&request_id) {
-                                        let _ = response_tx.send(Err(err));
-                                    }
-                                    let _ = deliver_event(
-                                        &event_tx,
-                                        AppServerEvent::Disconnected {
-                                            message: message.clone(),
-                                        },
+                                    // A request that never made it onto the wire is parked (and
+                                    // replayed after reconnect) when it is replay-safe, and failed
+                                    // together with the rest of the in-flight requests otherwise.
+                                    park_pending_requests(
+                                        &mut pending_requests,
+                                        ErrorKind::BrokenPipe,
+                                        &message,
                                     );
-                                    worker_exit_error = Some((ErrorKind::BrokenPipe, message));
-                                    break;
+                                    let Some((next_endpoint, next_stream)) =
+                                        reconnect_remote_stream(
+                                            &mut command_rx,
+                                            &event_tx,
+                                            &mut reconnect,
+                                            &initialize_params,
+                                            &message,
+                                            &mut pending_requests,
+                                            &mut reconnect_attempt,
+                                        )
+                                        .await
+                                    else {
+                                        return;
+                                    };
+                                    endpoint = next_endpoint;
+                                    stream = next_stream;
                                 }
                             }
                             RemoteClientCommand::Notify { notification, response_tx } => {
@@ -267,7 +405,39 @@ impl RemoteAppServerClient {
                                     &endpoint,
                                 )
                                 .await;
-                                let _ = response_tx.send(result);
+                                match result {
+                                    Ok(()) => {
+                                        let _ = response_tx.send(Ok(()));
+                                    }
+                                    Err(err) => {
+                                        let err_message = err.to_string();
+                                        let message = format!(
+                                            "remote app server at `{endpoint}` write failed: {err_message}"
+                                        );
+                                        let _ = response_tx.send(Err(err));
+                                        park_pending_requests(
+                                            &mut pending_requests,
+                                            ErrorKind::BrokenPipe,
+                                            &message,
+                                        );
+                                        let Some((next_endpoint, next_stream)) =
+                                            reconnect_remote_stream(
+                                                &mut command_rx,
+                                                &event_tx,
+                                                &mut reconnect,
+                                                &initialize_params,
+                                                &message,
+                                                &mut pending_requests,
+                                                &mut reconnect_attempt,
+                                            )
+                                            .await
+                                        else {
+                                            return;
+                                        };
+                                        endpoint = next_endpoint;
+                                        stream = next_stream;
+                                    }
+                                }
                             }
                             RemoteClientCommand::ResolveServerRequest {
                                 request_id,
@@ -283,7 +453,39 @@ impl RemoteAppServerClient {
                                     &endpoint,
                                 )
                                 .await;
-                                let _ = response_tx.send(result);
+                                match result {
+                                    Ok(()) => {
+                                        let _ = response_tx.send(Ok(()));
+                                    }
+                                    Err(err) => {
+                                        let err_message = err.to_string();
+                                        let message = format!(
+                                            "remote app server at `{endpoint}` write failed: {err_message}"
+                                        );
+                                        let _ = response_tx.send(Err(err));
+                                        park_pending_requests(
+                                            &mut pending_requests,
+                                            ErrorKind::BrokenPipe,
+                                            &message,
+                                        );
+                                        let Some((next_endpoint, next_stream)) =
+                                            reconnect_remote_stream(
+                                                &mut command_rx,
+                                                &event_tx,
+                                                &mut reconnect,
+                                                &initialize_params,
+                                                &message,
+                                                &mut pending_requests,
+                                                &mut reconnect_attempt,
+                                            )
+                                            .await
+                                        else {
+                                            return;
+                                        };
+                                        endpoint = next_endpoint;
+                                        stream = next_stream;
+                                    }
+                                }
                             }
                             RemoteClientCommand::RejectServerRequest {
                                 request_id,
@@ -299,7 +501,39 @@ impl RemoteAppServerClient {
                                     &endpoint,
                                 )
                                 .await;
-                                let _ = response_tx.send(result);
+                                match result {
+                                    Ok(()) => {
+                                        let _ = response_tx.send(Ok(()));
+                                    }
+                                    Err(err) => {
+                                        let err_message = err.to_string();
+                                        let message = format!(
+                                            "remote app server at `{endpoint}` write failed: {err_message}"
+                                        );
+                                        let _ = response_tx.send(Err(err));
+                                        park_pending_requests(
+                                            &mut pending_requests,
+                                            ErrorKind::BrokenPipe,
+                                            &message,
+                                        );
+                                        let Some((next_endpoint, next_stream)) =
+                                            reconnect_remote_stream(
+                                                &mut command_rx,
+                                                &event_tx,
+                                                &mut reconnect,
+                                                &initialize_params,
+                                                &message,
+                                                &mut pending_requests,
+                                                &mut reconnect_attempt,
+                                            )
+                                            .await
+                                        else {
+                                            return;
+                                        };
+                                        endpoint = next_endpoint;
+                                        stream = next_stream;
+                                    }
+                                }
                             }
                             RemoteClientCommand::Shutdown { response_tx } => {
                                 let close_result = stream.close(None).await.or_else(|err| {
@@ -312,7 +546,7 @@ impl RemoteAppServerClient {
                                     }
                                 });
                                 let _ = response_tx.send(close_result);
-                                break;
+                                return;
                             }
                         }
                     }
@@ -321,13 +555,13 @@ impl RemoteAppServerClient {
                             Some(Ok(Message::Text(text))) => {
                                 match serde_json::from_str::<JSONRPCMessage>(&text) {
                                     Ok(JSONRPCMessage::Response(response)) => {
-                                        if let Some(response_tx) = pending_requests.remove(&response.id) {
-                                            let _ = response_tx.send(Ok(Ok(response.result)));
+                                        if let Some(pending) = pending_requests.remove(&response.id) {
+                                            let _ = pending.response_tx.send(Ok(Ok(response.result)));
                                         }
                                     }
                                     Ok(JSONRPCMessage::Error(error)) => {
-                                        if let Some(response_tx) = pending_requests.remove(&error.id) {
-                                            let _ = response_tx.send(Ok(Err(error.error)));
+                                        if let Some(pending) = pending_requests.remove(&error.id) {
+                                            let _ = pending.response_tx.send(Ok(Err(error.error)));
                                         }
                                     }
                                     Ok(JSONRPCMessage::Notification(notification)) => {
@@ -339,7 +573,7 @@ impl RemoteAppServerClient {
                                             )
                                             {
                                                 warn!(%err, "failed to deliver remote app-server event");
-                                                break;
+                                                return;
                                             }
                                     }
                                     Ok(JSONRPCMessage::Request(request)) => {
@@ -353,7 +587,7 @@ impl RemoteAppServerClient {
                                                 )
                                                 {
                                                     warn!(%err, "failed to deliver remote app-server server request");
-                                                    break;
+                                                    return;
                                                 }
                                             }
                                             Err(err) => {
@@ -378,15 +612,27 @@ impl RemoteAppServerClient {
                                                     let message = format!(
                                                         "remote app server at `{endpoint}` write failed: {err_message}"
                                                     );
-                                                    let _ = deliver_event(
-                                                        &event_tx,
-                                                        AppServerEvent::Disconnected {
-                                                            message: message.clone(),
-                                                        },
+                                                    park_pending_requests(
+                                                        &mut pending_requests,
+                                                        ErrorKind::BrokenPipe,
+                                                        &message,
                                                     );
-                                                    worker_exit_error =
-                                                        Some((ErrorKind::BrokenPipe, message));
-                                                    break;
+                                                    let Some((next_endpoint, next_stream)) =
+                                                        reconnect_remote_stream(
+                                                            &mut command_rx,
+                                                            &event_tx,
+                                                            &mut reconnect,
+                                                            &initialize_params,
+                                                            &message,
+                                                            &mut pending_requests,
+                                                            &mut reconnect_attempt,
+                                                        )
+                                                        .await
+                                                    else {
+                                                        return;
+                                                    };
+                                                    endpoint = next_endpoint;
+                                                    stream = next_stream;
                                                 }
                                             }
                                         }
@@ -401,9 +647,12 @@ impl RemoteAppServerClient {
                                                 message: message.clone(),
                                             },
                                         );
-                                        worker_exit_error =
-                                            Some((ErrorKind::InvalidData, message));
-                                        break;
+                                        fail_pending_requests(
+                                            &mut pending_requests,
+                                            ErrorKind::InvalidData,
+                                            &message,
+                                        );
+                                        return;
                                     }
                                 }
                             }
@@ -416,17 +665,27 @@ impl RemoteAppServerClient {
                                 let message = format!(
                                     "remote app server at `{endpoint}` disconnected: {reason}"
                                 );
-                                let _ = deliver_event(
-                                    &event_tx,
-                                    AppServerEvent::Disconnected {
-                                        message: message.clone(),
-                                    },
-                                );
-                                worker_exit_error = Some((
+                                park_pending_requests(
+                                    &mut pending_requests,
                                     ErrorKind::ConnectionAborted,
-                                    message,
-                                ));
-                                break;
+                                    &message,
+                                );
+                                let Some((next_endpoint, next_stream)) =
+                                    reconnect_remote_stream(
+                                        &mut command_rx,
+                                        &event_tx,
+                                        &mut reconnect,
+                                        &initialize_params,
+                                        &message,
+                                        &mut pending_requests,
+                                        &mut reconnect_attempt,
+                                    )
+                                    .await
+                                else {
+                                    return;
+                                };
+                                endpoint = next_endpoint;
+                                stream = next_stream;
                             }
                             Some(Ok(Message::Binary(_)))
                             | Some(Ok(Message::Ping(_)))
@@ -436,41 +695,57 @@ impl RemoteAppServerClient {
                                 let message = format!(
                                     "remote app server at `{endpoint}` transport failed: {err}"
                                 );
-                                let _ = deliver_event(
-                                    &event_tx,
-                                    AppServerEvent::Disconnected {
-                                        message: message.clone(),
-                                    },
+                                park_pending_requests(
+                                    &mut pending_requests,
+                                    ErrorKind::InvalidData,
+                                    &message,
                                 );
-                                worker_exit_error = Some((ErrorKind::InvalidData, message));
-                                break;
+                                let Some((next_endpoint, next_stream)) =
+                                    reconnect_remote_stream(
+                                        &mut command_rx,
+                                        &event_tx,
+                                        &mut reconnect,
+                                        &initialize_params,
+                                        &message,
+                                        &mut pending_requests,
+                                        &mut reconnect_attempt,
+                                    )
+                                    .await
+                                else {
+                                    return;
+                                };
+                                endpoint = next_endpoint;
+                                stream = next_stream;
                             }
                             None => {
                                 let message = format!(
                                     "remote app server at `{endpoint}` closed the connection"
                                 );
-                                let _ = deliver_event(
-                                    &event_tx,
-                                    AppServerEvent::Disconnected {
-                                        message: message.clone(),
-                                    },
+                                park_pending_requests(
+                                    &mut pending_requests,
+                                    ErrorKind::UnexpectedEof,
+                                    &message,
                                 );
-                                worker_exit_error = Some((ErrorKind::UnexpectedEof, message));
-                                break;
+                                let Some((next_endpoint, next_stream)) =
+                                    reconnect_remote_stream(
+                                        &mut command_rx,
+                                        &event_tx,
+                                        &mut reconnect,
+                                        &initialize_params,
+                                        &message,
+                                        &mut pending_requests,
+                                        &mut reconnect_attempt,
+                                    )
+                                    .await
+                                else {
+                                    return;
+                                };
+                                endpoint = next_endpoint;
+                                stream = next_stream;
                             }
                         }
                     }
                 }
-            }
-
-            let (err_kind, err_message) = worker_exit_error.unwrap_or_else(|| {
-                (
-                    ErrorKind::BrokenPipe,
-                    "remote app-server worker channel is closed".to_string(),
-                )
-            });
-            for (_, response_tx) in pending_requests {
-                let _ = response_tx.send(Err(IoError::new(err_kind, err_message.clone())));
             }
         });
 
@@ -626,6 +901,273 @@ impl RemoteAppServerClient {
         }
         Ok(())
     }
+}
+
+async fn reconnect_remote_stream<S, Reconnect, ReconnectFuture>(
+    command_rx: &mut mpsc::Receiver<RemoteClientCommand>,
+    event_tx: &mpsc::UnboundedSender<AppServerEvent>,
+    reconnect: &mut Reconnect,
+    initialize_params: &InitializeParams,
+    last_error: &str,
+    pending_requests: &mut HashMap<RequestId, PendingRequest>,
+    reconnect_attempt: &mut u32,
+) -> Option<(String, WebSocketStream<S>)>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    Reconnect: FnMut() -> ReconnectFuture,
+    ReconnectFuture: Future<Output = IoResult<(String, WebSocketStream<S>)>>,
+{
+    loop {
+        *reconnect_attempt = reconnect_attempt.saturating_add(1);
+        let attempt = *reconnect_attempt;
+        warn!(
+            attempt,
+            last_error = %last_error,
+            "remote app-server connection lost; reconnecting"
+        );
+
+        let reconnect_result = async {
+            let (endpoint, mut stream) = reconnect().await?;
+            let (pending_events, _server_version, _codex_home) = initialize_remote_connection(
+                &mut stream,
+                &endpoint,
+                initialize_params.clone(),
+                INITIALIZE_TIMEOUT,
+            )
+            .await?;
+            Ok::<_, IoError>((endpoint, stream, pending_events))
+        };
+
+        let give_up_deadline = earliest_parked_deadline(pending_requests);
+        tokio::select! {
+            result = reconnect_result => {
+                match result {
+                    Ok((endpoint, mut stream, pending_events)) => {
+                        for event in pending_events {
+                            if let Err(err) = deliver_event(event_tx, event) {
+                                warn!(%err, "failed to deliver queued remote app-server event after reconnect");
+                                return None;
+                            }
+                        }
+                        // Parked requests are replayed on the freshly initialized
+                        // connection before the worker loop resumes, so their
+                        // responses land on the original oneshot channels.
+                        expire_parked_requests(pending_requests);
+                        match replay_parked_requests(&mut stream, &endpoint, pending_requests).await {
+                            Ok(()) => {
+                                *reconnect_attempt = 0;
+                                return Some((endpoint, stream));
+                            }
+                            Err(err) => {
+                                let message = format!(
+                                    "remote app server at `{endpoint}` failed to accept replayed requests: {err}"
+                                );
+                                warn!(attempt, error = %err, "failed to replay parked remote app-server requests");
+                                // Replay attempts are already spent, so this
+                                // fails the requests that cannot be retried again.
+                                park_pending_requests(
+                                    pending_requests,
+                                    ErrorKind::BrokenPipe,
+                                    &message,
+                                );
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        warn!(
+                            attempt,
+                            error = %err,
+                            "failed to reconnect remote app-server"
+                        );
+                    }
+                }
+            }
+            command = command_rx.recv() => {
+                if fail_command_while_reconnecting(command, last_error) {
+                    return None;
+                }
+                continue;
+            }
+            () = sleep_until_deadline(give_up_deadline) => {
+                expire_parked_requests(pending_requests);
+                continue;
+            }
+        }
+
+        let give_up_deadline = earliest_parked_deadline(pending_requests);
+        tokio::select! {
+            _ = tokio::time::sleep(RECONNECT_DELAY) => {}
+            command = command_rx.recv() => {
+                if fail_command_while_reconnecting(command, last_error) {
+                    return None;
+                }
+            }
+            () = sleep_until_deadline(give_up_deadline) => {
+                expire_parked_requests(pending_requests);
+            }
+        }
+    }
+}
+
+/// Sleeps until `deadline`, or forever when there is no deadline to wait on.
+async fn sleep_until_deadline(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Earliest give-up deadline across all parked requests, if any are parked.
+fn earliest_parked_deadline(
+    pending_requests: &HashMap<RequestId, PendingRequest>,
+) -> Option<Instant> {
+    pending_requests
+        .values()
+        .filter_map(PendingRequest::parked_deadline)
+        .min()
+}
+
+/// Fails every in-flight request that cannot survive a reconnect and parks the
+/// ones that can.
+///
+/// A request is parked when its method is replay-safe, it still has a replay
+/// attempt left, and its give-up deadline has not passed. Everything else keeps
+/// the historical fail-fast behavior.
+fn park_pending_requests(
+    pending_requests: &mut HashMap<RequestId, PendingRequest>,
+    err_kind: ErrorKind,
+    err_message: &str,
+) {
+    let now = Instant::now();
+    let mut parked = HashMap::new();
+    for (request_id, mut pending) in pending_requests.drain() {
+        let keep = match pending.replay.as_mut() {
+            Some(replay) if replay.attempts_remaining > 0 => {
+                let deadline = replay
+                    .parked
+                    .get_or_insert_with(|| ParkedRequest {
+                        deadline: now + PARKED_REQUEST_TIMEOUT,
+                        err_kind,
+                        err_message: err_message.to_string(),
+                    })
+                    .deadline;
+                deadline > now
+            }
+            _ => false,
+        };
+        if keep {
+            parked.insert(request_id, pending);
+        } else {
+            let _ = pending
+                .response_tx
+                .send(Err(IoError::new(err_kind, err_message.to_string())));
+        }
+    }
+    *pending_requests = parked;
+}
+
+/// Fails parked requests whose give-up deadline has passed, using the transport
+/// error that parked them.
+fn expire_parked_requests(pending_requests: &mut HashMap<RequestId, PendingRequest>) {
+    let now = Instant::now();
+    let expired: Vec<RequestId> = pending_requests
+        .iter()
+        .filter(|(_, pending)| {
+            pending
+                .parked_deadline()
+                .is_some_and(|deadline| deadline <= now)
+        })
+        .map(|(request_id, _)| request_id.clone())
+        .collect();
+    for request_id in expired {
+        let Some(pending) = pending_requests.remove(&request_id) else {
+            continue;
+        };
+        warn!(
+            %request_id,
+            "giving up on parked remote app-server request after reconnect timeout"
+        );
+        let give_up_error = pending.give_up_error();
+        let _ = pending.response_tx.send(Err(give_up_error));
+    }
+}
+
+/// Re-sends every parked request on a freshly initialized stream.
+///
+/// The replayed frames reuse the original JSON-RPC ids, so responses route back
+/// to the waiting oneshot channels through the normal worker-loop path. Each
+/// request spends a replay attempt whether or not the write succeeds, which
+/// keeps a server that dies mid-request from being retried indefinitely.
+async fn replay_parked_requests<S>(
+    stream: &mut WebSocketStream<S>,
+    endpoint: &str,
+    pending_requests: &mut HashMap<RequestId, PendingRequest>,
+) -> IoResult<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let replays: Vec<(RequestId, Box<JSONRPCRequest>)> = pending_requests
+        .iter_mut()
+        .filter_map(|(request_id, pending)| {
+            let replay = pending.replay.as_mut()?;
+            replay.parked.take()?;
+            replay.attempts_remaining = replay.attempts_remaining.saturating_sub(1);
+            Some((request_id.clone(), replay.request.clone()))
+        })
+        .collect();
+
+    for (request_id, request) in replays {
+        warn!(
+            %request_id,
+            method = %request.method,
+            "replaying remote app-server request after reconnect"
+        );
+        write_jsonrpc_message(stream, JSONRPCMessage::Request(*request), endpoint).await?;
+    }
+    Ok(())
+}
+
+/// Fails every in-flight request without parking any of them. Used on paths
+/// that abandon the connection instead of reconnecting.
+fn fail_pending_requests(
+    pending_requests: &mut HashMap<RequestId, PendingRequest>,
+    err_kind: ErrorKind,
+    err_message: &str,
+) {
+    for (_, pending) in pending_requests.drain() {
+        let _ = pending
+            .response_tx
+            .send(Err(IoError::new(err_kind, err_message.to_string())));
+    }
+}
+
+fn fail_command_while_reconnecting(command: Option<RemoteClientCommand>, last_error: &str) -> bool {
+    let Some(command) = command else {
+        return true;
+    };
+    match command {
+        RemoteClientCommand::Request { response_tx, .. } => {
+            let _ = response_tx.send(Err(reconnecting_error(last_error)));
+            false
+        }
+        RemoteClientCommand::Notify { response_tx, .. }
+        | RemoteClientCommand::ResolveServerRequest { response_tx, .. }
+        | RemoteClientCommand::RejectServerRequest { response_tx, .. } => {
+            let _ = response_tx.send(Err(reconnecting_error(last_error)));
+            false
+        }
+        RemoteClientCommand::Shutdown { response_tx } => {
+            let _ = response_tx.send(Ok(()));
+            true
+        }
+    }
+}
+
+fn reconnecting_error(last_error: &str) -> IoError {
+    IoError::new(
+        ErrorKind::WouldBlock,
+        format!("remote app-server is reconnecting after: {last_error}"),
+    )
 }
 
 impl RemoteAppServerRequestHandle {
@@ -1036,5 +1578,179 @@ mod tests {
             .shutdown()
             .await
             .expect("shutdown should complete when worker exits first");
+    }
+
+    fn jsonrpc_request(id: i64, method: &str, params: serde_json::Value) -> JSONRPCRequest {
+        JSONRPCRequest {
+            id: RequestId::Integer(id),
+            method: method.to_string(),
+            params: Some(params),
+            trace: None,
+        }
+    }
+
+    fn turn_start_jsonrpc_request(id: i64, client_user_message_id: Option<&str>) -> JSONRPCRequest {
+        let mut params = serde_json::json!({ "threadId": "thread" });
+        if let Some(client_user_message_id) = client_user_message_id {
+            params[CLIENT_USER_MESSAGE_ID_FIELD] = serde_json::json!(client_user_message_id);
+        }
+        jsonrpc_request(id, "turn/start", params)
+    }
+
+    /// Registers `request` as in-flight and returns the receiver its caller
+    /// would be awaiting.
+    fn track_request(
+        pending_requests: &mut HashMap<RequestId, PendingRequest>,
+        request: JSONRPCRequest,
+    ) -> oneshot::Receiver<IoResult<RequestResult>> {
+        let (response_tx, response_rx) = oneshot::channel();
+        let replay = ReplayState::for_request(&request);
+        pending_requests.insert(
+            request.id,
+            PendingRequest {
+                response_tx,
+                replay,
+            },
+        );
+        response_rx
+    }
+
+    #[test]
+    fn replay_is_limited_to_idempotent_turn_start_requests() {
+        assert!(
+            ReplayState::for_request(&turn_start_jsonrpc_request(1, Some("submission-1")))
+                .is_some(),
+            "turn/start carrying an idempotency key should be replayable"
+        );
+        assert!(
+            ReplayState::for_request(&turn_start_jsonrpc_request(2, None)).is_none(),
+            "turn/start without an idempotency key must not be replayed"
+        );
+        assert!(
+            ReplayState::for_request(&turn_start_jsonrpc_request(3, Some(""))).is_none(),
+            "an empty idempotency key must not be treated as a key"
+        );
+        assert!(
+            ReplayState::for_request(&jsonrpc_request(
+                4,
+                "turn/interrupt",
+                serde_json::json!({ CLIENT_USER_MESSAGE_ID_FIELD: "submission-1" }),
+            ))
+            .is_none(),
+            "only allowlisted methods may be replayed"
+        );
+    }
+
+    #[tokio::test]
+    async fn park_keeps_replayable_requests_and_fails_the_rest() {
+        let mut pending_requests = HashMap::new();
+        let mut replayable = track_request(
+            &mut pending_requests,
+            turn_start_jsonrpc_request(1, Some("submission-1")),
+        );
+        let mut not_replayable = track_request(
+            &mut pending_requests,
+            jsonrpc_request(2, "account/read", serde_json::json!({})),
+        );
+
+        park_pending_requests(
+            &mut pending_requests,
+            ErrorKind::ConnectionAborted,
+            "server disconnected",
+        );
+
+        assert_eq!(
+            pending_requests.len(),
+            1,
+            "replayable request should be parked"
+        );
+        assert!(
+            replayable.try_recv().is_err(),
+            "parked request must not be answered yet"
+        );
+        let err = not_replayable
+            .try_recv()
+            .expect("non-replayable request should be answered immediately")
+            .expect_err("non-replayable request should fail");
+        assert_eq!(err.kind(), ErrorKind::ConnectionAborted);
+        assert_eq!(err.to_string(), "server disconnected");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn parked_requests_give_up_with_the_original_transport_error() {
+        let mut pending_requests = HashMap::new();
+        let mut parked = track_request(
+            &mut pending_requests,
+            turn_start_jsonrpc_request(1, Some("submission-1")),
+        );
+
+        park_pending_requests(
+            &mut pending_requests,
+            ErrorKind::UnexpectedEof,
+            "server closed the connection",
+        );
+        let deadline = earliest_parked_deadline(&pending_requests)
+            .expect("a parked request should have a give-up deadline");
+
+        tokio::time::sleep_until(deadline).await;
+        expire_parked_requests(&mut pending_requests);
+
+        assert!(
+            pending_requests.is_empty(),
+            "expired request should be dropped"
+        );
+        let err = parked
+            .try_recv()
+            .expect("expired request should be answered")
+            .expect_err("expired request should fail");
+        assert_eq!(err.kind(), ErrorKind::UnexpectedEof);
+        assert_eq!(
+            err.to_string(),
+            "server closed the connection",
+            "give-up should report the transport error that parked the request"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_replayed_request_is_not_parked_a_second_time() {
+        let mut pending_requests = HashMap::new();
+        let mut request = track_request(
+            &mut pending_requests,
+            turn_start_jsonrpc_request(1, Some("submission-1")),
+        );
+
+        park_pending_requests(&mut pending_requests, ErrorKind::BrokenPipe, "first drop");
+        let (client_side, _server_side) = tokio::io::duplex(64 * 1024);
+        let mut stream = WebSocketStream::from_raw_socket(
+            client_side,
+            tokio_tungstenite::tungstenite::protocol::Role::Client,
+            None,
+        )
+        .await;
+        replay_parked_requests(&mut stream, "test-endpoint", &mut pending_requests)
+            .await
+            .expect("replay should write to a healthy stream");
+        assert_eq!(
+            pending_requests.len(),
+            1,
+            "replayed request stays in flight"
+        );
+        assert!(
+            earliest_parked_deadline(&pending_requests).is_none(),
+            "a replayed request is no longer parked"
+        );
+
+        park_pending_requests(&mut pending_requests, ErrorKind::BrokenPipe, "second drop");
+
+        assert!(
+            pending_requests.is_empty(),
+            "a request may only be replayed once"
+        );
+        let err = request
+            .try_recv()
+            .expect("exhausted request should be answered")
+            .expect_err("exhausted request should fail");
+        assert_eq!(err.kind(), ErrorKind::BrokenPipe);
+        assert_eq!(err.to_string(), "second drop");
     }
 }
