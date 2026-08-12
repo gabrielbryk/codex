@@ -3668,6 +3668,23 @@ impl Session {
         state.clone_history()
     }
 
+    /// Records synthetic outputs for tool calls whose real outputs never arrived.
+    ///
+    /// Prompt normalization already injects these outputs into every outbound request, but
+    /// that repair lives only in the request snapshot. Without persisting it, a call that lost
+    /// its output stays orphaned in history and is re-detected on every retry and every later
+    /// turn, which is how a single dead tool call can log forever. Recording the repair once
+    /// keeps the call/output pair intact in history and in the rollout.
+    pub(crate) async fn backfill_missing_call_outputs(&self) {
+        let injected = {
+            let mut state = self.state.lock().await;
+            state.history.backfill_missing_call_outputs()
+        };
+        if !injected.is_empty() {
+            self.persist_rollout_response_items(&injected).await;
+        }
+    }
+
     pub(crate) async fn current_window_id(&self) -> String {
         let state = self.state.lock().await;
         let thread_id = self.thread_id;
