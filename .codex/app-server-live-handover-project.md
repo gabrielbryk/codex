@@ -2,21 +2,42 @@
 
 ## Status
 
-Natural-drain v1 implemented on 2026-08-12. This is an internal implementation guide for Gabe's
-local Codex fork and its source-owned host lifecycle tooling. It deliberately
-lives outside the user-facing `docs/` tree.
+Natural-drain v1 was implemented and bootstrapped on 2026-08-12. This is an internal implementation
+guide for Gabe's local Codex fork and its source-owned host lifecycle tooling. It deliberately lives
+outside the user-facing `docs/` tree.
 
 The implemented first release covers server identity, synchronized drain
 admission, existing cross-process thread writer locks, private generation
 sockets, a protocol-blind stable router, durable rollout/reconciliation, Fork
-Fleet deployment, and runtime diagnostics. The first deployment of the stable
-router still requires one traditional zero-active-turn cutover and is queued
-until that guard passes.
+Fleet deployment, runtime diagnostics, durable evidence, remote-control ownership transfer, and
+retained rollback packages. The one-time zero-active-turn bootstrap is complete: the stable router
+owns the canonical socket and the first generation runs behind a private socket.
 
-TUI process replacement, automatic reconnect/reattach, remote-control transfer,
-and mid-turn connection migration remain later phases. Natural-drain v1 keeps
-each accepted connection on its original server and therefore preserves live
-work without changing TUI code.
+TUI process replacement, automatic reconnect/reattach, and mid-turn connection migration remain
+later phases. Natural-drain v1 keeps each accepted connection on its original server and therefore
+preserves live work without changing TUI code. Remote control now transfers exactly once at the
+retirement boundary; this is generation ownership transfer, not transport migration of an active
+remote client.
+
+### Delivered release boundary
+
+The production-ready natural-drain boundary includes:
+
+- fail-closed, same-UID, connection-affine routing with bounded backend connect and connection
+  limits;
+- exact package/source/binary identity, sustained candidate health observation, and a stable-route
+  proof before accepting a promotion;
+- crash-recoverable `drainPending -> draining -> retiring -> retired` transitions, including a
+  durable remote-control ownership checkpoint before the old process stops;
+- generation-aware liveness, connection, failure-counter, rollout, and code-drift metrics;
+- append-only JSONL transition audit plus one atomic evidence document per request;
+- automatic retention of at least two retired generations for seven days, with a dry-run prune
+  command and path-containment checks;
+- exact-SHA build stamping through `CODEX_BUILD_COMMIT`, `GIT_COMMIT`, and `STABLE_GIT_COMMIT`.
+
+The full roadmap is not complete until the reconnect/reattach and TUI safe-boundary executable
+handoff acceptance criteria are proven. Those are P2 follow-on features and are not required to use
+natural drain safely.
 
 ## Executive decision
 
@@ -243,6 +264,8 @@ the proof the candidate must validate before `thread/resume`.
     routing-state.json
     router-status.json
     desired-generation.json
+    rollout-events.jsonl
+    evidence/rollout-<request-id>.json
 ```
 
 `current` remains the normal CLI/TUI selection. Each routing-state generation
@@ -252,6 +275,56 @@ restart a running server generation.
 Every state file is written atomically, is owner-only, and records an explicit
 schema version. PID records retain the current PID plus process-start-time
 identity checks.
+
+## Operator runbook
+
+Inspect before changing anything:
+
+```bash
+codex-app-server-active-turns
+codex-app-server-rollout status | jq
+systemctl --user status codex-app-server-router.service codex-app-server-rollout.timer
+```
+
+Prepare a reversible canary, then either roll back by promoting the standby package or complete the
+normal promotion:
+
+```bash
+codex-app-server-rollout canary-promote --package <immutable-release>
+codex-app-server-rollout promote --package <immutable-release>
+```
+
+The canonical Fork Fleet path builds, selects the package for new clients, and records a durable
+server rollout request:
+
+```bash
+codex-use-local-build --repo <candidate-worktree> --sha <full-sha> --rollout \
+  --expect serverDrainV1 --expect threadWriterLeaseV1
+codex-app-server-rollout apply-pending
+codex-app-server-rollout status | jq
+```
+
+`desired-generation.json` remains present until the replacement is active and the old server has
+proved its drain barrier. A nonzero draining count is safe deferred completion. An error or
+`drainPending` count requires reconciliation; do not delete desired state or bypass the barrier.
+
+Retention is automatic during reconciliation. Preview and explicitly apply it with:
+
+```bash
+codex-app-server-rollout prune
+codex-app-server-rollout prune --apply
+```
+
+The defaults are a seven-day retirement age and two retained retired generations. They are
+configurable with `CODEX_ROLLOUT_RETIRED_RETENTION_SECONDS` and
+`CODEX_ROLLOUT_RETAINED_RETIRED_GENERATIONS`. Candidate health defaults to repeated probes over five
+seconds and is controlled by `CODEX_ROLLOUT_HEALTH_OBSERVATION_SECONDS` and
+`CODEX_ROLLOUT_HEALTH_PROBE_INTERVAL`.
+
+Never restart the router merely because installed code differs from its running source hash. A
+plain restart replaces the listening socket and interrupts routed clients. The current safe
+activation rule is `routerConnections == 0`; a live router-process handoff is a separate follow-on
+feature.
 
 ## Server identity and compatibility
 
@@ -455,9 +528,10 @@ enrollment resolves the race.
 Stable(old)
   -> Preparing(new)
   -> CandidateReady(old,new)
-  -> RoutingNewToCandidate(old draining,new active)
-  -> MigratingClients(old,new)
+  -> RoutingNewToCandidate(old drainPending,new active)
+  -> DrainingOld(old draining,new active)
   -> TransferringRemoteControl(old,new)
+  -> RetiringOld(old retiring,new active)
   -> Stable(new)
 
 Any pre-retirement failure
@@ -470,6 +544,11 @@ Every transition is compare-and-swap against the persisted state generation,
 audited with request ID, old/new package identities, PIDs, socket paths, active
 turns, connection counts, and outcome. A crash-recovered reconciler reads the
 state and performs only idempotent transitions.
+
+`retiring` is the durable checkpoint after connection/thread quiescence and remote-control transfer
+but before process stop. If stopping the old daemon or the controller process fails, the next
+reconcile resumes from that checkpoint without repeating ownership transfer or claiming the server
+was already retired.
 
 The stable router must fail closed:
 
@@ -514,6 +593,8 @@ Implemented additions and changes:
 - new `bin/codex-app-server-rollout` and reconciliation timer;
 - immutable per-generation package, socket, and daemon directories;
 - user-systemd router unit and transient generation scope integration;
+- router/controller hardening, generation-aware Prometheus metrics, JSONL audit, and request
+  evidence;
 - source-owned manifests and tests;
 - compatibility migration from the current one-PID state.
 
@@ -785,9 +866,30 @@ After old retirement, rollback is a new rolling deployment using the preserved
 old package as the candidate. Do not pretend that stopped in-memory turns can be
 recovered by repointing a symlink.
 
-Use a soak window before deleting any release or generation state. Deletion and
-retention policy are deliberately deferred until production observations show
-the required rollback horizon.
+The default retention policy keeps at least two retired generations and never removes one until it
+has been retired for seven days. Cleanup refuses paths outside the generation and immutable-release
+roots and never deletes the current package. Operators can lengthen the soak without code changes.
+
+## Natural-drain v1 acceptance
+
+The delivered v1 is accepted when all of these are simultaneously true:
+
+- the router owns the canonical socket and its PID/start identity, status freshness, routing
+  revision, and loaded source hash are valid;
+- the candidate package manifest and all declared file checksums validate before process start;
+- repeated health probes pass for the configured observation window;
+- a stable-socket initialize reaches the exact promoted generation before drain begins;
+- the old server reports `draining` with the exact replacement and cannot create new work;
+- retirement waits for both an empty loaded-thread set and zero live routed connections;
+- remote control has zero or one owner throughout and ownership is durably checkpointed before old
+  stops;
+- injected drain, transfer, stop, PID-reuse, stale-router, and path-containment failures leave a
+  retryable or rolled-back state;
+- metrics, alerts, audit JSONL, and per-request evidence identify incomplete and failed rollouts;
+- Fork Fleet embeds the exact source SHA and performs a genuinely source-distinct canary/build.
+
+These criteria do not claim that an already-running TUI process changes executables or that a
+broken socket is reattached mid-turn. Those remain in the full-project criteria below.
 
 ## Acceptance criteria
 
@@ -819,29 +921,30 @@ This project is complete only when all of the following are proven:
 
 ## Open decisions
 
-The following decisions should be resolved with prototypes and tests rather
-than assumptions:
+The remaining decisions concern the P2 reconnect/TUI roadmap. Natural-drain decisions are recorded
+inline as resolved so they are not reopened accidentally:
 
-1. Whether server identity belongs directly in the legacy initialize response
-   or behind a capability-compatible follow-up method.
-2. Whether drain is initially experimental or fork-private until its semantics
-   stabilize.
-3. The exact exhaustive list of work-producing RPC methods rejected while
-   draining.
+1. **Resolved for v1:** server identity is additive in the initialize response.
+2. **Resolved for v1:** drain is fork-private and capability-gated at protocol revision 1.
+3. **Resolved for v1:** work-producing RPC admission is exhaustively owned by the server lifecycle
+   classifier and covered by server tests.
 4. Whether existing completion persistence plus `thread/unsubscribe` is a
    sufficient thread ownership barrier or a new `thread/handoff/prepare` RPC is
    required.
-5. Which shared `CODEX_HOME` resources need generation-local paths or explicit
-   leases before two full app-server processes are supported.
+5. **Resolved for v1:** thread writer locks protect shared rollout writers; generation-local daemon
+   state isolates process ownership; remote control is explicitly transferred. Re-audit if a P2
+   feature introduces another shared writer.
 6. Whether idle side threads migrate in the first TUI handoff or lazily on
    navigation.
 7. How much composer and modal state is safe and worthwhile to preserve across
    process replacement.
 8. The Windows process-replacement mechanism and terminal ownership handshake.
-9. The candidate health observation duration and post-retirement soak window.
-10. Whether remote desktop/remote-control connections can expose a comparable
-   client migration capability or must drain naturally in the first version.
-11. Release retention limits after repeated rolling deployments.
+9. **Resolved for v1:** five seconds of repeated health probes, configurable by environment; seven
+   days before retirement cleanup.
+10. **Resolved for v1:** remote-control ownership transfers only after natural drain; active remote
+    connection migration is deferred.
+11. **Resolved for v1:** retain at least two retired generations and require seven days of age;
+    both limits are configurable.
 
 These decisions do not change the architectural boundary: transport routing and
 process generations remain external; connection reattachment, admission
