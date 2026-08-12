@@ -99,6 +99,7 @@ mod platform {
     /// preserving owner traversal and socket path creation.
     const SOCKET_DIR_MODE: u32 = 0o700;
     const SOCKET_DIR_PERMISSION_BITS: u32 = 0o777;
+    const SOCKET_DIR_STICKY_BIT: u32 = 0o1000;
 
     pub(super) type Stream = UnixStream;
 
@@ -125,11 +126,16 @@ mod platform {
         }
 
         let permissions = metadata.permissions();
+        let mode = permissions.mode();
+        if mode & SOCKET_DIR_STICKY_BIT != 0 {
+            return Ok(());
+        }
+
         // The SSH-over-UDS control socket is reachable by path, so the
         // rendezvous directory must be owner-traversable while denying
         // group/other access; exact 0700 fixes insecure modes and unusable
         // owner-only modes like 0600.
-        if permissions.mode() & SOCKET_DIR_PERMISSION_BITS != SOCKET_DIR_MODE {
+        if mode & SOCKET_DIR_PERMISSION_BITS != SOCKET_DIR_MODE {
             fs::set_permissions(socket_dir, std::fs::Permissions::from_mode(SOCKET_DIR_MODE))
                 .await?;
         }
