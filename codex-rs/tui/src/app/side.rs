@@ -7,6 +7,7 @@
 //! material only and steer the agent away from mutations unless the side conversation explicitly asks
 //! for them.
 
+use super::displayed_thread_transition::DisplayedThreadTransitionReason;
 use super::*;
 use crate::chatwidget::InterruptedTurnNoticeMode;
 use codex_app_server_protocol::ThreadUnsubscribeParams;
@@ -362,7 +363,12 @@ impl App {
             && let Some(parent_thread_id) = self.active_side_parent_thread_id()
         {
             if self
-                .select_agent_thread_and_discard_side(tui, app_server, parent_thread_id)
+                .select_agent_thread_and_discard_side(
+                    tui,
+                    app_server,
+                    parent_thread_id,
+                    DisplayedThreadTransitionReason::SideConversationReturn,
+                )
                 .await
                 .is_err()
             {
@@ -407,8 +413,13 @@ impl App {
             return Ok(());
         };
 
-        self.select_agent_thread(tui, app_server, target_thread_id)
-            .await
+        self.select_agent_thread_with_reason(
+            tui,
+            app_server,
+            target_thread_id,
+            DisplayedThreadTransitionReason::SideConversationToggle,
+        )
+        .await
     }
 
     pub(super) async fn discard_side_thread(
@@ -549,7 +560,14 @@ impl App {
         thread_id: ThreadId,
     ) {
         if self.active_thread_id != Some(thread_id)
-            && let Err(err) = self.select_agent_thread(tui, app_server, thread_id).await
+            && let Err(err) = self
+                .select_agent_thread_with_reason(
+                    tui,
+                    app_server,
+                    thread_id,
+                    DisplayedThreadTransitionReason::SideConversationCleanupRecovery,
+                )
+                .await
         {
             tracing::warn!(
                 "failed to restore side conversation after cleanup failure for {thread_id}: {err}"
@@ -656,9 +674,11 @@ impl App {
         tui: &mut tui::Tui,
         app_server: &mut AppServerSession,
         thread_id: ThreadId,
+        reason: DisplayedThreadTransitionReason,
     ) -> Result<()> {
         let side_thread_to_discard = self.side_thread_to_discard_after_switch(thread_id);
-        self.select_agent_thread(tui, app_server, thread_id).await?;
+        self.select_agent_thread_with_reason(tui, app_server, thread_id, reason)
+            .await?;
         if self.active_thread_id == Some(thread_id)
             && let Some(side_thread_id) = side_thread_to_discard
         {
@@ -737,7 +757,12 @@ impl App {
                     return Ok(AppRunControl::Continue);
                 }
                 if let Err(err) = self
-                    .select_agent_thread_and_discard_side(tui, app_server, child_thread_id)
+                    .select_agent_thread_and_discard_side(
+                        tui,
+                        app_server,
+                        child_thread_id,
+                        DisplayedThreadTransitionReason::SideConversationStart,
+                    )
                     .await
                 {
                     let discarded = self
@@ -746,7 +771,12 @@ impl App {
                     if discarded
                         && self.active_thread_id != Some(parent_thread_id)
                         && let Err(restore_err) = self
-                            .select_agent_thread(tui, app_server, parent_thread_id)
+                            .select_agent_thread_with_reason(
+                                tui,
+                                app_server,
+                                parent_thread_id,
+                                DisplayedThreadTransitionReason::SideConversationCleanupRecovery,
+                            )
                             .await
                     {
                         tracing::warn!(

@@ -10,6 +10,8 @@ use super::agent_picker::AGENT_PICKER_VIEW_ID;
 use super::app_server_event_targets::ServerNotificationThreadTarget;
 use super::app_server_event_targets::server_notification_thread_target;
 use super::app_server_event_targets::server_request_thread_id;
+use super::displayed_thread_transition::DisplayedThreadTransitionReason;
+use super::displayed_thread_transition::log_displayed_thread_transition;
 use super::*;
 use crate::app_server_session::source_agent_path;
 use crate::app_server_session::thread_blocks_direct_input;
@@ -462,15 +464,17 @@ impl App {
         self.sync_active_agent_label();
     }
 
-    pub(super) async fn select_agent_thread(
+    pub(super) async fn select_agent_thread_with_reason(
         &mut self,
         tui: &mut tui::Tui,
         app_server: &mut AppServerSession,
         thread_id: ThreadId,
+        reason: DisplayedThreadTransitionReason,
     ) -> Result<()> {
         if self.active_thread_id == Some(thread_id) {
             return Ok(());
         }
+        let previous_displayed_thread_id = self.current_displayed_thread_id();
 
         // A tracked side thread stays loaded until it is explicitly discarded and already has a
         // replay channel, so another liveness read cannot add anything before selection.
@@ -567,6 +571,11 @@ impl App {
             self.chat_widget.add_info_message(message, /*hint*/ None);
         }
         self.refresh_pending_thread_approvals().await;
+        log_displayed_thread_transition(
+            previous_displayed_thread_id,
+            self.current_displayed_thread_id(),
+            reason,
+        );
 
         Ok(())
     }
@@ -808,6 +817,7 @@ impl App {
         presentation: ThreadAttachPresentation,
         initial_user_message: Option<crate::chatwidget::UserMessage>,
     ) -> Result<()> {
+        let previous_displayed_thread_id = self.current_displayed_thread_id();
         // Initial messages are for freshly attached primary threads only. Thread switches and
         // resume/fork flows pass `None` so they cannot replay old history and then auto-submit a new
         // user turn by accident.
@@ -831,6 +841,19 @@ impl App {
             presentation,
         )
         .await?;
+        let reason = match presentation {
+            ThreadAttachPresentation::SessionLineage => {
+                DisplayedThreadTransitionReason::SessionLineageAttachment
+            }
+            ThreadAttachPresentation::PromptEdit => {
+                DisplayedThreadTransitionReason::PromptEditAttachment
+            }
+        };
+        log_displayed_thread_transition(
+            previous_displayed_thread_id,
+            self.current_displayed_thread_id(),
+            reason,
+        );
         Ok(())
     }
 

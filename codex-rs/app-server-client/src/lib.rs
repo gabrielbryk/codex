@@ -94,6 +94,21 @@ const IN_PROCESS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(45);
 /// `MessageProcessor` continues to produce that shape internally.
 pub type RequestResult = std::result::Result<JsonRpcResult, JSONRPCErrorError>;
 
+/// Monotonically increasing identity for one successful remote reconnect.
+///
+/// Callers must return the epoch after restoring connection-scoped state so
+/// the transport only releases requests parked for that exact connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ReconnectEpoch(u64);
+
+impl ReconnectEpoch {
+    pub const FIRST: Self = Self(1);
+
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum AppServerEvent {
     Lagged {
@@ -105,6 +120,7 @@ pub enum AppServerEvent {
         message: String,
     },
     Reconnected {
+        epoch: ReconnectEpoch,
         previous: Option<ServerIdentity>,
         current: Option<ServerIdentity>,
     },
@@ -748,10 +764,10 @@ impl AppServerClient {
         }
     }
 
-    pub async fn finish_reconnect(&self) -> IoResult<()> {
+    pub async fn finish_reconnect(&self, epoch: ReconnectEpoch) -> IoResult<()> {
         match self {
             Self::InProcess(_) => Ok(()),
-            Self::Remote(client) => client.finish_reconnect().await,
+            Self::Remote(client) => client.finish_reconnect(epoch).await,
         }
     }
 
@@ -947,18 +963,38 @@ mod tests {
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
+        expect_remote_initialize_with_identity(websocket, None).await;
+    }
+
+    async fn expect_remote_initialize_with_identity<S>(
+        websocket: &mut tokio_tungstenite::WebSocketStream<S>,
+        server_identity: Option<ServerIdentity>,
+    ) where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
         let JSONRPCMessage::Request(request) = read_websocket_message(websocket).await else {
             panic!("expected initialize request");
         };
         assert_eq!(request.method, "initialize");
+        let mut result = serde_json::json!({
+            "userAgent": "codex_cli_rs/9.8.7-test (Test OS; x86_64) rust",
+            "codexHome": "/server/.codex",
+        });
+        if let Some(server_identity) = server_identity {
+            result
+                .as_object_mut()
+                .expect("initialize result should be an object")
+                .insert(
+                    "serverIdentity".to_string(),
+                    serde_json::to_value(server_identity)
+                        .expect("server identity should serialize"),
+                );
+        }
         write_websocket_message(
             websocket,
             JSONRPCMessage::Response(JSONRPCResponse {
                 id: request.id,
-                result: serde_json::json!({
-                    "userAgent": "codex_cli_rs/9.8.7-test (Test OS; x86_64) rust",
-                    "codexHome": "/server/.codex",
-                }),
+                result,
             }),
         )
         .await;
@@ -968,6 +1004,16 @@ mod tests {
             panic!("expected initialized notification");
         };
         assert_eq!(notification.method, "initialized");
+    }
+
+    fn test_server_identity(instance_id: &str, generation: &str) -> ServerIdentity {
+        ServerIdentity {
+            instance_id: instance_id.to_string(),
+            generation: generation.to_string(),
+            source_sha: format!("sha-{generation}"),
+            protocol_revision: 1,
+            capabilities: vec!["reconnect".to_string()],
+        }
     }
 
     async fn read_websocket_message<S>(
@@ -1886,6 +1932,10 @@ mod tests {
 
     #[tokio::test]
     async fn remote_disconnect_reconnects_and_preserves_event_stream() {
+        let previous_identity = test_server_identity("instance-a", "generation-a");
+        let current_identity = test_server_identity("instance-b", "generation-b");
+        let server_previous_identity = previous_identity.clone();
+        let server_current_identity = current_identity.clone();
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
@@ -1899,7 +1949,8 @@ mod tests {
             let mut websocket = accept_async(stream)
                 .await
                 .expect("first websocket upgrade should succeed");
-            expect_remote_initialize(&mut websocket).await;
+            expect_remote_initialize_with_identity(&mut websocket, Some(server_previous_identity))
+                .await;
             websocket.close(None).await.expect("close should succeed");
             let (stream, _) = listener
                 .accept()
@@ -1908,7 +1959,8 @@ mod tests {
             let mut websocket = accept_async(stream)
                 .await
                 .expect("second websocket upgrade should succeed");
-            expect_remote_initialize(&mut websocket).await;
+            expect_remote_initialize_with_identity(&mut websocket, Some(server_current_identity))
+                .await;
             write_websocket_message(
                 &mut websocket,
                 JSONRPCMessage::Notification(
@@ -1934,9 +1986,24 @@ mod tests {
             .await
             .expect("reconnected event should arrive")
             .expect("event stream should stay open");
-        assert!(matches!(event, AppServerEvent::Reconnected { .. }));
+        let AppServerEvent::Reconnected {
+            epoch,
+            previous,
+            current,
+        } = event
+        else {
+            panic!("expected reconnected event");
+        };
+        assert_eq!(
+            (epoch, previous, current),
+            (
+                ReconnectEpoch::FIRST,
+                Some(previous_identity),
+                Some(current_identity),
+            )
+        );
         client
-            .finish_reconnect()
+            .finish_reconnect(epoch)
             .await
             .expect("reconnect should finish");
         let event = timeout(Duration::from_secs(2), client.next_event())
@@ -1948,6 +2015,164 @@ mod tests {
             AppServerEvent::ServerNotification(notification)
                 if matches!(notification.as_ref(), ServerNotification::AccountUpdated(_))
         ));
+        client.shutdown().await.expect("shutdown should complete");
+    }
+
+    #[tokio::test]
+    async fn remote_streaming_events_survive_two_generation_socket_loss() {
+        let previous_identity = test_server_identity("stream-instance-a", "stream-generation-a");
+        let current_identity = test_server_identity("stream-instance-b", "stream-generation-b");
+        let server_previous_identity = previous_identity.clone();
+        let server_current_identity = current_identity.clone();
+        let websocket_url =
+            start_reconnecting_test_remote_server(|mut websocket, listener| async move {
+                expect_remote_initialize_with_identity(
+                    &mut websocket,
+                    Some(server_previous_identity),
+                )
+                .await;
+                write_websocket_message(
+                    &mut websocket,
+                    JSONRPCMessage::Notification(
+                        serde_json::from_value(
+                            serde_json::to_value(agent_message_delta_notification("before-loss"))
+                                .expect("notification should serialize"),
+                        )
+                        .expect("notification should convert to JSON-RPC"),
+                    ),
+                )
+                .await;
+                websocket.close(None).await.expect("close should succeed");
+
+                let mut websocket = accept_next_test_remote_connection(&listener).await;
+                expect_remote_initialize_with_identity(
+                    &mut websocket,
+                    Some(server_current_identity),
+                )
+                .await;
+                write_websocket_message(
+                    &mut websocket,
+                    JSONRPCMessage::Notification(
+                        serde_json::from_value(
+                            serde_json::to_value(agent_message_delta_notification("after-loss"))
+                                .expect("notification should serialize"),
+                        )
+                        .expect("notification should convert to JSON-RPC"),
+                    ),
+                )
+                .await;
+                let _ = websocket.next().await;
+            })
+            .await;
+        let mut client = RemoteAppServerClient::connect(test_remote_connect_args(websocket_url))
+            .await
+            .expect("remote client should connect");
+
+        let before = timeout(Duration::from_secs(2), client.next_event())
+            .await
+            .expect("pre-loss delta should arrive")
+            .expect("event stream should stay open");
+        assert!(matches!(
+            before,
+            AppServerEvent::ServerNotification(notification)
+                if matches!(
+                    notification.as_ref(),
+                    ServerNotification::AgentMessageDelta(notification)
+                        if notification.delta == "before-loss"
+                )
+        ));
+        let reconnect = timeout(Duration::from_secs(2), client.next_event())
+            .await
+            .expect("reconnect should complete")
+            .expect("event stream should stay open");
+        let AppServerEvent::Reconnected {
+            epoch,
+            previous,
+            current,
+        } = reconnect
+        else {
+            panic!("expected reconnect event");
+        };
+        assert_eq!(
+            (previous, current),
+            (Some(previous_identity), Some(current_identity))
+        );
+        client
+            .finish_reconnect(epoch)
+            .await
+            .expect("reconnect should finish");
+        let after = timeout(Duration::from_secs(2), client.next_event())
+            .await
+            .expect("post-loss delta should arrive")
+            .expect("event stream should stay open");
+        assert!(matches!(
+            after,
+            AppServerEvent::ServerNotification(notification)
+                if matches!(
+                    notification.as_ref(),
+                    ServerNotification::AgentMessageDelta(notification)
+                        if notification.delta == "after-loss"
+                )
+        ));
+
+        client.shutdown().await.expect("shutdown should complete");
+    }
+
+    #[tokio::test]
+    async fn newer_reconnect_epoch_supersedes_unfinished_epoch() {
+        let websocket_url =
+            start_reconnecting_test_remote_server(|mut websocket, listener| async move {
+                expect_remote_initialize(&mut websocket).await;
+                websocket.close(None).await.expect("close should succeed");
+
+                let mut websocket = accept_next_test_remote_connection(&listener).await;
+                expect_remote_initialize(&mut websocket).await;
+                websocket.close(None).await.expect("close should succeed");
+
+                let mut websocket = accept_next_test_remote_connection(&listener).await;
+                expect_remote_initialize(&mut websocket).await;
+                let _ = websocket.next().await;
+            })
+            .await;
+        let mut client = RemoteAppServerClient::connect(test_remote_connect_args(websocket_url))
+            .await
+            .expect("remote client should connect");
+
+        let first = timeout(Duration::from_secs(2), client.next_event())
+            .await
+            .expect("first reconnect should arrive")
+            .expect("event stream should stay open");
+        let AppServerEvent::Reconnected {
+            epoch: first_epoch, ..
+        } = first
+        else {
+            panic!("expected first reconnect event");
+        };
+        let second = timeout(Duration::from_secs(2), client.next_event())
+            .await
+            .expect("second reconnect should arrive")
+            .expect("event stream should stay open");
+        let AppServerEvent::Reconnected {
+            epoch: second_epoch,
+            ..
+        } = second
+        else {
+            panic!("expected second reconnect event");
+        };
+        assert_eq!(
+            (first_epoch.get(), second_epoch.get()),
+            (ReconnectEpoch::FIRST.get(), ReconnectEpoch::FIRST.get() + 1)
+        );
+        let stale_err = client
+            .finish_reconnect(first_epoch)
+            .await
+            .expect_err("superseded epoch should be rejected");
+        assert_eq!(stale_err.kind(), ErrorKind::InvalidInput);
+        client
+            .finish_reconnect(second_epoch)
+            .await
+            .expect("latest reconnect should finish");
+
         client.shutdown().await.expect("shutdown should complete");
     }
 
@@ -2091,11 +2316,23 @@ mod tests {
             .await
             .expect("reconnect lifecycle event should arrive")
             .expect("event stream should stay open");
-        assert!(matches!(event, AppServerEvent::Reconnected { .. }));
+        let AppServerEvent::Reconnected { epoch, .. } = event else {
+            panic!("expected reconnected event");
+        };
+        assert_eq!(epoch, ReconnectEpoch::FIRST);
+        let stale_err = client
+            .finish_reconnect(ReconnectEpoch(0))
+            .await
+            .expect_err("stale reconnect epoch should be rejected");
+        assert_eq!(stale_err.kind(), ErrorKind::InvalidInput);
         client
-            .finish_reconnect()
+            .finish_reconnect(epoch)
             .await
             .expect("reconnect should release the parked request");
+        client
+            .finish_reconnect(epoch)
+            .await
+            .expect("duplicate completion should be idempotent");
         let response = timeout(Duration::from_secs(10), response)
             .await
             .expect("replayed turn/start should resolve before the timeout")
