@@ -14,6 +14,7 @@ use anyhow::Result;
 use anyhow::anyhow;
 pub use backend::BackendKind;
 use backend::BackendPaths;
+use backend::PidStatus;
 use codex_app_server_protocol::RemoteControlConnectionStatus;
 use codex_app_server_protocol::RemoteControlPairingStartResponse;
 use codex_app_server_transport::app_server_control_socket_path;
@@ -40,6 +41,30 @@ pub enum LifecycleCommand {
     Restart,
     Stop,
     Version,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DaemonStatus {
+    Running,
+    Starting,
+    NotRunning,
+    Unmanaged,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DaemonStatusOutput {
+    pub status: DaemonStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<BackendKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process_start_time: Option<String>,
+    pub socket_path: PathBuf,
+    pub socket_listening: bool,
+    pub managed_codex_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -191,6 +216,11 @@ enum RestartDecision {
 pub async fn run(command: LifecycleCommand) -> Result<LifecycleOutput> {
     ensure_supported_platform()?;
     Daemon::from_environment()?.run(command).await
+}
+
+pub async fn status() -> Result<DaemonStatusOutput> {
+    ensure_supported_platform()?;
+    Daemon::from_environment()?.status().await
 }
 
 pub async fn bootstrap(options: BootstrapOptions) -> Result<BootstrapOutput> {
@@ -446,6 +476,41 @@ impl Daemon {
                 Some(info.app_server_version),
             )
             .await)
+    }
+
+    async fn status(&self) -> Result<DaemonStatusOutput> {
+        let settings = self.load_settings().await?;
+        let paths = self.backend_paths(&settings);
+        let pid_status = backend::pid_backend(paths).status().await?;
+        let socket_listening = tokio::time::timeout(
+            Duration::from_secs(1),
+            tokio::net::UnixStream::connect(&self.socket_path),
+        )
+        .await
+        .is_ok_and(|result| result.is_ok());
+        let (status, backend, pid, process_start_time) = match pid_status {
+            PidStatus::Running {
+                pid,
+                process_start_time,
+            } => (
+                DaemonStatus::Running,
+                Some(BackendKind::Pid),
+                Some(pid),
+                Some(process_start_time),
+            ),
+            PidStatus::Starting => (DaemonStatus::Starting, Some(BackendKind::Pid), None, None),
+            PidStatus::Missing if socket_listening => (DaemonStatus::Unmanaged, None, None, None),
+            PidStatus::Missing => (DaemonStatus::NotRunning, None, None, None),
+        };
+        Ok(DaemonStatusOutput {
+            status,
+            backend,
+            pid,
+            process_start_time,
+            socket_path: self.socket_path.clone(),
+            socket_listening,
+            managed_codex_path: self.managed_codex_bin.clone(),
+        })
     }
 
     async fn wait_until_ready(&self) -> Result<client::ProbeInfo> {
