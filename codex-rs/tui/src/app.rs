@@ -227,6 +227,7 @@ mod permission_shortcuts;
 mod pets;
 mod platform_actions;
 mod plugin_mentions;
+mod reconnect_reattachment;
 mod replay_filter;
 mod resize_reflow;
 mod safety_buffering;

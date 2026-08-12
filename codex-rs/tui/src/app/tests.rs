@@ -18,6 +18,7 @@ mod patch_approval_tests;
 mod permission_shortcuts_tests;
 mod plugin_catalog;
 mod rate_limits;
+mod reconnect_reattachment;
 mod safety_buffering;
 #[path = "tests/session_lifecycle_requests.rs"]
 mod session_lifecycle_requests;
