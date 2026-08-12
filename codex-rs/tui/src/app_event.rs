@@ -52,6 +52,7 @@ use crate::chatwidget::ThreadUsageOutcome;
 use crate::chatwidget::UserMessage;
 use crate::goal_files::GoalDraft;
 use codex_app_server_protocol::AskForApproval;
+use codex_app_server_protocol::ServerIdentity;
 use codex_config::types::ApprovalsReviewer;
 use codex_features::Feature;
 use codex_plugin::PluginCapabilitySummary;
@@ -227,6 +228,10 @@ pub(crate) enum AppEvent {
     #[cfg(unix)]
     AgentsDaemonStarted {
         result: Result<(), String>,
+    },
+    AppServerReconnected {
+        previous: Option<ServerIdentity>,
+        current: Option<ServerIdentity>,
     },
     /// Open the agent picker for switching active threads.
     OpenAgentPicker,

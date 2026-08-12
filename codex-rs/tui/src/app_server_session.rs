@@ -605,6 +605,10 @@ impl AppServerSession {
         self.client.next_event().await
     }
 
+    pub(crate) async fn finish_reconnect(&self) -> std::io::Result<()> {
+        self.client.finish_reconnect().await
+    }
+
     #[cfg(test)]
     pub(crate) async fn start_thread(&mut self, config: &Config) -> Result<AppServerStartedThread> {
         self.start_thread_with_session_start_source(

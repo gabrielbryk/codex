@@ -48,6 +48,10 @@ impl App {
             AppEvent::SkillsListLoaded { ref cwd, .. }
             | AppEvent::PluginMentionsLoaded { ref cwd, .. }
                 if cwds_differ(cwd, self.config.cwd.as_path()) => {}
+            AppEvent::AppServerReconnected { previous, current } => {
+                self.reattach_after_reconnect(app_server, previous, current)
+                    .await;
+            }
             AppEvent::NewSession { name } => {
                 self.start_fresh_session_with_summary_hint(
                     tui, app_server, /*session_start_source*/ None,
