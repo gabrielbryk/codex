@@ -67,6 +67,16 @@ enum PidFileState {
     Running(PidRecord),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PidStatus {
+    Missing,
+    Starting,
+    Running {
+        pid: u32,
+        process_start_time: String,
+    },
+}
+
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(not(unix), allow(dead_code))]
 enum PidCommandKind {
@@ -75,6 +85,42 @@ enum PidCommandKind {
 }
 
 impl PidBackend {
+    /// Read-only identity snapshot. Unlike lifecycle operations this never
+    /// removes stale state or waits for readiness.
+    pub(crate) async fn status(&self) -> Result<PidStatus> {
+        let contents = match fs::read_to_string(&self.pid_file).await {
+            Ok(contents) => contents,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return if reservation_lock_is_active(&self.lock_file).await? {
+                    Ok(PidStatus::Starting)
+                } else {
+                    Ok(PidStatus::Missing)
+                };
+            }
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("failed to read {}", self.pid_file.display()));
+            }
+        };
+        if contents.trim().is_empty() {
+            return if reservation_lock_is_active(&self.lock_file).await? {
+                Ok(PidStatus::Starting)
+            } else {
+                Ok(PidStatus::Missing)
+            };
+        }
+        let record: PidRecord = serde_json::from_str(&contents)
+            .with_context(|| format!("invalid pid file contents in {}", self.pid_file.display()))?;
+        if self.record_is_active(&record).await? {
+            Ok(PidStatus::Running {
+                pid: record.pid,
+                process_start_time: record.process_start_time,
+            })
+        } else {
+            Ok(PidStatus::Missing)
+        }
+    }
+
     pub(crate) fn new(codex_bin: PathBuf, pid_file: PathBuf, remote_control_enabled: bool) -> Self {
         let lock_file = pid_file.with_extension("pid.lock");
         Self {

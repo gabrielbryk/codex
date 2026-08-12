@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use serde::Serialize;
 
 pub(crate) use pid::PidBackend;
+pub(crate) use pid::PidStatus;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
