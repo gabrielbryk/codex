@@ -778,38 +778,92 @@ impl App {
                 Ok(true)
             }
             AppCommand::Compact => {
-                app_server.thread_compact_start(thread_id).await?;
+                // A dropped app-server websocket fails every in-flight request, so a failed
+                // thread/compact/start must stay recoverable instead of exiting the TUI.
+                if let Err(err) = app_server.thread_compact_start(thread_id).await {
+                    tracing::warn!("thread/compact/start failed for thread {thread_id}: {err:#}");
+                    self.chat_widget.add_error_message(format!(
+                        "Failed to compact the conversation: {err:#}. The app-server connection may have dropped and reconnected — please try again."
+                    ));
+                }
                 Ok(true)
             }
             AppCommand::SetThreadName { name } => {
                 let name = name.to_string();
-                app_server.thread_set_name(thread_id, name.clone()).await?;
-                self.chat_widget.expect_manual_thread_name(thread_id, name);
+                // A dropped app-server websocket fails every in-flight request, so a failed
+                // thread/setName must stay recoverable instead of exiting the TUI.
+                match app_server.thread_set_name(thread_id, name.clone()).await {
+                    Ok(_) => self.chat_widget.expect_manual_thread_name(thread_id, name),
+                    Err(err) => {
+                        tracing::warn!("thread/setName failed for thread {thread_id}: {err:#}");
+                        self.chat_widget.add_error_message(format!(
+                            "Failed to rename this thread: {err:#}. The app-server connection may have dropped and reconnected — please try again."
+                        ));
+                    }
+                }
                 Ok(true)
             }
             AppCommand::Review { target } => {
-                let response = app_server.review_start(thread_id, target.clone()).await?;
-                let review_thread_id = ThreadId::from_string(&response.review_thread_id)
-                    .wrap_err("review/start returned invalid review thread id")?;
-                let store = Arc::clone(&self.ensure_thread_channel(review_thread_id).store);
-                let mut store = store.lock().await;
-                store.active_turn_id = Some(response.turn.id);
+                // A dropped app-server websocket fails every in-flight request, so a failed
+                // review/start must stay recoverable instead of exiting the TUI. Skip the
+                // review-thread bookkeeping entirely on failure so no partial state is recorded.
+                match app_server.review_start(thread_id, target.clone()).await {
+                    Ok(response) => {
+                        let review_thread_id = ThreadId::from_string(&response.review_thread_id)
+                            .wrap_err("review/start returned invalid review thread id")?;
+                        let store = Arc::clone(&self.ensure_thread_channel(review_thread_id).store);
+                        let mut store = store.lock().await;
+                        store.active_turn_id = Some(response.turn.id);
+                    }
+                    Err(err) => {
+                        tracing::warn!("review/start failed for thread {thread_id}: {err:#}");
+                        self.chat_widget.add_error_message(format!(
+                            "Failed to start review: {err:#}. The app-server connection may have dropped and reconnected — please try again."
+                        ));
+                    }
+                }
                 Ok(true)
             }
             AppCommand::CleanBackgroundTerminals => {
-                app_server
+                // A dropped app-server websocket fails every in-flight request, so a failed
+                // thread/backgroundTerminals/clean must stay recoverable instead of exiting the
+                // TUI.
+                if let Err(err) = app_server
                     .thread_background_terminals_clean(thread_id)
-                    .await?;
+                    .await
+                {
+                    tracing::warn!(
+                        "thread/backgroundTerminals/clean failed for thread {thread_id}: {err:#}"
+                    );
+                    self.chat_widget.add_error_message(format!(
+                        "Failed to clean background terminals: {err:#}. The app-server connection may have dropped and reconnected — please try again."
+                    ));
+                }
                 Ok(true)
             }
             AppCommand::RunUserShellCommand { command } => {
-                app_server
+                // A dropped app-server websocket fails every in-flight request, so a failed
+                // thread/shellCommand must stay recoverable instead of exiting the TUI.
+                if let Err(err) = app_server
                     .thread_shell_command(thread_id, command.to_string())
-                    .await?;
+                    .await
+                {
+                    tracing::warn!("thread/shellCommand failed for thread {thread_id}: {err:#}");
+                    self.chat_widget.add_error_message(format!(
+                        "Failed to run shell command: {err:#}. The app-server connection may have dropped and reconnected — please try again."
+                    ));
+                }
                 Ok(true)
             }
             AppCommand::ReloadUserConfig => {
-                app_server.reload_user_config().await?;
+                // A dropped app-server websocket fails every in-flight request, so a failed
+                // config reload must stay recoverable instead of exiting the TUI.
+                if let Err(err) = app_server.reload_user_config().await {
+                    tracing::warn!("config reload failed for thread {thread_id}: {err:#}");
+                    self.chat_widget.add_error_message(format!(
+                        "Failed to reload the user config: {err:#}. The app-server connection may have dropped and reconnected — please try again."
+                    ));
+                }
                 Ok(true)
             }
             AppCommand::OverrideTurnContext { .. } => {
@@ -818,9 +872,20 @@ impl App {
                 Ok(true)
             }
             AppCommand::ApproveGuardianDeniedAction { event } => {
-                app_server
+                // A dropped app-server websocket fails every in-flight request, so a failed
+                // thread/approveGuardianDeniedAction must stay recoverable instead of exiting the
+                // TUI.
+                if let Err(err) = app_server
                     .thread_approve_guardian_denied_action(thread_id, event)
-                    .await?;
+                    .await
+                {
+                    tracing::warn!(
+                        "thread/approveGuardianDeniedAction failed for thread {thread_id}: {err:#}"
+                    );
+                    self.chat_widget.add_error_message(format!(
+                        "Failed to approve the blocked action: {err:#}. The app-server connection may have dropped and reconnected — please try again."
+                    ));
+                }
                 Ok(true)
             }
             _ => Ok(false),

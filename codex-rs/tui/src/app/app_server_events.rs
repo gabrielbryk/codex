@@ -79,6 +79,16 @@ impl App {
             AppServerEvent::Disconnected { message } => {
                 tracing::warn!("app-server event stream disconnected: {message}");
                 self.chat_widget.add_error_message(message.clone());
+                // A fatal exit should tell the user how to get back into the session instead of
+                // only printing the transport error (openai/codex#33976).
+                let thread_id = self
+                    .current_displayed_thread_id()
+                    .or(self.primary_thread_id);
+                let message =
+                    match codex_utils_cli::resume_command(/*thread_name*/ None, thread_id) {
+                        Some(command) => format!("{message}\nResume this session with: {command}"),
+                        None => message,
+                    };
                 self.app_event_tx.send(AppEvent::FatalExitRequest(message));
             }
         }
