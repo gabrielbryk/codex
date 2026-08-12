@@ -35,6 +35,7 @@ use codex_app_server_protocol::JSONRPCRequest;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::Result as JsonRpcResult;
+use codex_app_server_protocol::ServerIdentity;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
 use codex_uds::UnixStream;
@@ -158,11 +159,18 @@ enum RemoteClientCommand {
         error: JSONRPCErrorError,
         response_tx: oneshot::Sender<IoResult<()>>,
     },
+    FinishReconnect {
+        response_tx: oneshot::Sender<IoResult<()>>,
+    },
     Shutdown {
         response_tx: oneshot::Sender<IoResult<()>>,
     },
 }
 
+struct ReconnectState {
+    attempt: u32,
+    server_identity: Option<ServerIdentity>,
+}
 pub struct RemoteAppServerClient {
     command_tx: mpsc::Sender<RemoteClientCommand>,
     event_rx: mpsc::UnboundedReceiver<AppServerEvent>,
@@ -240,13 +248,14 @@ impl RemoteAppServerClient {
         ReconnectFuture: Future<Output = IoResult<(String, WebSocketStream<S>)>> + Send,
     {
         let mut stream = stream;
-        let (pending_events, server_version, codex_home) = initialize_remote_connection(
-            &mut stream,
-            &endpoint,
-            initialize_params.clone(),
-            INITIALIZE_TIMEOUT,
-        )
-        .await?;
+        let (pending_events, server_version, codex_home, server_identity) =
+            initialize_remote_connection(
+                &mut stream,
+                &endpoint,
+                initialize_params.clone(),
+                INITIALIZE_TIMEOUT,
+            )
+            .await?;
 
         let (command_tx, mut command_rx) = mpsc::channel::<RemoteClientCommand>(channel_capacity);
         let (event_tx, event_rx) = mpsc::unbounded_channel::<AppServerEvent>();
@@ -254,8 +263,12 @@ impl RemoteAppServerClient {
             let mut pending_requests = HashMap::<RequestId, PendingRequest>::new();
             let mut endpoint = endpoint;
             let mut stream = stream;
-            let mut reconnect_attempt = 0u32;
+            let mut reconnect_state = ReconnectState {
+                attempt: 0,
+                server_identity,
+            };
             loop {
+                let parked_deadline = earliest_parked_deadline(&pending_requests);
                 tokio::select! {
                     command = command_rx.recv() => {
                         let Some(command) = command else {
@@ -304,7 +317,7 @@ impl RemoteAppServerClient {
                                             &initialize_params,
                                             &message,
                                             &mut pending_requests,
-                                            &mut reconnect_attempt,
+                                            &mut reconnect_state,
                                         )
                                         .await
                                     else {
@@ -346,7 +359,7 @@ impl RemoteAppServerClient {
                                                 &initialize_params,
                                                 &message,
                                                 &mut pending_requests,
-                                                &mut reconnect_attempt,
+                                                &mut reconnect_state,
                                             )
                                             .await
                                         else {
@@ -394,7 +407,7 @@ impl RemoteAppServerClient {
                                                 &initialize_params,
                                                 &message,
                                                 &mut pending_requests,
-                                                &mut reconnect_attempt,
+                                                &mut reconnect_state,
                                             )
                                             .await
                                         else {
@@ -442,7 +455,7 @@ impl RemoteAppServerClient {
                                                 &initialize_params,
                                                 &message,
                                                 &mut pending_requests,
-                                                &mut reconnect_attempt,
+                                                &mut reconnect_state,
                                             )
                                             .await
                                         else {
@@ -452,6 +465,15 @@ impl RemoteAppServerClient {
                                         stream = next_stream;
                                     }
                                 }
+                            }
+                            RemoteClientCommand::FinishReconnect { response_tx } => {
+                                let result = replay_parked_requests(
+                                    &mut stream,
+                                    &endpoint,
+                                    &mut pending_requests,
+                                )
+                                .await;
+                                let _ = response_tx.send(result);
                             }
                             RemoteClientCommand::Shutdown { response_tx } => {
                                 let close_result = stream.close(None).await.or_else(|err| {
@@ -543,7 +565,7 @@ impl RemoteAppServerClient {
                                                             &initialize_params,
                                                             &message,
                                                             &mut pending_requests,
-                                                            &mut reconnect_attempt,
+                                                            &mut reconnect_state,
                                                         )
                                                         .await
                                                     else {
@@ -596,7 +618,7 @@ impl RemoteAppServerClient {
                                         &initialize_params,
                                         &message,
                                         &mut pending_requests,
-                                        &mut reconnect_attempt,
+                                        &mut reconnect_state,
                                     )
                                     .await
                                 else {
@@ -626,7 +648,7 @@ impl RemoteAppServerClient {
                                         &initialize_params,
                                         &message,
                                         &mut pending_requests,
-                                        &mut reconnect_attempt,
+                                        &mut reconnect_state,
                                     )
                                     .await
                                 else {
@@ -652,7 +674,7 @@ impl RemoteAppServerClient {
                                         &initialize_params,
                                         &message,
                                         &mut pending_requests,
-                                        &mut reconnect_attempt,
+                                        &mut reconnect_state,
                                     )
                                     .await
                                 else {
@@ -662,6 +684,9 @@ impl RemoteAppServerClient {
                                 stream = next_stream;
                             }
                         }
+                    }
+                    () = sleep_until_deadline(parked_deadline) => {
+                        expire_parked_requests(&mut pending_requests);
                     }
                 }
             }
@@ -785,6 +810,25 @@ impl RemoteAppServerClient {
         })?
     }
 
+    pub async fn finish_reconnect(&self) -> IoResult<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(RemoteClientCommand::FinishReconnect { response_tx })
+            .await
+            .map_err(|_| {
+                IoError::new(
+                    ErrorKind::BrokenPipe,
+                    "remote app-server worker channel is closed",
+                )
+            })?;
+        response_rx.await.map_err(|_| {
+            IoError::new(
+                ErrorKind::BrokenPipe,
+                "remote app-server reconnect completion channel is closed",
+            )
+        })?
+    }
+
     pub async fn next_event(&mut self) -> Option<AppServerEvent> {
         if let Some(event) = self.pending_events.pop_front() {
             return Some(event);
@@ -828,7 +872,7 @@ async fn reconnect_remote_stream<S, Reconnect, ReconnectFuture>(
     initialize_params: &InitializeParams,
     last_error: &str,
     pending_requests: &mut HashMap<RequestId, PendingRequest>,
-    reconnect_attempt: &mut u32,
+    reconnect_state: &mut ReconnectState,
 ) -> Option<(String, WebSocketStream<S>)>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -836,8 +880,8 @@ where
     ReconnectFuture: Future<Output = IoResult<(String, WebSocketStream<S>)>>,
 {
     loop {
-        *reconnect_attempt = reconnect_attempt.saturating_add(1);
-        let attempt = *reconnect_attempt;
+        reconnect_state.attempt = reconnect_state.attempt.saturating_add(1);
+        let attempt = reconnect_state.attempt;
         warn!(
             attempt,
             last_error = %last_error,
@@ -846,50 +890,42 @@ where
 
         let reconnect_result = async {
             let (endpoint, mut stream) = reconnect().await?;
-            let (pending_events, _server_version, _codex_home) = initialize_remote_connection(
-                &mut stream,
-                &endpoint,
-                initialize_params.clone(),
-                INITIALIZE_TIMEOUT,
-            )
-            .await?;
-            Ok::<_, IoError>((endpoint, stream, pending_events))
+            let (pending_events, _server_version, _codex_home, server_identity) =
+                initialize_remote_connection(
+                    &mut stream,
+                    &endpoint,
+                    initialize_params.clone(),
+                    INITIALIZE_TIMEOUT,
+                )
+                .await?;
+            Ok::<_, IoError>((endpoint, stream, pending_events, server_identity))
         };
 
         let give_up_deadline = earliest_parked_deadline(pending_requests);
         tokio::select! {
             result = reconnect_result => {
                 match result {
-                    Ok((endpoint, mut stream, pending_events)) => {
+                    Ok((endpoint, stream, pending_events, server_identity)) => {
                         for event in pending_events {
                             if let Err(err) = deliver_event(event_tx, event) {
                                 warn!(%err, "failed to deliver queued remote app-server event after reconnect");
                                 return None;
                             }
                         }
-                        // Parked requests are replayed on the freshly initialized
-                        // connection before the worker loop resumes, so their
-                        // responses land on the original oneshot channels.
-                        expire_parked_requests(pending_requests);
-                        match replay_parked_requests(&mut stream, &endpoint, pending_requests).await {
-                            Ok(()) => {
-                                *reconnect_attempt = 0;
-                                return Some((endpoint, stream));
-                            }
-                            Err(err) => {
-                                let message = format!(
-                                    "remote app server at `{endpoint}` failed to accept replayed requests: {err}"
-                                );
-                                warn!(attempt, error = %err, "failed to replay parked remote app-server requests");
-                                // Replay attempts are already spent, so this
-                                // fails the requests that cannot be retried again.
-                                park_pending_requests(
-                                    pending_requests,
-                                    ErrorKind::BrokenPipe,
-                                    &message,
-                                );
-                            }
+                        if deliver_event(
+                            event_tx,
+                            AppServerEvent::Reconnected {
+                                previous: reconnect_state.server_identity.clone(),
+                                current: server_identity.clone(),
+                            },
+                        )
+                        .is_err()
+                        {
+                            return None;
                         }
+                        reconnect_state.attempt = 0;
+                        reconnect_state.server_identity = server_identity;
+                        return Some((endpoint, stream));
                     }
                     Err(err) => {
                         warn!(
@@ -981,7 +1017,8 @@ fn fail_command_while_reconnecting(command: Option<RemoteClientCommand>, last_er
         }
         RemoteClientCommand::Notify { response_tx, .. }
         | RemoteClientCommand::ResolveServerRequest { response_tx, .. }
-        | RemoteClientCommand::RejectServerRequest { response_tx, .. } => {
+        | RemoteClientCommand::RejectServerRequest { response_tx, .. }
+        | RemoteClientCommand::FinishReconnect { response_tx } => {
             let _ = response_tx.send(Err(reconnecting_error(last_error)));
             false
         }
@@ -1171,7 +1208,12 @@ async fn initialize_remote_connection<S>(
     endpoint: &str,
     params: InitializeParams,
     initialize_timeout: Duration,
-) -> IoResult<(Vec<AppServerEvent>, Option<String>, Option<String>)>
+) -> IoResult<(
+    Vec<AppServerEvent>,
+    Option<String>,
+    Option<String>,
+    Option<ServerIdentity>,
+)>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -1179,6 +1221,7 @@ where
     let mut pending_events = Vec::new();
     let mut server_version = None;
     let mut codex_home = None;
+    let mut server_identity = None;
     write_jsonrpc_message(
         stream,
         JSONRPCMessage::Request(jsonrpc_request_from_client_request(
@@ -1216,6 +1259,17 @@ where
                                 .and_then(serde_json::Value::as_str)
                                 .filter(|codex_home| !codex_home.is_empty())
                                 .map(str::to_string);
+                            server_identity = response
+                                .result
+                                .get("serverIdentity")
+                                .cloned()
+                                .map(serde_json::from_value)
+                                .transpose()
+                                .map_err(|err| {
+                                    IoError::other(format!(
+                                        "remote app server at `{endpoint}` sent invalid server identity: {err}"
+                                    ))
+                                })?;
                             break Ok(());
                         }
                         JSONRPCMessage::Error(error) if error.id == initialize_request_id => {
@@ -1308,7 +1362,7 @@ where
     )
     .await?;
 
-    Ok((pending_events, server_version, codex_home))
+    Ok((pending_events, server_version, codex_home, server_identity))
 }
 
 fn app_server_event_from_notification(notification: JSONRPCNotification) -> Option<AppServerEvent> {

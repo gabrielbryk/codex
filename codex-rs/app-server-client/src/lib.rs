@@ -41,6 +41,7 @@ use codex_app_server_protocol::InitializeParams;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::Result as JsonRpcResult;
+use codex_app_server_protocol::ServerIdentity;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
 use codex_arg0::Arg0DispatchPaths;
@@ -96,10 +97,18 @@ pub type RequestResult = std::result::Result<JsonRpcResult, JSONRPCErrorError>;
 
 #[derive(Debug, Clone)]
 pub enum AppServerEvent {
-    Lagged { skipped: usize },
+    Lagged {
+        skipped: usize,
+    },
     ServerNotification(Box<ServerNotification>),
     ServerRequest(Box<ServerRequest>),
-    Disconnected { message: String },
+    Disconnected {
+        message: String,
+    },
+    Reconnected {
+        previous: Option<ServerIdentity>,
+        current: Option<ServerIdentity>,
+    },
 }
 
 impl From<InProcessServerEvent> for AppServerEvent {
@@ -893,6 +902,13 @@ impl AppServerClient {
         match self {
             Self::InProcess(client) => client.next_event().await.map(Into::into),
             Self::Remote(client) => client.next_event().await,
+        }
+    }
+
+    pub async fn finish_reconnect(&self) -> IoResult<()> {
+        match self {
+            Self::InProcess(_) => Ok(()),
+            Self::Remote(client) => client.finish_reconnect().await,
         }
     }
 
@@ -1771,7 +1787,6 @@ mod tests {
             AppServerEvent::ServerNotification(notification)
                 if matches!(notification.as_ref(), ServerNotification::AccountUpdated(_))
         ));
-
         client.shutdown().await.expect("shutdown should complete");
     }
 
@@ -2096,6 +2111,15 @@ mod tests {
             .await
             .expect("reconnected event should arrive")
             .expect("event stream should stay open");
+        assert!(matches!(event, AppServerEvent::Reconnected { .. }));
+        client
+            .finish_reconnect()
+            .await
+            .expect("reconnect should finish");
+        let event = timeout(Duration::from_secs(2), client.next_event())
+            .await
+            .expect("notification should arrive after reconnect")
+            .expect("event stream should stay open");
         assert!(matches!(
             event,
             AppServerEvent::ServerNotification(notification)
@@ -2227,19 +2251,36 @@ mod tests {
             })
             .await;
 
-        let client = RemoteAppServerClient::connect(test_remote_connect_args(websocket_url))
+        let mut client = RemoteAppServerClient::connect(test_remote_connect_args(websocket_url))
             .await
             .expect("remote client should connect");
 
-        let response = timeout(
-            Duration::from_secs(10),
-            client.request_typed::<codex_app_server_protocol::TurnStartResponse>(
-                turn_start_request(RequestId::Integer(1), Some("submission-1")),
-            ),
-        )
-        .await
-        .expect("replayed turn/start should resolve before the timeout")
-        .expect("replayed turn/start should succeed");
+        let request_handle = client.request_handle();
+        let response = tokio::spawn(async move {
+            request_handle
+                .request(turn_start_request(
+                    RequestId::Integer(1),
+                    Some("submission-1"),
+                ))
+                .await
+        });
+        let event = timeout(Duration::from_secs(10), client.next_event())
+            .await
+            .expect("reconnect lifecycle event should arrive")
+            .expect("event stream should stay open");
+        assert!(matches!(event, AppServerEvent::Reconnected { .. }));
+        client
+            .finish_reconnect()
+            .await
+            .expect("reconnect should release the parked request");
+        let response = timeout(Duration::from_secs(10), response)
+            .await
+            .expect("replayed turn/start should resolve before the timeout")
+            .expect("request task should finish")
+            .expect("request transport should succeed")
+            .expect("replayed turn/start should succeed");
+        let response: codex_app_server_protocol::TurnStartResponse =
+            serde_json::from_value(response).expect("response should deserialize");
         assert_eq!(response, turn_start_response());
 
         client.shutdown().await.expect("shutdown should complete");
