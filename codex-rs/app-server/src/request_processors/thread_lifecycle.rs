@@ -8,7 +8,10 @@ use codex_extension_api::ThreadIdleCause;
 use codex_protocol::config_types::MultiAgentMode;
 use codex_protocol::protocol::ThreadHistoryMode;
 
-pub(super) const THREAD_UNLOADING_DELAY: Duration = Duration::from_secs(30 * 60);
+// Loaded threads retain their MCP process set. Keep a short reconnect grace
+// period, but release idle, unsubscribed sessions before they accumulate into
+// a multi-gigabyte daemon scope on long-running app-server hosts.
+pub(super) const THREAD_UNLOADING_DELAY: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Clone)]
 pub(super) struct ListenerTaskContext {
@@ -453,7 +456,7 @@ pub(super) async fn unload_thread_without_subscribers(
     thread_id: ThreadId,
     thread: Arc<CodexThread>,
 ) {
-    info!("thread {thread_id} has no subscribers and is idle; shutting down");
+    info!("thread {thread_id} idle MCP residency expired; shutting down");
 
     // Any pending app-server -> client requests for this thread can no longer be
     // answered; cancel their callbacks before shutdown/unload.
