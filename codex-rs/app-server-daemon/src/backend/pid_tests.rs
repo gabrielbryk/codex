@@ -195,6 +195,9 @@ fn update_loop_uses_hidden_app_server_subcommand() {
         pid_file: "updater.pid".into(),
         lock_file: "updater.pid.lock".into(),
         command_kind: PidCommandKind::UpdateLoop,
+        socket_path: None,
+        generation_id: None,
+        source_sha: None,
     };
 
     assert_eq!(
@@ -231,7 +234,38 @@ fn app_server_disabled_remote_control_uses_compatible_args_and_runtime_env() {
     );
     assert_eq!(
         backend.command_env(),
-        Some((REMOTE_CONTROL_DISABLED_ENV_VAR, "1"))
+        vec![(REMOTE_CONTROL_DISABLED_ENV_VAR.into(), "1".into())]
+    );
+}
+
+#[test]
+fn generation_runtime_uses_private_socket_and_identity_environment() {
+    let backend = PidBackend::new(
+        "codex".into(),
+        "app-server.pid".into(),
+        /*remote_control_enabled*/ false,
+    )
+    .with_app_server_runtime(
+        "/managed/g1/app-server.sock".into(),
+        Some("g1".to_string()),
+        Some("abc123".to_string()),
+    );
+
+    assert_eq!(
+        backend.command_args(),
+        vec![
+            "app-server",
+            "--listen",
+            "unix:///managed/g1/app-server.sock"
+        ]
+    );
+    assert_eq!(
+        backend.command_env(),
+        vec![
+            (REMOTE_CONTROL_DISABLED_ENV_VAR.into(), "1".into()),
+            ("CODEX_APP_SERVER_GENERATION_ID".into(), "g1".into()),
+            ("CODEX_APP_SERVER_SOURCE_SHA".into(), "abc123".into()),
+        ]
     );
 }
 

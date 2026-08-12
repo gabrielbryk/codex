@@ -5,7 +5,9 @@ use super::thread_fork_goal::inherit_thread_goal_snapshot;
 use super::turn_processor::can_accept_direct_input;
 use super::*;
 use crate::error_code::method_not_found;
+use crate::generation_lifecycle::GenerationLifecycle;
 use codex_app_server_protocol::SelectedCapabilityRoot;
+use codex_app_server_protocol::ServerDrainResponse;
 use codex_app_server_protocol::ThreadRevertParams;
 use codex_app_server_protocol::ThreadRevertResponse;
 use codex_app_server_protocol::ThreadRevertedNotification;
@@ -441,6 +443,7 @@ pub(crate) struct ThreadRequestProcessor {
     pub(super) skills_watcher: Arc<SkillsWatcher>,
     pub(super) turn_cost_worker: Option<crate::turn_cost_worker::TurnCostWorkerHandle>,
     pub(super) initial_config_warnings: Arc<Vec<ConfigWarningNotification>>,
+    pub(super) generation_lifecycle: GenerationLifecycle,
 }
 
 /// Outcome of trying to satisfy a resume request from an already loaded thread.
@@ -474,6 +477,7 @@ impl ThreadRequestProcessor {
         skills_watcher: Arc<SkillsWatcher>,
         turn_cost_worker: Option<crate::turn_cost_worker::TurnCostWorkerHandle>,
         initial_config_warnings: Vec<ConfigWarningNotification>,
+        generation_lifecycle: GenerationLifecycle,
     ) -> Self {
         Self {
             auth_manager,
@@ -494,7 +498,51 @@ impl ThreadRequestProcessor {
             skills_watcher,
             turn_cost_worker,
             initial_config_warnings: Arc::new(initial_config_warnings),
+            generation_lifecycle,
         }
+    }
+
+    pub(crate) async fn server_drain_status(
+        &self,
+    ) -> Result<ServerDrainResponse, JSONRPCErrorError> {
+        if self.generation_lifecycle.is_draining().await {
+            for thread_id in self.thread_manager.list_thread_ids().await {
+                let status = self
+                    .thread_watch_manager
+                    .loaded_status_for_thread(&thread_id.to_string())
+                    .await;
+                if matches!(status, ThreadStatus::Active { .. }) {
+                    continue;
+                }
+                self.prepare_thread_for_removal(thread_id, "generation drain")
+                    .await;
+                self.generation_lifecycle
+                    .note_released(thread_id.to_string())
+                    .await;
+            }
+        }
+
+        let loaded_thread_ids = self
+            .thread_manager
+            .list_thread_ids()
+            .await
+            .into_iter()
+            .map(|thread_id| thread_id.to_string())
+            .collect::<Vec<_>>();
+        let mut active_thread_ids = Vec::new();
+        for thread_id in &loaded_thread_ids {
+            let status = self
+                .thread_watch_manager
+                .loaded_status_for_thread(thread_id)
+                .await;
+            if matches!(status, ThreadStatus::Active { .. }) {
+                active_thread_ids.push(thread_id.clone());
+            }
+        }
+        Ok(self
+            .generation_lifecycle
+            .response(active_thread_ids, loaded_thread_ids)
+            .await)
     }
 
     pub(crate) async fn thread_start(
@@ -1062,6 +1110,7 @@ impl ThreadRequestProcessor {
         client_mcp_extensions: ClientMcpExtensions,
         request_context: RequestContext,
     ) -> Result<(), JSONRPCErrorError> {
+        let admission_permit = self.generation_lifecycle.acquire_work_permit().await?;
         let ThreadStartParams {
             model,
             model_provider,
@@ -1159,6 +1208,7 @@ impl ThreadRequestProcessor {
         let outgoing = Arc::clone(&listener_task_context.outgoing);
         let error_request_id = request_id.clone();
         let thread_start_task = async move {
+            let _admission_permit = admission_permit;
             if let Err(error) = Self::thread_start_task(
                 listener_task_context,
                 thread_store,

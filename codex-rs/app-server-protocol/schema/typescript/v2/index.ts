@@ -403,6 +403,7 @@ export type { SendAddCreditsNudgeEmailParams } from "./SendAddCreditsNudgeEmailP
 export type { SendAddCreditsNudgeEmailResponse } from "./SendAddCreditsNudgeEmailResponse";
 export type { ServerDiagnosticsGauge } from "./ServerDiagnosticsGauge";
 export type { ServerDiagnosticsProcess } from "./ServerDiagnosticsProcess";
+export type { ServerGenerationState } from "./ServerGenerationState";
 export type { ServerRequestResolvedNotification } from "./ServerRequestResolvedNotification";
 export type { SessionMigration } from "./SessionMigration";
 export type { SessionSource } from "./SessionSource";
