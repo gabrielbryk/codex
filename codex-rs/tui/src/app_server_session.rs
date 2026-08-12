@@ -1201,7 +1201,11 @@ impl AppServerSession {
                 request_id,
                 params: TurnStartParams {
                     thread_id: thread_id.to_string(),
-                    client_user_message_id: None,
+                    // Idempotency key for this submission. It lets the transport
+                    // re-send the request after a reconnect without the server
+                    // starting a second turn, so a momentary app-server blip no
+                    // longer loses an in-flight submission.
+                    client_user_message_id: Some(Uuid::new_v4().to_string()),
                     input: items,
                     responsesapi_client_metadata: None,
                     additional_context: None,

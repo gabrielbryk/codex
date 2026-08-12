@@ -1870,21 +1870,301 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remote_disconnect_surfaces_as_event() {
-        let websocket_url = start_test_remote_server(|mut websocket| async move {
+    async fn remote_disconnect_reconnects_and_preserves_event_stream() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("listener address");
+        let websocket_url = format!("ws://{addr}");
+        tokio::spawn(async move {
+            let (stream, _) = listener
+                .accept()
+                .await
+                .expect("first accept should succeed");
+            let mut websocket = accept_async(stream)
+                .await
+                .expect("first websocket upgrade should succeed");
             expect_remote_initialize(&mut websocket).await;
             websocket.close(None).await.expect("close should succeed");
-        })
-        .await;
+            let (stream, _) = listener
+                .accept()
+                .await
+                .expect("second accept should succeed");
+            let mut websocket = accept_async(stream)
+                .await
+                .expect("second websocket upgrade should succeed");
+            expect_remote_initialize(&mut websocket).await;
+            write_websocket_message(
+                &mut websocket,
+                JSONRPCMessage::Notification(
+                    serde_json::from_value(
+                        serde_json::to_value(ServerNotification::AccountUpdated(
+                            AccountUpdatedNotification {
+                                auth_mode: None,
+                                plan_type: None,
+                            },
+                        ))
+                        .expect("notification should serialize"),
+                    )
+                    .expect("notification should convert to JSON-RPC"),
+                ),
+            )
+            .await;
+        });
         let mut client = RemoteAppServerClient::connect(test_remote_connect_args(websocket_url))
             .await
             .expect("remote client should connect");
 
-        let event = client
-            .next_event()
+        let event = timeout(Duration::from_secs(2), client.next_event())
             .await
-            .expect("disconnect event should arrive");
-        assert!(matches!(event, AppServerEvent::Disconnected { .. }));
+            .expect("reconnected event should arrive")
+            .expect("event stream should stay open");
+        assert!(matches!(
+            event,
+            AppServerEvent::ServerNotification(notification)
+                if matches!(notification.as_ref(), ServerNotification::AccountUpdated(_))
+        ));
+        client.shutdown().await.expect("shutdown should complete");
+    }
+
+    fn turn_start_request(
+        request_id: RequestId,
+        client_user_message_id: Option<&str>,
+    ) -> ClientRequest {
+        ClientRequest::TurnStart {
+            request_id,
+            params: codex_app_server_protocol::TurnStartParams {
+                thread_id: "thread".to_string(),
+                client_user_message_id: client_user_message_id.map(str::to_string),
+                input: vec![codex_app_server_protocol::UserInput::Text {
+                    text: "hello".to_string(),
+                    text_elements: Vec::new(),
+                }],
+                ..Default::default()
+            },
+        }
+    }
+
+    fn turn_start_response() -> codex_app_server_protocol::TurnStartResponse {
+        codex_app_server_protocol::TurnStartResponse {
+            turn: codex_app_server_protocol::Turn {
+                id: "turn".to_string(),
+                items: Vec::new(),
+                items_view: codex_app_server_protocol::TurnItemsView::NotLoaded,
+                status: codex_app_server_protocol::TurnStatus::InProgress,
+                error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
+            },
+        }
+    }
+
+    /// Binds a listener that serves exactly two websocket connections, so a test
+    /// can force a disconnect and observe what the client does after it
+    /// reconnects.
+    async fn start_reconnecting_test_remote_server<F, Fut>(handler: F) -> String
+    where
+        F: FnOnce(
+                tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+                tokio::net::TcpListener,
+            ) -> Fut
+            + Send
+            + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("listener address");
+        tokio::spawn(async move {
+            let (stream, _) = listener
+                .accept()
+                .await
+                .expect("first accept should succeed");
+            let websocket = accept_async(stream)
+                .await
+                .expect("first websocket upgrade should succeed");
+            handler(websocket, listener).await;
+        });
+        format!("ws://{addr}")
+    }
+
+    async fn accept_next_test_remote_connection(
+        listener: &TcpListener,
+    ) -> tokio_tungstenite::WebSocketStream<tokio::net::TcpStream> {
+        let (stream, _) = listener
+            .accept()
+            .await
+            .expect("reconnect accept should succeed");
+        accept_async(stream)
+            .await
+            .expect("reconnect websocket upgrade should succeed")
+    }
+
+    #[tokio::test]
+    async fn remote_turn_start_is_replayed_after_reconnect() {
+        let websocket_url =
+            start_reconnecting_test_remote_server(|mut websocket, listener| async move {
+                expect_remote_initialize(&mut websocket).await;
+                let JSONRPCMessage::Request(first) = read_websocket_message(&mut websocket).await
+                else {
+                    panic!("expected turn/start request");
+                };
+                assert_eq!(first.method, "turn/start");
+                // Drop the connection without answering, exactly like an app-server
+                // restart while a turn submission is in flight.
+                websocket.close(None).await.expect("close should succeed");
+
+                let mut websocket = accept_next_test_remote_connection(&listener).await;
+                expect_remote_initialize(&mut websocket).await;
+                let JSONRPCMessage::Request(replayed) =
+                    read_websocket_message(&mut websocket).await
+                else {
+                    panic!("expected replayed turn/start request");
+                };
+                assert_eq!(replayed.method, "turn/start");
+                assert_eq!(
+                    replayed.id, first.id,
+                    "replay should reuse the original request id"
+                );
+                assert_eq!(
+                    replayed
+                        .params
+                        .as_ref()
+                        .and_then(|params| params.get("clientUserMessageId"))
+                        .and_then(serde_json::Value::as_str),
+                    Some("submission-1"),
+                    "replay should carry the original idempotency key"
+                );
+                write_websocket_message(
+                    &mut websocket,
+                    JSONRPCMessage::Response(JSONRPCResponse {
+                        id: replayed.id,
+                        result: serde_json::to_value(turn_start_response())
+                            .expect("response should serialize"),
+                    }),
+                )
+                .await;
+                let _ = websocket.next().await;
+            })
+            .await;
+
+        let client = RemoteAppServerClient::connect(test_remote_connect_args(websocket_url))
+            .await
+            .expect("remote client should connect");
+
+        let response = timeout(
+            Duration::from_secs(10),
+            client.request_typed::<codex_app_server_protocol::TurnStartResponse>(
+                turn_start_request(RequestId::Integer(1), Some("submission-1")),
+            ),
+        )
+        .await
+        .expect("replayed turn/start should resolve before the timeout")
+        .expect("replayed turn/start should succeed");
+        assert_eq!(response, turn_start_response());
+
+        client.shutdown().await.expect("shutdown should complete");
+    }
+
+    #[tokio::test]
+    async fn remote_turn_start_without_idempotency_key_fails_on_disconnect() {
+        let websocket_url =
+            start_reconnecting_test_remote_server(|mut websocket, listener| async move {
+                expect_remote_initialize(&mut websocket).await;
+                let JSONRPCMessage::Request(request) = read_websocket_message(&mut websocket).await
+                else {
+                    panic!("expected turn/start request");
+                };
+                assert_eq!(request.method, "turn/start");
+                websocket.close(None).await.expect("close should succeed");
+
+                let mut websocket = accept_next_test_remote_connection(&listener).await;
+                expect_remote_initialize(&mut websocket).await;
+                assert!(
+                    timeout(
+                        Duration::from_millis(250),
+                        read_websocket_message(&mut websocket)
+                    )
+                    .await
+                    .is_err(),
+                    "turn/start without an idempotency key must not be replayed"
+                );
+                let _ = websocket.next().await;
+            })
+            .await;
+
+        let client = RemoteAppServerClient::connect(test_remote_connect_args(websocket_url))
+            .await
+            .expect("remote client should connect");
+
+        let err = timeout(
+            Duration::from_secs(10),
+            client.request_typed::<codex_app_server_protocol::TurnStartResponse>(
+                turn_start_request(RequestId::Integer(1), None),
+            ),
+        )
+        .await
+        .expect("request should resolve before the timeout")
+        .expect_err("turn/start without an idempotency key should fail fast");
+        assert!(
+            err.to_string().starts_with("turn/start transport error:"),
+            "expected a transport failure, got: {err}"
+        );
+
+        client.shutdown().await.expect("shutdown should complete");
+    }
+
+    #[tokio::test]
+    async fn remote_non_replayable_request_fails_on_disconnect() {
+        let websocket_url =
+            start_reconnecting_test_remote_server(|mut websocket, listener| async move {
+                expect_remote_initialize(&mut websocket).await;
+                let JSONRPCMessage::Request(request) = read_websocket_message(&mut websocket).await
+                else {
+                    panic!("expected account/read request");
+                };
+                assert_eq!(request.method, "account/read");
+                websocket.close(None).await.expect("close should succeed");
+
+                let mut websocket = accept_next_test_remote_connection(&listener).await;
+                expect_remote_initialize(&mut websocket).await;
+                assert!(
+                    timeout(
+                        Duration::from_millis(250),
+                        read_websocket_message(&mut websocket)
+                    )
+                    .await
+                    .is_err(),
+                    "non-idempotent requests must never be replayed"
+                );
+                let _ = websocket.next().await;
+            })
+            .await;
+
+        let client = RemoteAppServerClient::connect(test_remote_connect_args(websocket_url))
+            .await
+            .expect("remote client should connect");
+
+        let err = timeout(
+            Duration::from_secs(10),
+            client.request_typed::<GetAccountResponse>(ClientRequest::GetAccount {
+                request_id: RequestId::Integer(1),
+                params: codex_app_server_protocol::GetAccountParams {
+                    refresh_token: false,
+                },
+            }),
+        )
+        .await
+        .expect("request should resolve before the timeout")
+        .expect_err("non-replayable request should keep failing fast");
+        assert!(
+            err.to_string().starts_with("account/read transport error:"),
+            "expected a transport failure, got: {err}"
+        );
+
+        client.shutdown().await.expect("shutdown should complete");
     }
 
     #[test]
