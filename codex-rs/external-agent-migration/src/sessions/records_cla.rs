@@ -137,6 +137,10 @@ pub(super) fn read_session_import(path: &Path) -> io::Result<ParsedSessionImport
         if let Some(title) = ai_title_from_record(&record) {
             ai_title = Some(title.to_string());
         }
+        if is_claude_compact_boundary_record(&record) {
+            messages.clear();
+            continue;
+        }
         if let Some(message) = conversation_message_from_owned_record(&mut record) {
             messages.push(message);
         }
@@ -157,6 +161,11 @@ fn custom_title_from_record(record: &JsonValue) -> Option<&str> {
 
 fn ai_title_from_record(record: &JsonValue) -> Option<&str> {
     title_from_record(record, "ai-title", "aiTitle")
+}
+
+fn is_claude_compact_boundary_record(record: &JsonValue) -> bool {
+    record.get("type").and_then(JsonValue::as_str) == Some("system")
+        && record.get("subtype").and_then(JsonValue::as_str) == Some("compact_boundary")
 }
 
 fn title_from_record<'a>(record: &'a JsonValue, record_type: &str, field: &str) -> Option<&'a str> {
