@@ -50,6 +50,7 @@ use crate::bottom_pane::TerminalTitleItem;
 use crate::chatwidget::ThreadUsageOutcome;
 use crate::chatwidget::UserMessage;
 use crate::goal_files::GoalDraft;
+use codex_app_server_client::ReconnectEpoch;
 use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::ServerIdentity;
 use codex_config::types::ApprovalsReviewer;
@@ -196,6 +197,7 @@ pub(crate) enum TranscriptExportDestination {
 #[derive(Debug)]
 pub(crate) enum AppEvent {
     AppServerReconnected {
+        epoch: ReconnectEpoch,
         previous: Option<ServerIdentity>,
         current: Option<ServerIdentity>,
     },

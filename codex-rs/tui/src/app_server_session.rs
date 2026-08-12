@@ -581,8 +581,11 @@ impl AppServerSession {
         self.client.next_event().await
     }
 
-    pub(crate) async fn finish_reconnect(&self) -> std::io::Result<()> {
-        self.client.finish_reconnect().await
+    pub(crate) async fn finish_reconnect(
+        &self,
+        epoch: codex_app_server_client::ReconnectEpoch,
+    ) -> std::io::Result<()> {
+        self.client.finish_reconnect(epoch).await
     }
 
     #[cfg(test)]

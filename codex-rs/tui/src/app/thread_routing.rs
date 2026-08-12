@@ -4,6 +4,7 @@
 //! channels, submits thread-scoped operations through the app server, and replays buffered events
 //! when the visible thread changes.
 
+use super::displayed_thread_transition::DisplayedThreadTransitionReason;
 use super::session_lifecycle::ThreadAttachPresentation;
 use super::steer_retry::SteerRequestOutcome;
 use super::steer_retry::retry_turn_steer;
@@ -1764,11 +1765,21 @@ impl App {
             self.mark_agent_picker_thread_closed(closed_thread_id);
             if self.side_threads.contains_key(&closed_thread_id) {
                 self.discard_closed_side_thread(closed_thread_id).await;
-                self.select_agent_thread(tui, app_server, primary_thread_id)
-                    .await?;
+                self.select_agent_thread_with_reason(
+                    tui,
+                    app_server,
+                    primary_thread_id,
+                    DisplayedThreadTransitionReason::AutomaticClosedThreadFailover,
+                )
+                .await?;
             } else {
-                self.select_agent_thread_and_discard_side(tui, app_server, primary_thread_id)
-                    .await?;
+                self.select_agent_thread_and_discard_side(
+                    tui,
+                    app_server,
+                    primary_thread_id,
+                    DisplayedThreadTransitionReason::AutomaticClosedThreadFailover,
+                )
+                .await?;
             }
             if self.active_thread_id == Some(primary_thread_id) {
                 self.chat_widget.add_info_message(

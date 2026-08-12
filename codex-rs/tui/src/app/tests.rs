@@ -1977,8 +1977,13 @@ fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -
         assert!(app.agent_navigation.is_parent_owned(child_thread_ids[1]));
 
         let mut tui = crate::tui::test_support::make_test_tui()?;
-        app.select_agent_thread(&mut tui, &mut app_server, child_thread_ids[0])
-            .await?;
+        app.select_agent_thread_with_reason(
+            &mut tui,
+            &mut app_server,
+            child_thread_ids[0],
+            displayed_thread_transition::DisplayedThreadTransitionReason::AgentPickerSelection,
+        )
+        .await?;
         while app_event_rx.try_recv().is_ok() {}
         app.chat_widget
             .restore_user_message_to_composer("v1 remains writable".into());
@@ -1989,8 +1994,13 @@ fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -
                 .any(|event| matches!(event, AppEvent::CodexOp(Op::UserTurn { .. })))
         );
 
-        app.select_agent_thread(&mut tui, &mut app_server, child_thread_ids[1])
-            .await?;
+        app.select_agent_thread_with_reason(
+            &mut tui,
+            &mut app_server,
+            child_thread_ids[1],
+            displayed_thread_transition::DisplayedThreadTransitionReason::AgentPickerSelection,
+        )
+        .await?;
         while app_event_rx.try_recv().is_ok() {}
         app.chat_widget
             .restore_user_message_to_composer("v2 stays view-only".into());
@@ -2258,7 +2268,13 @@ async fn select_uncached_agent_thread_still_refreshes_liveness() -> Result<()> {
     );
     let mut tui = crate::tui::test_support::make_test_tui()?;
 
-    Box::pin(app.select_agent_thread(&mut tui, &mut app_server, thread_id)).await?;
+    Box::pin(app.select_agent_thread_with_reason(
+        &mut tui,
+        &mut app_server,
+        thread_id,
+        displayed_thread_transition::DisplayedThreadTransitionReason::AgentPickerSelection,
+    ))
+    .await?;
 
     assert_eq!(app.active_thread_id, None);
     assert_eq!(app.agent_navigation.get(&thread_id), None);

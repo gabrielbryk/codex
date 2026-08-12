@@ -19,6 +19,7 @@ use std::io::Result as IoResult;
 use std::time::Duration;
 
 use crate::AppServerEvent;
+use crate::ReconnectEpoch;
 use crate::RequestResult;
 use crate::SHUTDOWN_TIMEOUT;
 use crate::TypedRequestError;
@@ -61,6 +62,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
+use tracing::info;
 use tracing::warn;
 use url::Url;
 
@@ -160,6 +162,7 @@ enum RemoteClientCommand {
         response_tx: oneshot::Sender<IoResult<()>>,
     },
     FinishReconnect {
+        epoch: ReconnectEpoch,
         response_tx: oneshot::Sender<IoResult<()>>,
     },
     Shutdown {
@@ -170,6 +173,9 @@ enum RemoteClientCommand {
 struct ReconnectState {
     attempt: u32,
     server_identity: Option<ServerIdentity>,
+    last_epoch: ReconnectEpoch,
+    awaiting_finish: Option<ReconnectEpoch>,
+    last_finished: Option<ReconnectEpoch>,
 }
 pub struct RemoteAppServerClient {
     command_tx: mpsc::Sender<RemoteClientCommand>,
@@ -266,6 +272,9 @@ impl RemoteAppServerClient {
             let mut reconnect_state = ReconnectState {
                 attempt: 0,
                 server_identity,
+                last_epoch: ReconnectEpoch(0),
+                awaiting_finish: None,
+                last_finished: None,
             };
             loop {
                 let parked_deadline = earliest_parked_deadline(&pending_requests);
@@ -466,13 +475,14 @@ impl RemoteAppServerClient {
                                     }
                                 }
                             }
-                            RemoteClientCommand::FinishReconnect { response_tx } => {
-                                let result = replay_parked_requests(
+                            RemoteClientCommand::FinishReconnect { epoch, response_tx } => {
+                                let result = finish_reconnect_epoch(
+                                    epoch,
+                                    &mut reconnect_state,
                                     &mut stream,
                                     &endpoint,
                                     &mut pending_requests,
-                                )
-                                .await;
+                                ).await;
                                 let _ = response_tx.send(result);
                             }
                             RemoteClientCommand::Shutdown { response_tx } => {
@@ -810,10 +820,10 @@ impl RemoteAppServerClient {
         })?
     }
 
-    pub async fn finish_reconnect(&self) -> IoResult<()> {
+    pub async fn finish_reconnect(&self, epoch: ReconnectEpoch) -> IoResult<()> {
         let (response_tx, response_rx) = oneshot::channel();
         self.command_tx
-            .send(RemoteClientCommand::FinishReconnect { response_tx })
+            .send(RemoteClientCommand::FinishReconnect { epoch, response_tx })
             .await
             .map_err(|_| {
                 IoError::new(
@@ -906,6 +916,16 @@ where
             result = reconnect_result => {
                 match result {
                     Ok((endpoint, stream, pending_events, server_identity)) => {
+                        let Some(next_epoch) = reconnect_state.last_epoch.0.checked_add(1) else {
+                            warn!("remote app-server reconnect epoch exhausted");
+                            fail_pending_requests(
+                                pending_requests,
+                                ErrorKind::Other,
+                                "remote app-server reconnect epoch exhausted",
+                            );
+                            return None;
+                        };
+                        let epoch = ReconnectEpoch(next_epoch);
                         for event in pending_events {
                             if let Err(err) = deliver_event(event_tx, event) {
                                 warn!(%err, "failed to deliver queued remote app-server event after reconnect");
@@ -915,6 +935,7 @@ where
                         if deliver_event(
                             event_tx,
                             AppServerEvent::Reconnected {
+                                epoch,
                                 previous: reconnect_state.server_identity.clone(),
                                 current: server_identity.clone(),
                             },
@@ -923,7 +944,28 @@ where
                         {
                             return None;
                         }
+                        info!(
+                            reconnect_epoch = epoch.get(),
+                            previous_instance_id = reconnect_state
+                                .server_identity
+                                .as_ref()
+                                .map(|identity| identity.instance_id.as_str()),
+                            previous_generation = reconnect_state
+                                .server_identity
+                                .as_ref()
+                                .map(|identity| identity.generation.as_str()),
+                            current_instance_id = server_identity
+                                .as_ref()
+                                .map(|identity| identity.instance_id.as_str()),
+                            current_generation = server_identity
+                                .as_ref()
+                                .map(|identity| identity.generation.as_str()),
+                            identity_changed = reconnect_state.server_identity != server_identity,
+                            "remote app-server reconnected"
+                        );
                         reconnect_state.attempt = 0;
+                        reconnect_state.last_epoch = epoch;
+                        reconnect_state.awaiting_finish = Some(epoch);
                         reconnect_state.server_identity = server_identity;
                         return Some((endpoint, stream));
                     }
@@ -961,6 +1003,36 @@ where
             }
         }
     }
+}
+
+async fn finish_reconnect_epoch<S>(
+    epoch: ReconnectEpoch,
+    reconnect_state: &mut ReconnectState,
+    stream: &mut WebSocketStream<S>,
+    endpoint: &str,
+    pending_requests: &mut HashMap<RequestId, PendingRequest>,
+) -> IoResult<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if reconnect_state.awaiting_finish.is_none() && reconnect_state.last_finished == Some(epoch) {
+        return Ok(());
+    }
+    if reconnect_state.awaiting_finish != Some(epoch) {
+        return Err(IoError::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "stale remote app-server reconnect epoch {}; awaiting {:?}",
+                epoch.get(),
+                reconnect_state.awaiting_finish.map(ReconnectEpoch::get),
+            ),
+        ));
+    }
+
+    replay_parked_requests(stream, endpoint, pending_requests).await?;
+    reconnect_state.awaiting_finish = None;
+    reconnect_state.last_finished = Some(epoch);
+    Ok(())
 }
 
 /// Sleeps until `deadline`, or forever when there is no deadline to wait on.
@@ -1018,7 +1090,7 @@ fn fail_command_while_reconnecting(command: Option<RemoteClientCommand>, last_er
         RemoteClientCommand::Notify { response_tx, .. }
         | RemoteClientCommand::ResolveServerRequest { response_tx, .. }
         | RemoteClientCommand::RejectServerRequest { response_tx, .. }
-        | RemoteClientCommand::FinishReconnect { response_tx } => {
+        | RemoteClientCommand::FinishReconnect { response_tx, .. } => {
             let _ = response_tx.send(Err(reconnecting_error(last_error)));
             false
         }

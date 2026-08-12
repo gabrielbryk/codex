@@ -3,6 +3,7 @@
 //! This module contains the exhaustive `AppEvent` dispatcher and exit-mode handling. Large domain
 //! actions are delegated to focused app submodules so the central match remains the routing layer.
 
+use super::displayed_thread_transition::DisplayedThreadTransitionReason;
 use super::resize_reflow::trailing_run_start;
 use super::session_lifecycle::ThreadAttachPresentation;
 use super::*;
@@ -23,8 +24,12 @@ impl App {
         event: AppEvent,
     ) -> Result<AppRunControl> {
         match event {
-            AppEvent::AppServerReconnected { previous, current } => {
-                self.reattach_after_reconnect(app_server, previous, current)
+            AppEvent::AppServerReconnected {
+                epoch,
+                previous,
+                current,
+            } => {
+                self.reattach_after_reconnect(app_server, epoch, previous, current)
                     .await;
             }
             AppEvent::NewSession { name } => {
@@ -2182,8 +2187,13 @@ impl App {
                 self.apply_agent_picker_thread_refresh(primary_thread_id, request_id, result);
             }
             AppEvent::SelectAgentThread(thread_id) => {
-                self.select_agent_thread_and_discard_side(tui, app_server, thread_id)
-                    .await?;
+                self.select_agent_thread_and_discard_side(
+                    tui,
+                    app_server,
+                    thread_id,
+                    DisplayedThreadTransitionReason::AgentPickerSelection,
+                )
+                .await?;
             }
             AppEvent::StartSide {
                 parent_thread_id,
