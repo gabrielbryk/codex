@@ -12,12 +12,77 @@ use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_skills::system_cache_root_dir;
+use std::collections::VecDeque;
 
 use crate::image_url::REMOTE_IMAGE_URL_ERROR;
 use crate::image_url::is_remote_image_url;
 
 const DIRECT_INPUT_TO_MULTI_AGENT_V2_SUBAGENT_ERROR: &str =
     "direct app-server input is not allowed for multi-agent v2 sub-agents";
+
+/// Number of recent `turn/start` submissions retained for duplicate detection.
+///
+/// The cache only has to outlive a client reconnect, so a small bound is enough
+/// and keeps the memory cost fixed regardless of how many threads are live.
+const TURN_START_DEDUPE_CAPACITY: usize = 64;
+
+/// Bounded, process-wide record of recently started turns keyed by the
+/// client-supplied `client_user_message_id`.
+///
+/// Clients that can lose a connection mid-request (the websocket transport, in
+/// particular) cannot tell whether a `turn/start` they never got a response for
+/// was actually processed. Stamping each submission with an idempotency key and
+/// replaying it after reconnecting is only safe if the server recognizes the
+/// replay, which is what this cache provides: a duplicate returns the response
+/// the original submission produced instead of starting a second turn.
+///
+/// Entries are keyed per thread so unrelated threads cannot collide, and the
+/// oldest entry is evicted once the cache is full.
+#[derive(Default)]
+pub(crate) struct TurnStartDedupeCache {
+    entries: VecDeque<TurnStartDedupeEntry>,
+}
+
+struct TurnStartDedupeEntry {
+    thread_id: ThreadId,
+    client_user_message_id: String,
+    response: TurnStartResponse,
+}
+
+impl TurnStartDedupeCache {
+    fn lookup(
+        &self,
+        thread_id: ThreadId,
+        client_user_message_id: &str,
+    ) -> Option<TurnStartResponse> {
+        self.entries
+            .iter()
+            .find(|entry| {
+                entry.thread_id == thread_id
+                    && entry.client_user_message_id == client_user_message_id
+            })
+            .map(|entry| entry.response.clone())
+    }
+
+    fn record(
+        &mut self,
+        thread_id: ThreadId,
+        client_user_message_id: String,
+        response: TurnStartResponse,
+    ) {
+        self.entries.retain(|entry| {
+            entry.thread_id != thread_id || entry.client_user_message_id != client_user_message_id
+        });
+        if self.entries.len() >= TURN_START_DEDUPE_CAPACITY {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(TurnStartDedupeEntry {
+            thread_id,
+            client_user_message_id,
+            response,
+        });
+    }
+}
 
 /// Mirrors the direct-input policy in both request validation and thread capability responses.
 pub(super) fn can_accept_direct_input(
@@ -98,6 +163,7 @@ pub(crate) struct TurnRequestProcessor {
     thread_watch_manager: ThreadWatchManager,
     thread_list_state_permit: Arc<Semaphore>,
     skills_watcher: Arc<SkillsWatcher>,
+    turn_start_dedupe: Arc<Mutex<TurnStartDedupeCache>>,
 }
 
 fn map_additional_context(
@@ -169,6 +235,7 @@ impl TurnRequestProcessor {
             thread_watch_manager,
             thread_list_state_permit,
             skills_watcher,
+            turn_start_dedupe: Arc::new(Mutex::new(TurnStartDedupeCache::default())),
         }
     }
 
@@ -484,6 +551,32 @@ impl TurnRequestProcessor {
                 .inspect_err(|error| {
                     self.track_error_response(&request_id, error, /*error_type*/ None);
                 })?;
+
+        // A client that lost its connection mid-request may re-send the same
+        // submission after reconnecting. When it carries an idempotency key that
+        // already started a turn, answer with the original response instead of
+        // starting a second turn.
+        let dedupe_key = params
+            .client_user_message_id
+            .clone()
+            .filter(|key| !key.is_empty());
+        let cached_response = match dedupe_key.as_deref() {
+            // Scoped so the guard is released before the awaits below.
+            Some(key) => self.turn_start_dedupe.lock().await.lookup(thread_id, key),
+            None => None,
+        };
+        if let Some(response) = cached_response {
+            tracing::info!(
+                thread_id = %thread_id,
+                turn_id = %response.turn.id,
+                "returning existing turn for duplicate turn/start submission"
+            );
+            self.outgoing
+                .record_request_turn_id(&request_id, &response.turn.id)
+                .await;
+            return Ok(response);
+        }
+
         self.ensure_direct_input_allowed(&request_id, thread.as_ref())
             .await?;
         if let Err(error) = Self::validate_v2_input_limit(&params.input) {
@@ -614,7 +707,20 @@ impl TurnRequestProcessor {
             duration_ms: None,
         };
 
-        Ok(TurnStartResponse { turn })
+        let response = TurnStartResponse { turn };
+        // Recorded after the submission succeeds, so the cached response is
+        // exactly what the original caller received. A replay that arrives while
+        // the original submission is still in flight is not deduplicated; in
+        // practice a replay cannot arrive before the client has reconnected and
+        // re-initialized, which is far longer than this window.
+        if let Some(key) = dedupe_key {
+            self.turn_start_dedupe
+                .lock()
+                .await
+                .record(thread_id, key, response.clone());
+        }
+
+        Ok(response)
     }
 
     async fn build_environment_override(
@@ -1542,4 +1648,112 @@ fn xcode_26_4_mcp_elicitations_auto_deny(
     // TODO: Remove this compatibility hack once Xcode 26.4 ages out.
     client_name == Some("Xcode")
         && client_version.is_some_and(|version| version.starts_with("26.4"))
+}
+
+#[cfg(test)]
+mod turn_start_dedupe_tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    fn thread_id(last_octet: u32) -> ThreadId {
+        ThreadId::from_string(&format!("00000000-0000-0000-0000-{last_octet:012}"))
+            .expect("thread id should parse")
+    }
+
+    fn turn_start_response(turn_id: &str) -> TurnStartResponse {
+        TurnStartResponse {
+            turn: Turn {
+                id: turn_id.to_string(),
+                items: vec![],
+                items_view: TurnItemsView::NotLoaded,
+                error: None,
+                status: TurnStatus::InProgress,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
+            },
+        }
+    }
+
+    #[test]
+    fn lookup_returns_the_recorded_response_for_the_same_thread_and_key() {
+        let mut cache = TurnStartDedupeCache::default();
+        cache.record(
+            thread_id(1),
+            "key".to_string(),
+            turn_start_response("turn-1"),
+        );
+
+        assert_eq!(
+            cache.lookup(thread_id(1), "key"),
+            Some(turn_start_response("turn-1"))
+        );
+    }
+
+    #[test]
+    fn lookup_is_scoped_to_the_thread_and_key() {
+        let mut cache = TurnStartDedupeCache::default();
+        cache.record(
+            thread_id(1),
+            "key".to_string(),
+            turn_start_response("turn-1"),
+        );
+
+        assert_eq!(
+            cache.lookup(thread_id(2), "key"),
+            None,
+            "another thread must not see this submission"
+        );
+        assert_eq!(
+            cache.lookup(thread_id(1), "other-key"),
+            None,
+            "a different submission must not be treated as a duplicate"
+        );
+    }
+
+    #[test]
+    fn recording_the_same_key_twice_keeps_a_single_entry() {
+        let mut cache = TurnStartDedupeCache::default();
+        cache.record(
+            thread_id(1),
+            "key".to_string(),
+            turn_start_response("turn-1"),
+        );
+        cache.record(
+            thread_id(1),
+            "key".to_string(),
+            turn_start_response("turn-2"),
+        );
+
+        assert_eq!(cache.entries.len(), 1);
+        assert_eq!(
+            cache.lookup(thread_id(1), "key"),
+            Some(turn_start_response("turn-2"))
+        );
+    }
+
+    #[test]
+    fn cache_evicts_the_oldest_entry_once_full() {
+        let mut cache = TurnStartDedupeCache::default();
+        for index in 0..=TURN_START_DEDUPE_CAPACITY {
+            cache.record(
+                thread_id(1),
+                format!("key-{index}"),
+                turn_start_response(&format!("turn-{index}")),
+            );
+        }
+
+        assert_eq!(cache.entries.len(), TURN_START_DEDUPE_CAPACITY);
+        assert_eq!(
+            cache.lookup(thread_id(1), "key-0"),
+            None,
+            "the oldest submission should have been evicted"
+        );
+        assert_eq!(
+            cache.lookup(thread_id(1), &format!("key-{TURN_START_DEDUPE_CAPACITY}")),
+            Some(turn_start_response(&format!(
+                "turn-{TURN_START_DEDUPE_CAPACITY}"
+            )))
+        );
+    }
 }
