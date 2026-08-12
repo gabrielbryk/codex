@@ -560,8 +560,8 @@ async fn synthetic_call_output_id_is_stable_across_resumes() -> anyhow::Result<(
     })
     .await;
     assert!(
-        !std::fs::read_to_string(&session_path)?.contains("\"type\":\"function_call_output\""),
-        "prompt-only repair should not be persisted to the rollout"
+        std::fs::read_to_string(&session_path)?.contains("\"type\":\"function_call_output\""),
+        "durable repair should be persisted to the rollout"
     );
 
     let second = builder.resume(&server, codex_home, session_path).await?;
