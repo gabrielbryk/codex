@@ -225,6 +225,7 @@ mod safety_buffering;
 mod session_lifecycle;
 mod side;
 mod startup_prompts;
+mod steer_retry;
 mod thread_events;
 mod thread_goal_actions;
 mod thread_routing;

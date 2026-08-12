@@ -1,0 +1,5 @@
+---
+source: tui/src/chatwidget/tests/review_mode.rs
+expression: "lines_to_single_string(&cells[0]).trim()"
+---
+■ Codex is busy. Your message was kept and will be retried after the current turn.
