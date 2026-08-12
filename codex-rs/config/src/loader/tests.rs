@@ -16,6 +16,54 @@ use tempfile::tempdir;
 
 pub(super) struct TestFileSystem;
 
+#[test]
+fn alternate_codex_home_skips_default_user_config_as_project_layer() {
+    let default_codex_home = AbsolutePathBuf::resolve_path_against_base("/home/test/.codex", "/");
+    let alternate_codex_home =
+        AbsolutePathBuf::resolve_path_against_base("/home/test/.codex-uprising", "/");
+
+    assert!(should_skip_project_config_folder(
+        &default_codex_home,
+        default_codex_home.as_path(),
+        &alternate_codex_home,
+        alternate_codex_home.as_path(),
+        &default_codex_home,
+        default_codex_home.as_path(),
+    ));
+}
+
+#[test]
+fn primary_codex_home_still_skips_its_user_config_as_project_layer() {
+    let default_codex_home = AbsolutePathBuf::resolve_path_against_base("/home/test/.codex", "/");
+
+    assert!(should_skip_project_config_folder(
+        &default_codex_home,
+        default_codex_home.as_path(),
+        &default_codex_home,
+        default_codex_home.as_path(),
+        &default_codex_home,
+        default_codex_home.as_path(),
+    ));
+}
+
+#[test]
+fn alternate_codex_home_preserves_repo_local_project_config() {
+    let default_codex_home = AbsolutePathBuf::resolve_path_against_base("/home/test/.codex", "/");
+    let alternate_codex_home =
+        AbsolutePathBuf::resolve_path_against_base("/home/test/.codex-uprising", "/");
+    let project_dot_codex =
+        AbsolutePathBuf::resolve_path_against_base("/home/test/work/project/.codex", "/");
+
+    assert!(!should_skip_project_config_folder(
+        &project_dot_codex,
+        project_dot_codex.as_path(),
+        &alternate_codex_home,
+        alternate_codex_home.as_path(),
+        &default_codex_home,
+        default_codex_home.as_path(),
+    ));
+}
+
 impl ExecutorFileSystem for TestFileSystem {
     fn canonicalize<'a>(
         &'a self,
