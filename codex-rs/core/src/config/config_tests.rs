@@ -66,6 +66,7 @@ use codex_config::types::Tui;
 use codex_config::types::TuiKeymap;
 use codex_config::types::TuiNotificationSettings;
 use codex_config::types::TuiPetAnchor;
+use codex_config::types::TuiStatusLineCommand;
 use codex_config::types::WindowsSandboxModeToml;
 use codex_config::types::WindowsToml;
 use codex_exec_server::LOCAL_FS;
@@ -1100,6 +1101,7 @@ fn config_toml_deserializes_model_availability_nux() {
             raw_output_mode: false,
             alternate_screen: AltScreenMode::default(),
             status_line: None,
+            status_line_command: None,
             status_line_use_colors: true,
             terminal_title: None,
             theme: None,
@@ -1148,6 +1150,181 @@ status_line_use_colors = false
             .expect("tui config should deserialize")
             .status_line_use_colors
     );
+}
+
+#[tokio::test]
+async fn runtime_config_resolves_status_line_command_with_default_timeout() {
+    let cfg: ConfigToml = toml::from_str(
+        r#"
+[tui.status_line_command]
+command = ["/usr/local/bin/statusline", "--compact"]
+"#,
+    )
+    .expect("status line command should deserialize");
+
+    let expected = TuiStatusLineCommand {
+        command: vec![
+            "/usr/local/bin/statusline".to_string(),
+            "--compact".to_string(),
+        ],
+        timeout_ms: 5_000,
+    };
+    assert_eq!(
+        cfg.tui
+            .as_ref()
+            .and_then(|tui| tui.status_line_command.as_ref()),
+        Some(&expected)
+    );
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        tempdir().expect("tempdir").abs(),
+    )
+    .await
+    .expect("status line command should resolve");
+
+    assert_eq!(config.tui_status_line_command, Some(expected));
+}
+
+#[tokio::test]
+async fn runtime_config_rejects_invalid_status_line_command() {
+    let cases = [
+        (
+            "empty argv",
+            r#"
+[tui.status_line_command]
+command = []
+"#,
+            "`tui.status_line_command.command` must contain at least one argv element",
+        ),
+        (
+            "empty executable",
+            r#"
+[tui.status_line_command]
+command = [""]
+"#,
+            "`tui.status_line_command.command[0]` must not be empty",
+        ),
+        (
+            "timeout too small",
+            r#"
+[tui.status_line_command]
+command = ["statusline"]
+timeout_ms = 249
+"#,
+            "`tui.status_line_command.timeout_ms` must be between 250 and 30000 milliseconds",
+        ),
+        (
+            "timeout too large",
+            r#"
+[tui.status_line_command]
+command = ["statusline"]
+timeout_ms = 30001
+"#,
+            "`tui.status_line_command.timeout_ms` must be between 250 and 30000 milliseconds",
+        ),
+    ];
+
+    for (name, toml, expected_error) in cases {
+        let cfg: ConfigToml = toml::from_str(toml)
+            .unwrap_or_else(|error| panic!("{name} should deserialize: {error}"));
+        let error = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides::default(),
+            tempdir().expect("tempdir").abs(),
+        )
+        .await
+        .expect_err(name);
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData, "{name}");
+        assert_eq!(error.to_string(), expected_error, "{name}");
+    }
+}
+
+#[tokio::test]
+async fn runtime_config_rejects_status_line_and_command_together() {
+    let cfg: ConfigToml = toml::from_str(
+        r#"
+[tui]
+status_line = ["model"]
+
+[tui.status_line_command]
+command = ["statusline"]
+"#,
+    )
+    .expect("conflicting status line settings should deserialize");
+
+    let error = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        tempdir().expect("tempdir").abs(),
+    )
+    .await
+    .expect_err("conflicting status line settings should be rejected");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(
+        error.to_string(),
+        "`tui.status_line` and `tui.status_line_command` are mutually exclusive in the effective configuration; remove one"
+    );
+}
+
+#[tokio::test]
+async fn runtime_config_reports_layer_origins_for_status_line_conflict() {
+    let codex_home = tempdir().expect("tempdir");
+    let user_file = codex_home.path().join("config.toml").abs();
+    let project_dot_codex = codex_home.path().join("project/.codex").abs();
+    let config_layer_stack = ConfigLayerStack::new(
+        vec![
+            ConfigLayerEntry::new(
+                ConfigLayerSource::User {
+                    file: user_file.clone(),
+                    profile: None,
+                },
+                toml::toml! {
+                    [tui]
+                    status_line = ["model"]
+                }
+                .into(),
+            ),
+            ConfigLayerEntry::new(
+                ConfigLayerSource::Project {
+                    dot_codex_folder: project_dot_codex.clone(),
+                },
+                toml::toml! {
+                    [tui.status_line_command]
+                    command = ["statusline"]
+                }
+                .into(),
+            ),
+        ],
+        Default::default(),
+        Default::default(),
+    )
+    .expect("config layers should be valid before effective-value validation");
+    let cfg: ConfigToml = config_layer_stack
+        .effective_config()
+        .try_into()
+        .expect("merged config should deserialize");
+
+    let error = Config::load_config_with_layer_stack(
+        LOCAL_FS.as_ref(),
+        cfg,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+        config_layer_stack,
+    )
+    .await
+    .expect_err("cross-layer status line conflict should be rejected");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    let message = error.to_string();
+    assert!(message.contains("`tui.status_line` from user ("));
+    assert!(message.contains(user_file.as_path().to_string_lossy().as_ref()));
+    assert!(message.contains("`tui.status_line_command` from project ("));
+    assert!(message.contains(project_dot_codex.as_path().to_string_lossy().as_ref()));
+    assert!(message.contains("are mutually exclusive in the effective configuration"));
 }
 
 #[test]
@@ -3988,6 +4165,7 @@ fn tui_config_missing_notifications_field_defaults_to_enabled() {
             raw_output_mode: false,
             alternate_screen: AltScreenMode::Auto,
             status_line: None,
+            status_line_command: None,
             status_line_use_colors: true,
             terminal_title: None,
             theme: None,

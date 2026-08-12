@@ -130,6 +130,29 @@ async fn status_line_setup_popup_live_only_snapshot() {
 }
 
 #[tokio::test]
+async fn status_line_setup_is_blocked_when_external_command_is_configured() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.tui_status_line_command = Some(codex_config::types::TuiStatusLineCommand {
+        command: vec!["statusline-command".to_string()],
+        timeout_ms: codex_config::types::DEFAULT_TUI_STATUS_LINE_COMMAND_TIMEOUT_MS,
+    });
+
+    chat.open_status_line_setup();
+
+    assert!(!chat.bottom_pane.has_active_view());
+    let cells = drain_insert_history(&mut rx);
+    assert_eq!(
+        cells.len(),
+        1,
+        "expected one command-mode information message"
+    );
+    assert_chatwidget_snapshot!(
+        "status_line_setup_external_command_configured",
+        lines_to_single_string(&cells[0])
+    );
+}
+
+#[tokio::test]
 async fn status_surface_preview_lines_hardcoded_only_snapshot() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
