@@ -14,6 +14,7 @@ mod perform_oauth_login;
 mod program_resolver;
 mod protocol_mode;
 mod rmcp_client;
+mod slack_oauth_envelope;
 mod startup_error;
 mod stdio_server_launcher;
 mod utils;
