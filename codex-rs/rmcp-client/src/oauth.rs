@@ -56,6 +56,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
+use tracing::debug;
 use tracing::warn;
 
 use self::store_lock::OAuthStore;
@@ -716,11 +717,16 @@ impl OAuthPersistor {
             }
             None => {
                 let mut last_credentials = self.inner.last_credentials.lock().await;
-                if last_credentials.take().is_some()
-                    && let Err(error) = self.inner.credential_store.delete(
+                // A transient in-memory refresh miss (for example right after a startup 401)
+                // makes `get_credentials()` return `None` even though the seeded snapshot and the
+                // on-disk entry still hold a usable refresh token. Route the eviction through the
+                // stale-aware delete so we never wipe a credential that could still be refreshed.
+                if let Some(evicted) = last_credentials.take()
+                    && let Err(error) = self.inner.credential_store.delete_if_stale(
                         &DefaultKeyringStore,
                         &self.inner.server_name,
                         &self.inner.url,
+                        Some(&evicted),
                     )
                 {
                     warn!(
@@ -884,6 +890,88 @@ fn delete_oauth_tokens_from_file(key: &str) -> Result<bool> {
     }
 
     Ok(removed)
+}
+
+/// Deletes the fallback File entry for `key`, but only when it is genuinely safe to evict.
+///
+/// The `None` branch of [`OAuthPersistor::persist_if_needed`] fires whenever the in-memory
+/// `AuthorizationManager` reports no credentials — including a transient refresh miss right after
+/// a startup 401. Because `last_credentials` is seeded from disk (with the still-valid refresh
+/// token), an unconditional delete would wipe a usable credential and force a full re-login.
+///
+/// This performs an authoritative, lock-held reread and refuses to remove an on-disk entry that
+/// either (a) still carries a usable refresh token, or (b) no longer matches the token we are
+/// evicting (another process rotated it). Only a genuinely dead entry — no usable refresh token
+/// and still matching the evicted token — is removed. The whole read-compare-delete runs under the
+/// same `OAuthStoreLock(File)` used by the load/save/delete paths, preserving lock ordering.
+fn delete_oauth_tokens_from_file_if_stale(
+    key: &str,
+    expected: Option<&StoredOAuthTokens>,
+) -> Result<bool> {
+    let _store_lock = OAuthStoreLock::acquire_for_write(OAuthStore::File)?;
+    let mut store = match read_fallback_file_unlocked()? {
+        Some(store) => store,
+        None => return Ok(false),
+    };
+
+    // Mirror the host/executor collision guard `delete_oauth_tokens_from_file` applies. This
+    // function is the delete path `persist_if_needed` actually takes, so without the same check an
+    // executor-keyed eviction could remove a host-owned credential — exactly what upstream's
+    // fail-closed environment isolation is meant to prevent.
+    if key.starts_with("executor:")
+        && !key.contains('|')
+        && store.get(key).is_some_and(|entry| !entry.executor_owned)
+    {
+        anyhow::bail!("executor OAuth credential key conflicts with a host-owned credential");
+    }
+
+    let Some(entry) = store.get(key) else {
+        return Ok(false);
+    };
+
+    if entry
+        .refresh_token
+        .as_deref()
+        .is_some_and(|token| !token.trim().is_empty())
+    {
+        debug!(
+            server_name = %entry.server_name,
+            "skipping MCP OAuth file credential delete because the on-disk entry still holds a usable refresh token"
+        );
+        return Ok(false);
+    }
+
+    if let Some(expected) = expected
+        && !file_entry_matches_expected(entry, expected)
+    {
+        debug!(
+            server_name = %entry.server_name,
+            "skipping MCP OAuth file credential delete because the on-disk entry no longer matches the evicted token"
+        );
+        return Ok(false);
+    }
+
+    let removed = store.remove(key).is_some();
+    if removed {
+        write_fallback_file(&store)?;
+    }
+    Ok(removed)
+}
+
+/// Reports whether a persisted fallback entry still carries the exact token material we intend to
+/// evict. Compares identity plus the access and refresh secrets; expiry/scope drift is ignored so a
+/// re-serialized-but-equivalent credential still matches.
+fn file_entry_matches_expected(entry: &FallbackTokenEntry, expected: &StoredOAuthTokens) -> bool {
+    let expected_response = &expected.token_response.0;
+    let expected_access = expected_response.access_token().secret().as_str();
+    let expected_refresh = expected_response
+        .refresh_token()
+        .map(|token| token.secret().as_str());
+    entry.server_name == expected.server_name
+        && entry.server_url == expected.url
+        && entry.client_id == expected.client_id
+        && entry.access_token.as_str() == expected_access
+        && entry.refresh_token.as_deref() == expected_refresh
 }
 
 pub(crate) fn compute_expires_at_millis(response: &OAuthTokenResponse) -> Option<u64> {
@@ -1438,6 +1526,132 @@ mod tests {
         );
         assert!(result.is_err());
         assert!(super::fallback_file_path().unwrap().exists());
+        Ok(())
+    }
+
+    #[test]
+    fn delete_if_stale_keeps_entry_with_valid_refresh_token() -> Result<()> {
+        let _env = TempCodexHome::new();
+        let store = MockKeyringStore::default();
+        // The evicted in-memory snapshot and the on-disk entry share the same still-valid refresh
+        // token, mirroring a transient refresh miss after a startup 401.
+        let tokens = sample_tokens();
+        super::save_oauth_tokens_to_file(&tokens)?;
+
+        let removed = ResolvedOAuthCredentialStore::File.delete_if_stale(
+            &store,
+            &tokens.server_name,
+            &tokens.url,
+            Some(&tokens),
+        )?;
+
+        assert!(
+            !removed,
+            "entry with a usable refresh token must not be deleted"
+        );
+        let loaded = super::load_oauth_tokens_from_file(&tokens.server_name, &tokens.url)?
+            .expect("credential with a valid refresh token must remain on disk");
+        assert_tokens_match_without_expiry(&loaded, &tokens);
+        Ok(())
+    }
+
+    #[test]
+    fn delete_if_stale_removes_dead_matching_entry() -> Result<()> {
+        let _env = TempCodexHome::new();
+        let store = MockKeyringStore::default();
+        // A genuinely dead credential: expired with no refresh token, matching what we evicted.
+        let mut dead = sample_tokens();
+        dead.token_response.0.set_refresh_token(None);
+        dead.expires_at = Some(0);
+        super::save_oauth_tokens_to_file(&dead)?;
+
+        let removed = ResolvedOAuthCredentialStore::File.delete_if_stale(
+            &store,
+            &dead.server_name,
+            &dead.url,
+            Some(&dead),
+        )?;
+
+        assert!(
+            removed,
+            "a dead entry with no usable refresh token must still be removed"
+        );
+        assert!(
+            super::load_oauth_tokens_from_file(&dead.server_name, &dead.url)?.is_none(),
+            "dead credential should be gone from disk"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn delete_if_stale_keeps_entry_that_no_longer_matches_evicted_token() -> Result<()> {
+        let _env = TempCodexHome::new();
+        let store = MockKeyringStore::default();
+        // Both the evicted snapshot and the on-disk entry are unrefreshable, but another process
+        // rotated the on-disk access token, so the entry no longer matches and must be preserved.
+        let mut evicted = sample_tokens();
+        evicted.token_response.0.set_refresh_token(None);
+        evicted.expires_at = Some(0);
+
+        let mut on_disk = evicted.clone();
+        on_disk
+            .token_response
+            .0
+            .set_access_token(AccessToken::new("rotated-access-token".to_string()));
+        super::save_oauth_tokens_to_file(&on_disk)?;
+
+        let removed = ResolvedOAuthCredentialStore::File.delete_if_stale(
+            &store,
+            &evicted.server_name,
+            &evicted.url,
+            Some(&evicted),
+        )?;
+
+        assert!(
+            !removed,
+            "entry that no longer matches the evicted token must not be deleted"
+        );
+        assert!(
+            super::load_oauth_tokens_from_file(&on_disk.server_name, &on_disk.url)?.is_some(),
+            "rotated credential should remain on disk"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn delete_if_stale_refuses_executor_key_colliding_with_host_credential() -> Result<()> {
+        let _env = TempCodexHome::new();
+        // A legacy host entry (no `executor_owned` marker) parked under an executor-shaped key,
+        // and otherwise perfectly deletable: no refresh token left to protect it. Only the
+        // host/executor collision guard should stop the eviction.
+        let url = "https://example.com/mcp";
+        let key = super::compute_store_key("executor:colliding-server", url)?;
+        let mut store = FallbackFile::new();
+        store.insert(
+            key.clone(),
+            super::FallbackTokenEntry {
+                server_name: "executor:colliding-server".to_string(),
+                server_url: url.to_string(),
+                client_id: "client".to_string(),
+                access_token: "access".to_string(),
+                expires_at: Some(0),
+                refresh_token: None,
+                scopes: Vec::new(),
+                executor_owned: false,
+            },
+        );
+        super::write_fallback_file(&store)?;
+
+        let error = super::delete_oauth_tokens_from_file_if_stale(&key, None)
+            .expect_err("executor-keyed delete must fail closed against a host-owned entry");
+        assert!(
+            error.to_string().contains("conflicts with a host-owned"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            super::read_fallback_file_unlocked()?.is_some_and(|store| store.contains_key(&key)),
+            "host-owned credential must survive a refused executor-keyed delete"
+        );
         Ok(())
     }
 
