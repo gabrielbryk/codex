@@ -23,6 +23,10 @@ impl App {
         event: AppEvent,
     ) -> Result<AppRunControl> {
         match event {
+            AppEvent::AppServerReconnected { previous, current } => {
+                self.reattach_after_reconnect(app_server, previous, current)
+                    .await;
+            }
             AppEvent::NewSession { name } => {
                 self.start_fresh_session_with_summary_hint(
                     tui, app_server, /*session_start_source*/ None,

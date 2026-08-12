@@ -82,6 +82,10 @@ impl App {
                     };
                 self.app_event_tx.send(AppEvent::FatalExitRequest(message));
             }
+            AppServerEvent::Reconnected { previous, current } => {
+                self.app_event_tx
+                    .send(AppEvent::AppServerReconnected { previous, current });
+            }
         }
     }
 
