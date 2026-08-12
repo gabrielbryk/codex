@@ -47,6 +47,36 @@ use super::get_command;
 use super::post_unified_exec_tool_use_payload;
 use super::shell_mode_for_environment;
 
+const CODEX_COMMAND_SCOPE_EXEC_ENV: &str = "CODEX_COMMAND_SCOPE_EXEC";
+
+fn wrap_local_command_for_scope(
+    command: Vec<String>,
+    wrapper: Option<String>,
+    thread_id: &str,
+    turn_id: &str,
+    call_id: &str,
+    profile: &str,
+) -> Vec<String> {
+    let Some(wrapper) = wrapper.filter(|value| !value.is_empty()) else {
+        return command;
+    };
+
+    let mut wrapped = vec![
+        wrapper,
+        "--thread-id".to_string(),
+        thread_id.to_string(),
+        "--turn-id".to_string(),
+        turn_id.to_string(),
+        "--call-id".to_string(),
+        call_id.to_string(),
+        "--profile".to_string(),
+        profile.to_string(),
+        "--".to_string(),
+    ];
+    wrapped.extend(command);
+    wrapped
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct ExecCommandHandlerOptions {
     pub(crate) allow_login_shell: bool,
@@ -236,8 +266,18 @@ impl ExecCommandHandler {
             turn_environment.config().allow_login_shell,
         )
         .map_err(FunctionCallError::RespondToModel)?;
-        let command = resolved_command.command;
+        let mut command = resolved_command.command;
         let shell_type = resolved_command.shell_type;
+        if !environment.is_remote() {
+            command = wrap_local_command_for_scope(
+                command,
+                std::env::var(CODEX_COMMAND_SCOPE_EXEC_ENV).ok(),
+                &session.thread_id.to_string(),
+                &turn.sub_id,
+                &call_id,
+                &std::env::var("CODEX_HOME").unwrap_or_else(|_| "default".to_string()),
+            );
+        }
         let command_for_display = codex_shell_command::parse_command::shlex_join(&command);
 
         let ExecCommandArgs {
@@ -459,4 +499,60 @@ fn emit_unified_exec_tty_metric(session_telemetry: &SessionTelemetry, tty: bool)
         /*inc*/ 1,
         &[("tty", if tty { "true" } else { "false" })],
     );
+}
+
+#[cfg(test)]
+mod scope_wrapper_tests {
+    use super::wrap_local_command_for_scope;
+
+    #[test]
+    fn preserves_exact_argv_after_identity_prefix() {
+        let command = vec![
+            "/usr/bin/zsh".to_string(),
+            "-c".to_string(),
+            "printf '%s' 'hello world'".to_string(),
+        ];
+        let wrapped = wrap_local_command_for_scope(
+            command.clone(),
+            Some("/opt/guard/codex-command-scope-exec".to_string()),
+            "thread-1",
+            "turn-1",
+            "call-1",
+            "/home/gabe/.codex",
+        );
+
+        assert_eq!(
+            &wrapped[..11],
+            &[
+                "/opt/guard/codex-command-scope-exec",
+                "--thread-id",
+                "thread-1",
+                "--turn-id",
+                "turn-1",
+                "--call-id",
+                "call-1",
+                "--profile",
+                "/home/gabe/.codex",
+                "--",
+                "/usr/bin/zsh",
+            ]
+        );
+        assert_eq!(&wrapped[10..], command);
+    }
+
+    #[test]
+    fn disabled_wrapper_leaves_command_unchanged() {
+        let command = vec!["echo".to_string(), "hello".to_string()];
+        assert_eq!(
+            wrap_local_command_for_scope(
+                command.clone(),
+                None,
+                "thread",
+                "turn",
+                "call",
+                "profile",
+            ),
+            command
+        );
+    }
 }
