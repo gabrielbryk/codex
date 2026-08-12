@@ -562,10 +562,8 @@ impl App {
                 self.chat_widget.prepare_local_op_submission(&op);
                 if let Err(err) = self.submit_active_thread_op(app_server, op).await {
                     let handled = is_user_turn
-                        && matches!(
+                        && is_recoverable_turn_start_failure(
                             err.downcast_ref::<TypedRequestError>(),
-                            Some(TypedRequestError::Server { method, .. })
-                                if method == "turn/start"
                         )
                         && self
                             .chat_widget
@@ -983,8 +981,8 @@ impl App {
             AppEvent::RefreshTokenActivity { request_id } => {
                 self.refresh_token_activity(app_server, request_id);
             }
-            AppEvent::RefreshStatusLineWorkspaceHeadline { request_id } => {
-                self.refresh_status_line_workspace_headline(app_server, request_id);
+            AppEvent::RefreshStatusLineWorkspaceHeadline { owner, request_id } => {
+                self.refresh_status_line_workspace_headline(app_server, owner, request_id);
             }
             AppEvent::OpenThreadGoalMenu { thread_id } => {
                 self.open_thread_goal_menu(app_server, thread_id).await;
@@ -2365,41 +2363,69 @@ impl App {
                 items,
                 use_theme_colors,
             } => {
-                let ids = items.iter().map(ToString::to_string).collect::<Vec<_>>();
-                let items_edit = crate::legacy_core::config::edit::status_line_items_edit(&ids);
-                let colors_edit =
-                    crate::legacy_core::config::edit::status_line_use_colors_edit(use_theme_colors);
-                let apply_result = ConfigEditsBuilder::for_config(&self.config)
-                    .with_edits([items_edit, colors_edit])
-                    .apply()
-                    .await;
-                match apply_result {
-                    Ok(()) => {
-                        self.config.tui_status_line = Some(ids.clone());
-                        self.config.tui_status_line_use_colors = use_theme_colors;
-                        self.chat_widget.setup_status_line(items, use_theme_colors);
-                    }
-                    Err(err) => {
-                        let error = format_config_error(&err);
-                        tracing::error!(error = %error, "failed to persist status line settings; keeping previous selection");
-                        self.chat_widget.add_error_message(format!(
-                            "Failed to save status line settings: {error}"
-                        ));
+                if self.config.tui_status_line_command.is_some() {
+                    tracing::warn!(
+                        "refusing to persist built-in status line settings while an external status line command is configured"
+                    );
+                    self.chat_widget.add_error_message(
+                        "Built-in status line settings were not saved because `tui.status_line_command` is configured."
+                            .to_string(),
+                    );
+                } else {
+                    let ids = items.iter().map(ToString::to_string).collect::<Vec<_>>();
+                    let items_edit = crate::legacy_core::config::edit::status_line_items_edit(&ids);
+                    let colors_edit = crate::legacy_core::config::edit::status_line_use_colors_edit(
+                        use_theme_colors,
+                    );
+                    let apply_result = ConfigEditsBuilder::for_config(&self.config)
+                        .with_edits([items_edit, colors_edit])
+                        .apply()
+                        .await;
+                    match apply_result {
+                        Ok(()) => {
+                            self.config.tui_status_line = Some(ids.clone());
+                            self.config.tui_status_line_use_colors = use_theme_colors;
+                            self.chat_widget.setup_status_line(items, use_theme_colors);
+                        }
+                        Err(err) => {
+                            let error = format_config_error(&err);
+                            tracing::error!(error = %error, "failed to persist status line settings; keeping previous selection");
+                            self.chat_widget.add_error_message(format!(
+                                "Failed to save status line settings: {error}"
+                            ));
+                        }
                     }
                 }
             }
-            AppEvent::StatusLineBranchUpdated { cwd, branch } => {
-                self.chat_widget.set_status_line_branch(cwd, branch);
+            AppEvent::StatusLineBranchUpdated { owner, cwd, branch } => {
+                self.chat_widget.set_status_line_branch(owner, cwd, branch);
                 self.refresh_status_line();
             }
-            AppEvent::StatusLineGitSummaryUpdated { cwd, summary } => {
-                self.chat_widget.set_status_line_git_summary(cwd, summary);
+            AppEvent::StatusLineGitSummaryUpdated {
+                owner,
+                cwd,
+                summary,
+            } => {
+                self.chat_widget
+                    .set_status_line_git_summary(owner, cwd, summary);
                 self.refresh_status_line();
             }
-            AppEvent::StatusLineWorkspaceHeadlineUpdated { request_id, result } => {
+            AppEvent::StatusLineWorkspaceHeadlineUpdated {
+                owner,
+                request_id,
+                result,
+            } => {
                 if self
                     .chat_widget
-                    .set_status_line_workspace_headline(request_id, result)
+                    .set_status_line_workspace_headline(owner, request_id, result)
+                {
+                    tui.frame_requester().schedule_frame();
+                }
+            }
+            AppEvent::StatusLineCommandFinished(completion) => {
+                if self
+                    .chat_widget
+                    .apply_status_line_command_completion(completion)
                 {
                     tui.frame_requester().schedule_frame();
                 }
@@ -2724,5 +2750,67 @@ impl App {
                 AppRunControl::Continue
             }
         }
+    }
+}
+
+/// Returns whether a failed `turn/start` should be surfaced in chat instead of exiting the TUI.
+///
+/// `Transport` is included on purpose: this fork's remote app-server client calls
+/// `fail_pending_requests()` on every websocket drop before it reconnects, so an in-flight
+/// `turn/start` observes a transport error even though the client is back moments later.
+/// Treating that as fatal would end the whole session over a momentary blip.
+fn is_recoverable_turn_start_failure(error: Option<&TypedRequestError>) -> bool {
+    matches!(
+        error,
+        Some(
+            TypedRequestError::Server { method, .. } | TypedRequestError::Transport { method, .. }
+        ) if method == "turn/start"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_recoverable_turn_start_failure;
+    use codex_app_server_client::TypedRequestError;
+    use codex_app_server_protocol::JSONRPCErrorError;
+
+    fn server_error(method: &str) -> TypedRequestError {
+        TypedRequestError::Server {
+            method: method.to_string(),
+            source: JSONRPCErrorError {
+                code: -32600,
+                message: "thread not found".to_string(),
+                data: None,
+            },
+        }
+    }
+
+    fn transport_error(method: &str) -> TypedRequestError {
+        TypedRequestError::Transport {
+            method: method.to_string(),
+            source: std::io::Error::new(std::io::ErrorKind::BrokenPipe, "connection closed"),
+        }
+    }
+
+    #[test]
+    fn server_and_transport_turn_start_failures_are_recoverable() {
+        assert!(is_recoverable_turn_start_failure(Some(&server_error(
+            "turn/start"
+        ))));
+        // A websocket drop fails the in-flight request before the client reconnects.
+        assert!(is_recoverable_turn_start_failure(Some(&transport_error(
+            "turn/start"
+        ))));
+    }
+
+    #[test]
+    fn other_methods_and_missing_errors_stay_fatal() {
+        assert!(!is_recoverable_turn_start_failure(Some(&server_error(
+            "thread/compact/start"
+        ))));
+        assert!(!is_recoverable_turn_start_failure(Some(&transport_error(
+            "thread/compact/start"
+        ))));
+        assert!(!is_recoverable_turn_start_failure(None));
     }
 }
