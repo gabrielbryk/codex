@@ -165,7 +165,18 @@ impl Session {
             .entry(codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string())
             .or_insert_with(|| PathUri::from_abs_path(&desired.config.cwd));
         let mcp_config = Arc::new(config);
-        let mcp_servers = effective_mcp_servers(&mcp_config, auth.as_ref());
+        let thread_id = self.thread_id.to_string();
+        let mcp_servers = effective_mcp_servers(&mcp_config, auth.as_ref())
+            .into_iter()
+            .map(|(name, server)| {
+                (
+                    name,
+                    server
+                        .with_stdio_runtime_env("CODEX_WORKLOAD_THREAD_ID", thread_id.clone())
+                        .with_stdio_runtime_env("CODEX_WORKLOAD_TYPE", "mcp".to_string()),
+                )
+            })
+            .collect();
         let runtime_context = McpRuntimeContext::new(
             self.services.turn_environments.environment_manager(),
             desired.local_process_cwd.clone(),
