@@ -76,6 +76,7 @@ mod safety_check_downgrade;
 mod selected_capability_stack;
 mod selected_environment;
 mod server_diagnostics;
+mod server_drain;
 #[cfg(not(target_os = "windows"))]
 mod session_end;
 mod skills_list;

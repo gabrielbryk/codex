@@ -34,6 +34,11 @@ const UPDATE_PID_FILE_NAME: &str = "app-server-updater.pid";
 const OPERATION_LOCK_FILE_NAME: &str = "daemon.lock";
 const SETTINGS_FILE_NAME: &str = "settings.json";
 const STATE_DIR_NAME: &str = "app-server-daemon";
+const DAEMON_DIR_ENV_VAR: &str = "CODEX_APP_SERVER_DAEMON_DIR";
+const MANAGED_BIN_ENV_VAR: &str = "CODEX_APP_SERVER_MANAGED_BIN";
+const SOCKET_ENV_VAR: &str = "CODEX_APP_SERVER_SOCKET";
+const GENERATION_ID_ENV_VAR: &str = "CODEX_APP_SERVER_GENERATION_ID";
+const SOURCE_SHA_ENV_VAR: &str = "CODEX_APP_SERVER_SOURCE_SHA";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LifecycleCommand {
@@ -287,22 +292,37 @@ struct Daemon {
     operation_lock_file: PathBuf,
     settings_file: PathBuf,
     managed_codex_bin: PathBuf,
+    generation_id: Option<String>,
+    source_sha: Option<String>,
 }
 
 impl Daemon {
     fn from_environment() -> Result<Self> {
         let codex_home = find_codex_home().context("failed to resolve CODEX_HOME")?;
-        let socket_path = app_server_control_socket_path(codex_home.as_path())?
-            .as_path()
-            .to_path_buf();
-        let state_dir = codex_home.as_path().join(STATE_DIR_NAME);
+        let socket_path = match std::env::var_os(SOCKET_ENV_VAR) {
+            Some(path) => PathBuf::from(path),
+            None => app_server_control_socket_path(codex_home.as_path())?
+                .as_path()
+                .to_path_buf(),
+        };
+        if !socket_path.is_absolute() {
+            return Err(anyhow!("{SOCKET_ENV_VAR} must be an absolute path"));
+        }
+        let state_dir = std::env::var_os(DAEMON_DIR_ENV_VAR)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| codex_home.as_path().join(STATE_DIR_NAME));
+        let managed_codex_bin = std::env::var_os(MANAGED_BIN_ENV_VAR)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| managed_codex_bin(codex_home.as_path()));
         Ok(Self {
             socket_path,
             pid_file: state_dir.join(PID_FILE_NAME),
             update_pid_file: state_dir.join(UPDATE_PID_FILE_NAME),
             operation_lock_file: state_dir.join(OPERATION_LOCK_FILE_NAME),
             settings_file: state_dir.join(SETTINGS_FILE_NAME),
-            managed_codex_bin: managed_codex_bin(codex_home.as_path()),
+            managed_codex_bin,
+            generation_id: std::env::var(GENERATION_ID_ENV_VAR).ok(),
+            source_sha: std::env::var(SOURCE_SHA_ENV_VAR).ok(),
         })
     }
 
@@ -767,6 +787,9 @@ impl Daemon {
             pid_file: self.pid_file.clone(),
             update_pid_file: self.update_pid_file.clone(),
             remote_control_enabled: settings.remote_control_enabled,
+            socket_path: self.socket_path.clone(),
+            generation_id: self.generation_id.clone(),
+            source_sha: self.source_sha.clone(),
         }
     }
 
@@ -1080,6 +1103,8 @@ mod tests {
             operation_lock_file: temp_dir.path().join("daemon.lock"),
             settings_file: temp_dir.path().join("settings.json"),
             managed_codex_bin: temp_dir.path().join("missing-codex"),
+            generation_id: None,
+            source_sha: None,
         };
         let stderr_log = daemon.pid_file.with_extension("stderr.log");
         tokio::fs::write(&stderr_log, "unexpected argument")
