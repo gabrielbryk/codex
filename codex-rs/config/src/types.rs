@@ -686,6 +686,27 @@ pub struct ModelAvailabilityNuxConfig {
 
 /// Fallback resize-reflow row cap when Codex cannot identify a terminal-specific scrollback size.
 pub const DEFAULT_TERMINAL_RESIZE_REFLOW_FALLBACK_MAX_ROWS: usize = 1_000;
+pub const DEFAULT_TUI_STATUS_LINE_COMMAND_TIMEOUT_MS: u64 = 5_000;
+pub const MIN_TUI_STATUS_LINE_COMMAND_TIMEOUT_MS: u64 = 250;
+pub const MAX_TUI_STATUS_LINE_COMMAND_TIMEOUT_MS: u64 = 30_000;
+
+const fn default_tui_status_line_command_timeout_ms() -> u64 {
+    DEFAULT_TUI_STATUS_LINE_COMMAND_TIMEOUT_MS
+}
+
+/// Configuration for an external command that renders the complete TUI status line.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct TuiStatusLineCommand {
+    /// Executable followed by literal arguments. Codex does not invoke a shell.
+    #[schemars(length(min = 1))]
+    pub command: Vec<String>,
+
+    /// Maximum command execution time in milliseconds.
+    #[serde(default = "default_tui_status_line_command_timeout_ms")]
+    #[schemars(range(min = 250, max = 30_000))]
+    pub timeout_ms: u64,
+}
 
 /// Collection of settings that are specific to the TUI.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema)]
@@ -728,6 +749,12 @@ pub struct Tui {
     /// When unset, the TUI defaults to: `model-with-reasoning` and `current-dir`.
     #[serde(default)]
     pub status_line: Option<Vec<String>>,
+
+    /// External command that renders the complete TUI status line.
+    ///
+    /// This cannot be combined with `status_line`.
+    #[serde(default)]
+    pub status_line_command: Option<TuiStatusLineCommand>,
 
     /// Color status line items with colors derived from the active syntax theme.
     /// Defaults to `true`.

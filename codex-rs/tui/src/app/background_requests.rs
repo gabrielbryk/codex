@@ -185,6 +185,7 @@ impl App {
     pub(super) fn refresh_status_line_workspace_headline(
         &mut self,
         app_server: &AppServerSession,
+        owner: u64,
         request_id: u64,
     ) {
         let request_handle = app_server.request_handle();
@@ -201,7 +202,11 @@ impl App {
                     .map(crate::workspace_messages::workspace_headline_from_response)
                     .map_err(|err| err.to_string())
             });
-            app_event_tx.send(AppEvent::StatusLineWorkspaceHeadlineUpdated { request_id, result });
+            app_event_tx.send(AppEvent::StatusLineWorkspaceHeadlineUpdated {
+                owner,
+                request_id,
+                result,
+            });
         });
     }
 

@@ -40,16 +40,17 @@ impl ChatWidget {
             StatusDetailsCapitalization::Preserve,
             details_max_lines,
         );
-        let title_uses_status = self
-            .config
-            .tui_terminal_title
-            .as_ref()
-            .is_some_and(|items| {
-                items
-                    .iter()
-                    .any(|item| item == "run-state" || item == "status")
-            });
-        if title_uses_status {
+        let surface_uses_status = self.config.tui_status_line_command.is_some()
+            || self
+                .config
+                .tui_terminal_title
+                .as_ref()
+                .is_some_and(|items| {
+                    items
+                        .iter()
+                        .any(|item| item == "run-state" || item == "status")
+                });
+        if surface_uses_status {
             self.refresh_status_surfaces();
         }
         status_indicator_updated
@@ -69,7 +70,18 @@ impl ChatWidget {
 
     /// Sets the currently rendered footer status-line value.
     pub(crate) fn set_status_line(&mut self, status_line: Option<Line<'static>>) {
-        self.bottom_pane.set_status_line(status_line);
+        self.set_status_lines(status_line.into_iter().collect());
+    }
+
+    pub(crate) fn set_status_lines(&mut self, status_lines: Vec<Line<'static>>) {
+        self.bottom_pane.set_status_lines(status_lines);
+    }
+
+    pub(crate) fn set_status_hyperlink_lines(
+        &mut self,
+        status_lines: Vec<crate::terminal_hyperlinks::HyperlinkLine>,
+    ) {
+        self.bottom_pane.set_status_hyperlink_lines(status_lines);
     }
 
     /// Sets the terminal hyperlink target for the currently rendered footer status line.
@@ -79,9 +91,14 @@ impl ChatWidget {
 
     /// Forwards the contextual active-agent label into the bottom-pane footer pipeline.
     ///
-    /// `ChatWidget` stays a pass-through here so `App` remains the owner of "which thread is the
-    /// user actually looking at?" and the footer stack remains a pure renderer of that decision.
+    /// External formatter output owns the complete passive status region, so command mode
+    /// suppresses the label instead of appending UI-owned text to the formatter's final row.
     pub(crate) fn set_active_agent_label(&mut self, active_agent_label: Option<String>) {
+        let active_agent_label = if self.config.tui_status_line_command.is_some() {
+            None
+        } else {
+            active_agent_label
+        };
         self.bottom_pane.set_active_agent_label(active_agent_label);
     }
 
@@ -164,9 +181,15 @@ impl ChatWidget {
     ///
     /// Results are dropped when they target an out-of-date cwd to avoid rendering stale branch
     /// names after directory changes.
-    pub(crate) fn set_status_line_branch(&mut self, cwd: PathBuf, branch: Option<String>) {
-        if self.status_line_branch_cwd.as_ref() != Some(&cwd) {
-            self.status_line_branch_pending = false;
+    pub(crate) fn set_status_line_branch(
+        &mut self,
+        owner: u64,
+        cwd: PathBuf,
+        branch: Option<String>,
+    ) {
+        if owner != self.status_line_async_owner
+            || self.status_line_branch_cwd.as_ref() != Some(&cwd)
+        {
             return;
         }
         self.status_line_branch = branch;
@@ -178,11 +201,13 @@ impl ChatWidget {
     /// Stores async Git summary lookup results for the current status-line cwd.
     pub(crate) fn set_status_line_git_summary(
         &mut self,
+        owner: u64,
         cwd: PathBuf,
         summary: StatusLineGitSummary,
     ) {
-        if self.status_line_git_summary_cwd.as_ref() != Some(&cwd) {
-            self.status_line_git_summary_pending = false;
+        if owner != self.status_line_async_owner
+            || self.status_line_git_summary_cwd.as_ref() != Some(&cwd)
+        {
             return;
         }
         self.status_line_git_summary = Some(summary);
@@ -298,6 +323,15 @@ impl ChatWidget {
     }
 
     pub(super) fn open_status_line_setup(&mut self) {
+        if self.config.tui_status_line_command.is_some() {
+            self.add_info_message(
+                "An external status line command is configured. Remove `tui.status_line_command` from config.toml to edit built-in status line items."
+                    .to_string(),
+                /*hint*/ None,
+            );
+            return;
+        }
+
         let configured_status_line_items = self.configured_status_line_items();
         let view = StatusLineSetupView::new(
             Some(configured_status_line_items.as_slice()),

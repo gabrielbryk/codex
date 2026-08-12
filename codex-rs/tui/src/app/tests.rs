@@ -10,6 +10,7 @@ mod connector_policy;
 mod key_chords;
 #[path = "tests/mcp_startup.rs"]
 mod mcp_startup;
+mod fatal_exit;
 mod model_catalog;
 mod plugin_catalog;
 mod rate_limits;
@@ -8365,4 +8366,54 @@ async fn side_backtrack_rejection_reports_unavailable_message_snapshot() {
 }
 async fn start_config_write_test_app_server(app: &App) -> Result<AppServerSession> {
     Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await
+}
+
+#[tokio::test]
+async fn status_line_setup_event_cannot_overwrite_external_command_config() -> Result<()> {
+    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    let config_path = app.config.codex_home.join("config.toml");
+    let command_config = codex_config::types::TuiStatusLineCommand {
+        command: vec!["statusline-command".to_string()],
+        timeout_ms: codex_config::types::DEFAULT_TUI_STATUS_LINE_COMMAND_TIMEOUT_MS,
+    };
+    let original_config = "[tui.status_line_command]\ncommand = [\"statusline-command\"]\n";
+    std::fs::write(&config_path, original_config)?;
+    app.config.tui_status_line = Some(vec!["model".to_string()]);
+    app.config.tui_status_line_command = Some(command_config);
+    app.chat_widget.setup_status_line(
+        vec![crate::bottom_pane::StatusLineItem::ModelName],
+        /*use_theme_colors*/ true,
+    );
+    let mut app_server = start_config_write_test_app_server(&app).await?;
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+
+    let control = Box::pin(app.handle_event(
+        &mut tui,
+        &mut app_server,
+        AppEvent::StatusLineSetup {
+            items: vec![crate::bottom_pane::StatusLineItem::CurrentDir],
+            use_theme_colors: false,
+        },
+    ))
+    .await?;
+
+    assert!(matches!(control, AppRunControl::Continue));
+    assert_eq!(app.config.tui_status_line, Some(vec!["model".to_string()]));
+    assert!(app.config.tui_status_line_use_colors);
+    assert_eq!(
+        app.chat_widget.config_ref().tui_status_line,
+        Some(vec!["model".to_string()])
+    );
+    assert_eq!(std::fs::read_to_string(config_path)?, original_config);
+    let cell = match app_event_rx.try_recv() {
+        Ok(AppEvent::InsertHistoryCell(cell)) => cell,
+        other => panic!("expected InsertHistoryCell event, got {other:?}"),
+    };
+    assert_app_snapshot!(
+        "status_line_setup_event_rejects_external_command_conflict",
+        lines_to_single_string(&cell.display_lines(/*width*/ 100))
+    );
+    app_server.shutdown().await?;
+
+    Ok(())
 }
