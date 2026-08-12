@@ -13,6 +13,14 @@ Fleet deployment, runtime diagnostics, durable evidence, remote-control ownershi
 retained rollback packages. The one-time zero-active-turn bootstrap is complete: the stable router
 owns the canonical socket and the first generation runs behind a private socket.
 
+The host tooling also supports live replacement of the stable router itself. It uses Unix listener
+rename semantics rather than descriptor transfer: accepted streams remain attached to their owning
+router process, while the replacement binds the canonical pathname for new clients. The persisted
+handover controller accounts for each process's sockets through `/proc`, validates PID start time,
+socket inode, loaded source hash, routing revision, and a stable-socket RPC probe, and never treats
+an unreadable connection inventory as empty. A failed replacement restores the old listener first,
+then lets replacement-accepted streams drain before cleanup.
+
 TUI process replacement, automatic reconnect/reattach, and mid-turn connection migration remain
 later phases. Natural-drain v1 keeps each accepted connection on its original server and therefore
 preserves live work without changing TUI code. Remote control now transfers exactly once at the
@@ -34,6 +42,8 @@ The production-ready natural-drain boundary includes:
 - automatic retention of at least two retired generations for seven days, with a dry-run prune
   command and path-containment checks;
 - exact-SHA build stamping through `CODEX_BUILD_COMMIT`, `GIT_COMMIT`, and `STABLE_GIT_COMMIT`.
+- crash-resumable stable-router replacement and active-phase failback without closing accepted
+  streams on either router process.
 
 The full roadmap is not complete until the reconnect/reattach and TUI safe-boundary executable
 handoff acceptance criteria are proven. Those are P2 follow-on features and are not required to use
@@ -321,10 +331,18 @@ configurable with `CODEX_ROLLOUT_RETIRED_RETENTION_SECONDS` and
 seconds and is controlled by `CODEX_ROLLOUT_HEALTH_OBSERVATION_SECONDS` and
 `CODEX_ROLLOUT_HEALTH_PROBE_INTERVAL`.
 
-Never restart the router merely because installed code differs from its running source hash. A
-plain restart replaces the listening socket and interrupts routed clients. The current safe
-activation rule is `routerConnections == 0`; a live router-process handoff is a separate follow-on
-feature.
+Never restart the router merely because installed code differs from its running source hash. Use
+`codex-app-server-router-handover prepare`. The handover renames the bound listener, starts the
+replacement at the canonical pathname, keeps old accepted streams open, and reconciles until the
+old process has zero kernel-observed established sockets. Server-generation mutation is suspended
+during that interval because only the old router can account for its pinned backend connections.
+Finalization moves the replacement listener to a temporary hold path before stopping old, preventing
+old shutdown cleanup from unlinking the new router's pathname, then restores the canonical name.
+If readiness or health fails while the old router is still available, failback first returns that
+old listener to the canonical pathname. The rejected replacement keeps its renamed listener and
+accepted streams until its kernel-observed connection count reaches zero. The controller blocks
+server-generation changes throughout `preparing`, `active`, `finalizing`, `failbackPreparing`, and
+`failingBack` so neither router's hidden connections can be omitted from a retirement decision.
 
 ## Server identity and compatibility
 
@@ -590,6 +608,7 @@ Canonical owner: `~/workspace/personal/tooling/claude-process-guard`.
 Implemented additions and changes:
 
 - new `bin/codex-app-server-router`;
+- new `bin/codex-app-server-router-handover`, installed from the same source-owned repository;
 - new `bin/codex-app-server-rollout` and reconciliation timer;
 - immutable per-generation package, socket, and daemon directories;
 - user-systemd router unit and transient generation scope integration;
