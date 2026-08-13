@@ -3845,7 +3845,12 @@ impl Session {
             state.history.backfill_missing_call_outputs()
         };
         if !injected.is_empty() {
-            self.persist_rollout_response_items(&injected).await;
+            let rollout_items = injected
+                .into_iter()
+                .map(ResponseItemEnvelope::new)
+                .map(RolloutItem::ResponseItem)
+                .collect::<Vec<_>>();
+            self.persist_rollout_items(&rollout_items).await;
         }
     }
 
