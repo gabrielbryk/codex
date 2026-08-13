@@ -63,29 +63,21 @@ use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tracing::warn;
 use url::Url;
 
+mod replay;
+
+use replay::PendingRequest;
+use replay::ReplayState;
+use replay::earliest_parked_deadline;
+use replay::expire_parked_requests;
+use replay::fail_pending_requests;
+use replay::park_pending_requests;
+
+#[cfg(test)]
+use replay::CLIENT_USER_MESSAGE_ID_FIELD;
+
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(10);
 const RECONNECT_DELAY: Duration = Duration::from_millis(250);
-/// How long an in-flight replay-safe request may stay parked across reconnects
-/// before it is failed with the transport error that parked it. Keeping this
-/// short bounds how long a caller can be blocked by a server that never comes
-/// back, while still covering a momentary daemon restart.
-const PARKED_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
-/// A parked request is re-sent at most this many times. A second disconnect
-/// before the response arrives fails it with the original transport error, so a
-/// server that dies while handling the request cannot be hammered forever.
-const MAX_REQUEST_REPLAY_ATTEMPTS: u32 = 1;
-/// Methods that are safe to re-send after a reconnect.
-///
-/// Replay is only sound for requests the server can recognize as a duplicate,
-/// so this list is deliberately tiny. `turn/start` qualifies because the client
-/// stamps every submission with a `clientUserMessageId` that the server uses as
-/// an idempotency key; a replay of an already-processed submission returns the
-/// original response instead of starting a second turn. Requests without that
-/// key are never replayed (see [`ReplayState::for_request`]).
-const REPLAYABLE_REQUEST_METHODS: &[&str] = &["turn/start"];
-/// Wire name of the `TurnStartParams::client_user_message_id` idempotency key.
-const CLIENT_USER_MESSAGE_ID_FIELD: &str = "clientUserMessageId";
 const REMOTE_APP_SERVER_MAX_WEBSOCKET_MESSAGE_SIZE: usize = 128 << 20;
 // Tungstenite still needs an HTTP request URI for the WebSocket handshake;
 // the bytes travel over the Unix socket, not TCP.
@@ -169,80 +161,6 @@ enum RemoteClientCommand {
     Shutdown {
         response_tx: oneshot::Sender<IoResult<()>>,
     },
-}
-
-/// Bookkeeping for a request that has been handed to the worker but has not
-/// been answered yet.
-struct PendingRequest {
-    response_tx: oneshot::Sender<IoResult<RequestResult>>,
-    /// `Some` when the request may be re-sent across a reconnect.
-    replay: Option<ReplayState>,
-}
-
-impl PendingRequest {
-    /// Deadline after which a currently parked request gives up, if it is
-    /// parked at all.
-    fn parked_deadline(&self) -> Option<Instant> {
-        Some(self.replay.as_ref()?.parked.as_ref()?.deadline)
-    }
-
-    /// Error to fail this request with, preferring the transport error that
-    /// originally parked it so give-up semantics match a non-parked failure.
-    fn give_up_error(&self) -> IoError {
-        match self
-            .replay
-            .as_ref()
-            .and_then(|replay| replay.parked.as_ref())
-        {
-            Some(parked) => IoError::new(parked.err_kind, parked.err_message.clone()),
-            None => IoError::new(
-                ErrorKind::TimedOut,
-                "remote app-server request timed out while reconnecting",
-            ),
-        }
-    }
-}
-
-/// Replay bookkeeping for a request whose method is known to be idempotent.
-struct ReplayState {
-    request: Box<JSONRPCRequest>,
-    attempts_remaining: u32,
-    /// `Some` while the request is parked waiting for a reconnect.
-    parked: Option<ParkedRequest>,
-}
-
-/// Snapshot taken when a request is parked, so that giving up later reports the
-/// transport error that caused the disconnect rather than a synthetic one.
-struct ParkedRequest {
-    deadline: Instant,
-    err_kind: ErrorKind,
-    err_message: String,
-}
-
-impl ReplayState {
-    /// Returns replay bookkeeping when `request` is safe to re-send verbatim
-    /// after a reconnect, and `None` otherwise.
-    fn for_request(request: &JSONRPCRequest) -> Option<Self> {
-        if !REPLAYABLE_REQUEST_METHODS.contains(&request.method.as_str()) {
-            return None;
-        }
-        // Without an idempotency key the server cannot recognize the replay as
-        // a duplicate, so re-sending would start a second turn.
-        let has_idempotency_key = request
-            .params
-            .as_ref()
-            .and_then(|params| params.get(CLIENT_USER_MESSAGE_ID_FIELD))
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|key| !key.is_empty());
-        if !has_idempotency_key {
-            return None;
-        }
-        Some(Self {
-            request: Box::new(request.clone()),
-            attempts_remaining: MAX_REQUEST_REPLAY_ATTEMPTS,
-            parked: None,
-        })
-    }
 }
 
 pub struct RemoteAppServerClient {
@@ -1017,81 +935,6 @@ async fn sleep_until_deadline(deadline: Option<Instant>) {
     }
 }
 
-/// Earliest give-up deadline across all parked requests, if any are parked.
-fn earliest_parked_deadline(
-    pending_requests: &HashMap<RequestId, PendingRequest>,
-) -> Option<Instant> {
-    pending_requests
-        .values()
-        .filter_map(PendingRequest::parked_deadline)
-        .min()
-}
-
-/// Fails every in-flight request that cannot survive a reconnect and parks the
-/// ones that can.
-///
-/// A request is parked when its method is replay-safe, it still has a replay
-/// attempt left, and its give-up deadline has not passed. Everything else keeps
-/// the historical fail-fast behavior.
-fn park_pending_requests(
-    pending_requests: &mut HashMap<RequestId, PendingRequest>,
-    err_kind: ErrorKind,
-    err_message: &str,
-) {
-    let now = Instant::now();
-    let mut parked = HashMap::new();
-    for (request_id, mut pending) in pending_requests.drain() {
-        let keep = match pending.replay.as_mut() {
-            Some(replay) if replay.attempts_remaining > 0 => {
-                let deadline = replay
-                    .parked
-                    .get_or_insert_with(|| ParkedRequest {
-                        deadline: now + PARKED_REQUEST_TIMEOUT,
-                        err_kind,
-                        err_message: err_message.to_string(),
-                    })
-                    .deadline;
-                deadline > now
-            }
-            _ => false,
-        };
-        if keep {
-            parked.insert(request_id, pending);
-        } else {
-            let _ = pending
-                .response_tx
-                .send(Err(IoError::new(err_kind, err_message.to_string())));
-        }
-    }
-    *pending_requests = parked;
-}
-
-/// Fails parked requests whose give-up deadline has passed, using the transport
-/// error that parked them.
-fn expire_parked_requests(pending_requests: &mut HashMap<RequestId, PendingRequest>) {
-    let now = Instant::now();
-    let expired: Vec<RequestId> = pending_requests
-        .iter()
-        .filter(|(_, pending)| {
-            pending
-                .parked_deadline()
-                .is_some_and(|deadline| deadline <= now)
-        })
-        .map(|(request_id, _)| request_id.clone())
-        .collect();
-    for request_id in expired {
-        let Some(pending) = pending_requests.remove(&request_id) else {
-            continue;
-        };
-        warn!(
-            %request_id,
-            "giving up on parked remote app-server request after reconnect timeout"
-        );
-        let give_up_error = pending.give_up_error();
-        let _ = pending.response_tx.send(Err(give_up_error));
-    }
-}
-
 /// Re-sends every parked request on a freshly initialized stream.
 ///
 /// The replayed frames reuse the original JSON-RPC ids, so responses route back
@@ -1125,20 +968,6 @@ where
         write_jsonrpc_message(stream, JSONRPCMessage::Request(*request), endpoint).await?;
     }
     Ok(())
-}
-
-/// Fails every in-flight request without parking any of them. Used on paths
-/// that abandon the connection instead of reconnecting.
-fn fail_pending_requests(
-    pending_requests: &mut HashMap<RequestId, PendingRequest>,
-    err_kind: ErrorKind,
-    err_message: &str,
-) {
-    for (_, pending) in pending_requests.drain() {
-        let _ = pending
-            .response_tx
-            .send(Err(IoError::new(err_kind, err_message.to_string())));
-    }
 }
 
 fn fail_command_while_reconnecting(command: Option<RemoteClientCommand>, last_error: &str) -> bool {
