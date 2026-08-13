@@ -2,7 +2,9 @@
 
 ## Status
 
-Natural-drain v1 was implemented and bootstrapped on 2026-08-12. This is an internal implementation
+Natural-drain v1 was implemented and bootstrapped on 2026-08-12. The maintained fork was replayed
+from the `rust-v0.148.0-alpha.12` release on 2026-08-13; that release also isolates remote-client
+replay bookkeeping in a private module and adds model-request latency/token telemetry. This is an internal implementation
 guide for Gabe's local Codex fork and its source-owned host lifecycle tooling. It deliberately lives
 outside the user-facing `docs/` tree.
 
@@ -29,9 +31,9 @@ confirmation window. All socket-health writers classify persisted handover and f
 `starting`, preventing a legacy direct app-server from claiming the temporarily absent canonical
 pathname.
 
-TUI process replacement, automatic reconnect/reattach, and mid-turn connection migration remain
-later phases. Natural-drain v1 keeps each accepted connection on its original server and therefore
-preserves live work without changing TUI code. Remote control now transfers exactly once at the
+Mid-turn connection migration remains a later phase. The fork now includes automatic transport
+reconnect and narrowly scoped replay/reattachment behavior, while natural drain keeps each accepted
+connection on its original server until a disconnect. Remote control transfers exactly once at the
 retirement boundary; this is generation ownership transfer, not transport migration of an active
 remote client.
 
