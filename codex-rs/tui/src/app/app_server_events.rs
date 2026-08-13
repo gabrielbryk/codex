@@ -302,6 +302,17 @@ impl App {
         request: ServerRequest,
     ) {
         let thread_id = server_request_thread_id(&request);
+        if thread_id.is_some_and(|thread_id| {
+            self.primary_thread_id != Some(thread_id)
+                && !self.thread_event_channels.contains_key(&thread_id)
+        }) {
+            tracing::warn!(
+                ?thread_id,
+                request_id = ?request.id(),
+                "ignoring app-server request for a thread not attached to this TUI"
+            );
+            return;
+        }
         if thread_id.is_some_and(|thread_id| self.abandoned_side_threads.contains(&thread_id)) {
             if let Err(err) = self
                 .reject_app_server_request(

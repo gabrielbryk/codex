@@ -3862,41 +3862,52 @@ async fn inactive_thread_started_notification_initializes_replay_session() -> Re
         &rollout_path,
         format!("{}\n", serde_json::to_string(&rollout)?),
     )?;
-    app.enqueue_thread_notification(
-        agent_thread_id,
-        ServerNotification::ThreadStarted(ThreadStartedNotification {
-            thread: Thread {
-                id: agent_thread_id.to_string(),
-                extra: None,
-                session_id: agent_thread_id.to_string(),
-                forked_from_id: None,
-                parent_thread_id: None,
-                preview: "agent thread".to_string(),
-                ephemeral: false,
-                section: None,
-                section_entered_at: None,
-                project_id: None,
-                history_mode: Default::default(),
-                model_provider: "agent-provider".to_string(),
-                created_at: 1,
-                updated_at: 2,
-                recency_at: Some(2),
-                status: codex_app_server_protocol::ThreadStatus::Idle,
-                path: Some(rollout_path.clone()),
-                cwd: test_path_buf("/tmp/agent").abs(),
-                cli_version: "0.0.0".to_string(),
-                source: codex_app_server_protocol::SessionSource::Unknown,
-                can_accept_direct_input: None,
-                thread_source: None,
-                agent_nickname: Some("Robie".to_string()),
-                agent_role: Some("explorer".to_string()),
-                git_info: None,
-                name: Some("agent thread".to_string()),
-                turns: Vec::new(),
-            },
-        }),
-    )
-    .await?;
+    let related_start = ServerNotification::ThreadStarted(ThreadStartedNotification {
+        thread: Thread {
+            id: agent_thread_id.to_string(),
+            extra: None,
+            session_id: agent_thread_id.to_string(),
+            forked_from_id: None,
+            parent_thread_id: Some(main_thread_id.to_string()),
+            preview: "agent thread".to_string(),
+            ephemeral: false,
+            section: None,
+            section_entered_at: None,
+            project_id: None,
+            history_mode: Default::default(),
+            model_provider: "agent-provider".to_string(),
+            created_at: 1,
+            updated_at: 2,
+            recency_at: Some(2),
+            status: codex_app_server_protocol::ThreadStatus::Idle,
+            path: Some(rollout_path.clone()),
+            cwd: test_path_buf("/tmp/agent").abs(),
+            cli_version: "0.0.0".to_string(),
+            source: codex_app_server_protocol::SessionSource::Unknown,
+            can_accept_direct_input: None,
+            thread_source: None,
+            agent_nickname: Some("Robie".to_string()),
+            agent_role: Some("explorer".to_string()),
+            git_info: None,
+            name: Some("agent thread".to_string()),
+            turns: Vec::new(),
+        },
+    });
+    let unrelated_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000303").expect("valid thread");
+    let mut unrelated_start = related_start.clone();
+    let ServerNotification::ThreadStarted(unrelated) = &mut unrelated_start else {
+        unreachable!("cloned thread start notification")
+    };
+    unrelated.thread.id = unrelated_thread_id.to_string();
+    unrelated.thread.session_id = unrelated_thread_id.to_string();
+    unrelated.thread.parent_thread_id = None;
+    app.enqueue_thread_notification(unrelated_thread_id, unrelated_start)
+        .await?;
+    assert!(!app.thread_event_channels.contains_key(&unrelated_thread_id));
+
+    app.enqueue_thread_notification(agent_thread_id, related_start)
+        .await?;
 
     let store = app
         .thread_event_channels
@@ -3969,7 +3980,7 @@ async fn inactive_thread_started_notification_preserves_primary_model_when_path_
                 extra: None,
                 session_id: agent_thread_id.to_string(),
                 forked_from_id: None,
-                parent_thread_id: None,
+                parent_thread_id: Some(main_thread_id.to_string()),
                 preview: "agent thread".to_string(),
                 ephemeral: false,
                 section: None,

@@ -1031,6 +1031,28 @@ impl App {
         if self.abandoned_side_threads.contains(&thread_id) {
             return Ok(());
         }
+        if let ServerNotification::ThreadStarted(started) = &notification
+            && self.primary_thread_id.is_some()
+            && self.primary_thread_id != Some(thread_id)
+            && !self.thread_event_channels.contains_key(&thread_id)
+        {
+            let related_thread_id = started
+                .thread
+                .parent_thread_id
+                .as_deref()
+                .or(started.thread.forked_from_id.as_deref())
+                .and_then(|id| ThreadId::from_string(id).ok());
+            if !related_thread_id.is_some_and(|related_thread_id| {
+                self.primary_thread_id == Some(related_thread_id)
+                    || self.thread_event_channels.contains_key(&related_thread_id)
+            }) {
+                tracing::debug!(
+                    %thread_id,
+                    "ignoring unrelated broadcast thread start"
+                );
+                return Ok(());
+            }
+        }
         let misalignment_policy_violation =
             match &notification {
                 ServerNotification::Error(notification) if !notification.will_retry => {
