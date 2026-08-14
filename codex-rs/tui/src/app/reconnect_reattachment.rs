@@ -6,7 +6,6 @@ use codex_app_server_client::ReconnectEpoch;
 use codex_app_server_protocol::ServerIdentity;
 use codex_protocol::ThreadId;
 use std::time::Duration;
-use tokio::sync::mpsc::error::TryRecvError;
 
 const REATTACH_RETRY_DELAYS: [Duration; 3] = [
     Duration::from_millis(100),
@@ -15,7 +14,7 @@ const REATTACH_RETRY_DELAYS: [Duration; 3] = [
 ];
 
 impl App {
-    fn reconnect_thread_ids(&self) -> Vec<ThreadId> {
+    pub(super) fn reconnect_thread_ids(&self) -> Vec<ThreadId> {
         let mut thread_ids: Vec<ThreadId> = self.attached_thread_ids.iter().copied().collect();
         thread_ids.sort_by_key(ToString::to_string);
         thread_ids
@@ -151,17 +150,10 @@ impl App {
 
         let mut queued_events_before = 0;
         let mut preserved = Vec::new();
-        loop {
-            match receiver.try_recv() {
-                Ok(event) => {
-                    queued_events_before += 1;
-                    if crate::app::thread_events::ThreadEventStore::event_survives_session_refresh(
-                        &event,
-                    ) {
-                        preserved.push(event);
-                    }
-                }
-                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+        while let Ok(event) = receiver.try_recv() {
+            queued_events_before += 1;
+            if crate::app::thread_events::ThreadEventStore::event_survives_session_refresh(&event) {
+                preserved.push(event);
             }
         }
 
