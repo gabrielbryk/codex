@@ -3,6 +3,18 @@ use crate::app::reconnect_reattachment::reattachment_failure_message;
 use crate::app::thread_events::ThreadEventChannel;
 
 #[tokio::test]
+async fn reconnect_ignores_visible_but_unattached_thread_channels() {
+    let mut app = make_test_app().await;
+    let attached = ThreadId::new();
+    let visible_only = ThreadId::new();
+    app.attached_thread_ids.insert(attached);
+    app.thread_event_channels
+        .insert(visible_only, ThreadEventChannel::new(/*capacity*/ 4));
+
+    pretty_assertions::assert_eq!(app.reconnect_thread_ids(), vec![attached]);
+}
+
+#[tokio::test]
 async fn reconnect_reattaches_a_live_thread() -> Result<()> {
     let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
     let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
@@ -10,6 +22,7 @@ async fn reconnect_reattaches_a_live_thread() -> Result<()> {
     let thread_id = started.session.thread_id;
     app.primary_thread_id = Some(thread_id);
     app.active_thread_id = Some(thread_id);
+    app.attached_thread_ids.insert(thread_id);
     app.thread_event_channels.insert(
         thread_id,
         ThreadEventChannel::new_with_session(

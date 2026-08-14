@@ -367,7 +367,7 @@ impl App {
         app_server: &mut AppServerSession,
         thread_id: ThreadId,
     ) -> Result<bool> {
-        if self.thread_event_channels.contains_key(&thread_id) {
+        if self.is_thread_attached(thread_id) {
             return Ok(true);
         }
 
@@ -423,6 +423,9 @@ impl App {
                 (session, turns, false)
             }
         };
+        if live_attached {
+            self.attached_thread_ids.insert(thread_id);
+        }
         let channel = self.ensure_thread_channel(thread_id);
         if !live_attached {
             channel.mark_replay_only();
@@ -601,6 +604,7 @@ impl App {
     pub(super) fn reset_thread_event_state(&mut self) {
         self.abort_all_thread_event_listeners();
         self.thread_event_channels.clear();
+        self.attached_thread_ids.clear();
         self.agent_navigation.clear();
         self.side_threads.clear();
         self.active_thread_id = None;
@@ -727,8 +731,7 @@ impl App {
             self.chat_widget.rollout_path().as_deref(),
         );
         self.shutdown_current_thread(app_server).await;
-        let tracked_thread_ids: Vec<ThreadId> =
-            self.thread_event_channels.keys().copied().collect();
+        let tracked_thread_ids: Vec<ThreadId> = self.attached_thread_ids.iter().copied().collect();
         for thread_id in tracked_thread_ids {
             if let Err(err) = app_server.thread_unsubscribe(thread_id).await {
                 tracing::warn!("failed to unsubscribe tracked thread {thread_id}: {err}");
