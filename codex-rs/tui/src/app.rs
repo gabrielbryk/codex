@@ -584,6 +584,9 @@ pub(crate) struct App {
     windows_sandbox: WindowsSandboxState,
 
     thread_event_channels: HashMap<ThreadId, ThreadEventChannel>,
+    /// Threads this TUI explicitly started, resumed, forked, or inherited from an owned parent.
+    /// Broadcast visibility and replay channels must never grant request or reconnect authority.
+    attached_thread_ids: HashSet<ThreadId>,
     thread_event_listener_tasks: HashMap<ThreadId, JoinHandle<()>>,
     agent_navigation: AgentNavigationState,
     side_threads: HashMap<ThreadId, SideThreadState>,
@@ -1084,6 +1087,7 @@ See the Codex keymap documentation for supported actions and examples."
             pending_shutdown_exit_thread_id: None,
             windows_sandbox: WindowsSandboxState::default(),
             thread_event_channels: HashMap::new(),
+            attached_thread_ids: HashSet::new(),
             thread_event_listener_tasks: HashMap::new(),
             agent_navigation: AgentNavigationState::default(),
             side_threads: HashMap::new(),

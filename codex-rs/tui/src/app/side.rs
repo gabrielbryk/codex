@@ -498,6 +498,7 @@ impl App {
 
     pub(super) async fn discard_thread_local_state(&mut self, thread_id: ThreadId) {
         self.abort_thread_event_listener(thread_id);
+        self.attached_thread_ids.remove(&thread_id);
         self.thread_event_channels.remove(&thread_id);
         self.side_threads.remove(&thread_id);
         self.agent_navigation.remove(thread_id);
@@ -691,6 +692,7 @@ impl App {
         {
             Ok(forked) => {
                 let child_thread_id = forked.session.thread_id;
+                self.attached_thread_ids.insert(child_thread_id);
                 let channel = self.ensure_thread_channel(child_thread_id);
                 {
                     let mut store = channel.store.lock().await;
