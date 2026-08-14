@@ -369,7 +369,8 @@ impl App {
         app_server: &mut AppServerSession,
         thread_id: ThreadId,
     ) -> Result<bool> {
-        if self.is_thread_attached(thread_id) {
+        if self.is_thread_attached(thread_id) && self.thread_event_channels.contains_key(&thread_id)
+        {
             return Ok(true);
         }
 
