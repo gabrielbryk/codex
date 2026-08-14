@@ -537,6 +537,38 @@ async fn resolved_buffered_approval_does_not_become_actionable_after_drain() -> 
 }
 
 #[tokio::test]
+async fn visible_unattached_thread_cannot_surface_an_approval() -> Result<()> {
+    let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    let app_server = crate::start_embedded_app_server_for_picker(&app.config).await?;
+    let visible_only = ThreadId::new();
+    app.thread_event_channels
+        .insert(visible_only, ThreadEventChannel::new(/*capacity*/ 4));
+
+    app.handle_app_server_event(
+        &app_server,
+        codex_app_server_client::AppServerEvent::ServerRequest(Box::new(exec_approval_request(
+            visible_only,
+            "turn-1",
+            "call-1",
+            Some("approval-1"),
+        ))),
+    )
+    .await;
+
+    let resolution = app
+        .pending_app_server_requests
+        .take_resolution(Op::ExecApproval {
+            id: "approval-1".to_string(),
+            turn_id: None,
+            decision: codex_app_server_protocol::CommandExecutionApprovalDecision::Accept,
+        })
+        .expect("approval resolution should serialize");
+    pretty_assertions::assert_eq!(resolution, None);
+    app_server.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn enqueue_primary_thread_session_replays_turns_before_initial_prompt_submit() -> Result<()> {
     let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
     let thread_id = ThreadId::new();
@@ -5298,6 +5330,7 @@ async fn make_test_app() -> App {
         pending_shutdown_exit_thread_id: None,
         windows_sandbox: WindowsSandboxState::default(),
         thread_event_channels: HashMap::new(),
+        attached_thread_ids: HashSet::new(),
         thread_event_listener_tasks: HashMap::new(),
         agent_navigation: AgentNavigationState::default(),
         agents_overview: Default::default(),
@@ -5375,6 +5408,7 @@ async fn make_test_app_with_channels() -> (
             pending_shutdown_exit_thread_id: None,
             windows_sandbox: WindowsSandboxState::default(),
             thread_event_channels: HashMap::new(),
+            attached_thread_ids: HashSet::new(),
             thread_event_listener_tasks: HashMap::new(),
             agent_navigation: AgentNavigationState::default(),
             agents_overview: Default::default(),

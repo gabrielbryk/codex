@@ -1,7 +1,6 @@
 //! Restores connection-scoped thread subscriptions after app-server reconnects.
 
 use super::App;
-use crate::app::thread_events::ThreadEventAttachment;
 use crate::app_server_session::AppServerSession;
 use codex_app_server_protocol::ServerIdentity;
 use codex_protocol::ThreadId;
@@ -14,6 +13,12 @@ const REATTACH_RETRY_DELAYS: [Duration; 3] = [
 ];
 
 impl App {
+    fn reconnect_thread_ids(&self) -> Vec<ThreadId> {
+        let mut thread_ids: Vec<ThreadId> = self.attached_thread_ids.iter().copied().collect();
+        thread_ids.sort_by_key(ToString::to_string);
+        thread_ids
+    }
+
     pub(super) async fn reattach_after_reconnect(
         &mut self,
         app_server: &mut AppServerSession,
@@ -25,15 +30,7 @@ impl App {
             ?current,
             "reattaching TUI threads after app-server reconnect"
         );
-        let mut thread_ids: Vec<ThreadId> = self
-            .thread_event_channels
-            .iter()
-            .filter_map(|(thread_id, channel)| {
-                (channel.attachment() == ThreadEventAttachment::Live).then_some(*thread_id)
-            })
-            .collect();
-        thread_ids.sort_by_key(ToString::to_string);
-        thread_ids.dedup();
+        let thread_ids = self.reconnect_thread_ids();
 
         let mut failures = Vec::new();
         for thread_id in thread_ids {
@@ -67,7 +64,9 @@ impl App {
             }
         }
 
-        if let Err(err) = app_server.finish_reconnect().await {
+        if failures.is_empty()
+            && let Err(err) = app_server.finish_reconnect().await
+        {
             failures.push(format!("failed to release queued requests: {err}"));
         }
         if !failures.is_empty() {

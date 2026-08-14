@@ -596,6 +596,9 @@ pub(crate) struct App {
     windows_sandbox: WindowsSandboxState,
 
     thread_event_channels: HashMap<ThreadId, ThreadEventChannel>,
+    /// Threads this TUI explicitly started, resumed, forked, or inherited from an owned parent.
+    /// Broadcast visibility and replay channels must never grant request or reconnect authority.
+    attached_thread_ids: HashSet<ThreadId>,
     thread_event_listener_tasks: HashMap<ThreadId, JoinHandle<()>>,
     agent_navigation: AgentNavigationState,
     agents_overview: agents_overview::AgentsOverviewState,

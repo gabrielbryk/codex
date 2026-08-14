@@ -306,10 +306,7 @@ impl App {
         request: ServerRequest,
     ) {
         let thread_id = server_request_thread_id(&request);
-        if thread_id.is_some_and(|thread_id| {
-            self.primary_thread_id != Some(thread_id)
-                && !self.thread_event_channels.contains_key(&thread_id)
-        }) {
+        if thread_id.is_some_and(|thread_id| !self.is_thread_attached(thread_id)) {
             tracing::warn!(
                 ?thread_id,
                 request_id = ?request.id(),

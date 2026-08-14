@@ -24,6 +24,7 @@ impl App {
             if let Err(err) = app_server.thread_unsubscribe(thread_id).await {
                 tracing::warn!("failed to unsubscribe thread {thread_id}: {err}");
             }
+            self.attached_thread_ids.remove(&thread_id);
             self.abort_thread_event_listener(thread_id);
         }
     }
@@ -48,6 +49,10 @@ impl App {
         self.thread_event_channels
             .entry(thread_id)
             .or_insert_with(|| ThreadEventChannel::new(THREAD_EVENT_CHANNEL_CAPACITY))
+    }
+
+    pub(super) fn is_thread_attached(&self, thread_id: ThreadId) -> bool {
+        self.attached_thread_ids.contains(&thread_id)
     }
 
     pub(super) async fn set_thread_active(&mut self, thread_id: ThreadId, active: bool) {
@@ -1034,7 +1039,7 @@ impl App {
         if let ServerNotification::ThreadStarted(started) = &notification
             && self.primary_thread_id.is_some()
             && self.primary_thread_id != Some(thread_id)
-            && !self.thread_event_channels.contains_key(&thread_id)
+            && !self.is_thread_attached(thread_id)
         {
             let related_thread_id = started
                 .thread
@@ -1042,16 +1047,16 @@ impl App {
                 .as_deref()
                 .or(started.thread.forked_from_id.as_deref())
                 .and_then(|id| ThreadId::from_string(id).ok());
-            if !related_thread_id.is_some_and(|related_thread_id| {
-                self.primary_thread_id == Some(related_thread_id)
-                    || self.thread_event_channels.contains_key(&related_thread_id)
-            }) {
+            if !related_thread_id
+                .is_some_and(|related_thread_id| self.is_thread_attached(related_thread_id))
+            {
                 tracing::debug!(
                     %thread_id,
                     "ignoring unrelated broadcast thread start"
                 );
                 return Ok(());
             }
+            self.attached_thread_ids.insert(thread_id);
         }
         let misalignment_policy_violation =
             match &notification {
@@ -1076,9 +1081,12 @@ impl App {
             ServerNotification::ThreadSettingsUpdated(_) | ServerNotification::ThreadArchived(_)
         ) && self.primary_thread_id.is_some()
             && self.primary_thread_id != Some(thread_id)
-            && !self.thread_event_channels.contains_key(&thread_id)
+            && !self.is_thread_attached(thread_id)
         {
             return Ok(());
+        }
+        if matches!(notification, ServerNotification::ThreadClosed(_)) {
+            self.attached_thread_ids.remove(&thread_id);
         }
         if let ServerNotification::ThreadSettingsUpdated(notification) = &notification {
             self.apply_thread_settings_to_cached_session(thread_id, &notification.thread_settings)
@@ -1364,6 +1372,7 @@ impl App {
         self.config.approvals_reviewer = session.approvals_reviewer;
 
         let thread_id = session.thread_id;
+        self.attached_thread_ids.insert(thread_id);
         self.primary_thread_id = Some(thread_id);
         self.primary_session_configured = Some(session.clone());
         self.upsert_agent_picker_thread(
