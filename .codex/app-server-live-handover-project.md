@@ -2,11 +2,12 @@
 
 ## Status
 
-Natural-drain v1 was implemented and bootstrapped on 2026-08-12. The maintained fork was replayed
-from the `rust-v0.148.0-alpha.12` release on 2026-08-13; that release also isolates remote-client
-replay bookkeeping in a private module and adds model-request latency/token telemetry. This is an internal implementation
-guide for Gabe's local Codex fork and its source-owned host lifecycle tooling. It deliberately lives
-outside the user-facing `docs/` tree.
+Status snapshot: 2026-08-14. Natural-drain v1 is implemented and deployed. The maintained
+`gabe/fork` branch is based on `rust-v0.148.0-alpha.12` and currently ends at
+`9c819839b7b93c25d57a19a8f830a8b833bda804`. Primary and Uprising both route new clients to an
+accepting generation built from that exact source SHA. This is an internal implementation guide for
+Gabe's local Codex fork and its source-owned host lifecycle tooling. It deliberately lives outside
+the user-facing `docs/` tree.
 
 The implemented first release covers server identity, synchronized drain
 admission, existing cross-process thread writer locks, private generation
@@ -31,11 +32,42 @@ confirmation window. All socket-health writers classify persisted handover and f
 `starting`, preventing a legacy direct app-server from claiming the temporarily absent canonical
 pathname.
 
-Mid-turn connection migration remains a later phase. The fork now includes automatic transport
-reconnect and narrowly scoped replay/reattachment behavior, while natural drain keeps each accepted
-connection on its original server until a disconnect. Remote control transfers exactly once at the
-retirement boundary; this is generation ownership transfer, not transport migration of an active
-remote client.
+Mid-turn connection migration remains a later phase. The deployed fork keeps transport failures
+non-fatal and has bounded replay bookkeeping, but it does **not** yet reattach explicitly owned
+threads before replay, reconcile buffered reconnect state, or automatically migrate a TUI after a
+planned drain. Natural drain keeps each accepted connection on its original server until that
+connection closes. Remote control transfers exactly once at the retirement boundary; this is
+generation ownership transfer, not transport migration of an active remote client.
+
+### Implementation ledger
+
+The following table is authoritative for this document. A capability is not deployed merely because
+prototype code exists on another branch.
+
+| Area | Implemented in `gabe/fork` and deployed | Still planned or prototype-only |
+|---|---|---|
+| App-server generation lifecycle | Identity, passive status, drain start/status/cancel, admission control, writer leases, idle unload, private generation sockets, retirement | No in-flight turn serialization or cross-process task transfer |
+| Stable router | Connection-affine routing, JSON-RPC inspection, generation selection, active-writer conflict observation, guarded recovery/takeover modes, router-process handover/failback | Authoritative persisted ownership provenance, stable broker/policy-worker split, quiescent policy-worker handoff |
+| TUI recovery | Transport errors remain non-fatal; unrelated broadcast threads are excluded from the TUI-owned reconnect set; overloaded steering is retried | Replay gating until reattachment, explicit owned-thread reattachment, snapshot/event rebase, automatic planned-drain migration |
+| Resource safety | Explicit-vs-implicit app-server subscriptions, idle thread unloading, per-generation FD limit of 8,192 | Admission pressure thresholds and automatic pressure-triggered rollout |
+| Observability and maintenance | Request latency/token telemetry, exact build identity, rollout evidence, Fork Fleet logical patch registry | More operator-facing ownership/pin diagnostics and further router/client module extraction |
+
+The remaining `fix/tui-reconnect-safety` worktree is a prototype source, not a deployable patch
+stack. Its useful reconnect primitives must be ported onto `gabe/fork` with an explicit owned-thread
+set. Its autonomous TUI generation-selection policy must not be merged unchanged because the
+protocol-aware router is now the generation-routing authority.
+
+### Current operational blockers
+
+The deployed data plane is healthy. The 2026-08-14 host-side stale-finalized-handover incident is
+repaired in the source-owned tooling: reconciliation validates against the current installed router,
+archives completed evidence before genuine drift starts another transaction, and Primary and
+Uprising now run the same handover-before-rollout sequence. The repair required no app-server wire
+protocol change and no router restart.
+
+Separately, Fork Fleet registry validation succeeds while a fresh Codex plan fails during target
+revision resolution. The next upstream replay is blocked until `forkctl plan codex --json` resolves
+an immutable target successfully.
 
 ### Delivered release boundary
 
@@ -663,7 +695,7 @@ Each stage is independently reviewable and should remain below the repository's
 change-size guidance. Avoid combining Codex protocol, TUI process replacement,
 and host router implementation in one branch.
 
-### Stage 0: invariants and test harness
+### Stage 0: invariants and test harness — partially complete
 
 - Record exact connection, active-turn, pending-request, and process identity
   observations needed by later gates.
@@ -681,9 +713,9 @@ Exit gate: the harness can detect lost subscription, duplicate events, missing
 completion, wrong-generation connection routing, concurrent rollout writers,
 and SQLite or process-resource ownership violations.
 
-### Stage 1: reconnect identity and thread reattachment
+### Stage 1: reconnect identity and thread reattachment — prototype only
 
-- Add optional initialize server identity and capabilities.
+- Optional initialize server identity and capabilities are implemented.
 - Surface successful reconnects from the remote client.
 - Have the TUI resume all owned threads after same-generation reconnect.
 - Reconcile snapshots without duplicating already-rendered items.
@@ -696,10 +728,10 @@ can answer a pending approval.
 This stage improves ordinary transient disconnect behavior independently of
 rolling upgrades.
 
-### Stage 2: server drain protocol
+### Stage 2: server drain protocol — natural-drain subset complete
 
-- Add drain state, status, notifications, cancellation, and structured
-  `serverDraining` rejection.
+- Drain state, status, cancellation, and structured `serverDraining` rejection are implemented.
+  Planned-drain notification exists only on the prototype branch and is not deployed.
 - Add admission checks for all work-producing RPCs.
 - Expose required drain-completion gauges.
 - Update app-server API documentation and generated schemas.
@@ -707,9 +739,11 @@ rolling upgrades.
 Exit gate: an active turn can be steered and completed while new turn creation
 is consistently rejected; drain completes without a probe/start race.
 
-### Stage 3: stable router and generation lifecycle
+### Stage 3: stable router and generation lifecycle — complete and extended
 
-- Introduce the byte-stream router and private generation sockets.
+- The deployed router began as a byte-stream router and now also observes bounded JSON-RPC metadata
+  for ownership/recovery policy; it still preserves WebSocket frames unchanged.
+- Private generation sockets are deployed.
 - Start candidate processes in dedicated scopes with remote control disabled.
 - Add immutable routing state, candidate health observation, promotion, and
   rollback.
@@ -720,7 +754,7 @@ Exit gate: existing connections remain on old, new connections reach new, and
 rollback affects only new connections while both server processes remain
 healthy and correctly scoped.
 
-### Stage 4: TUI live executable handoff
+### Stage 4: TUI live executable handoff — planned
 
 - Add safe-boundary input queuing.
 - Add the bounded handoff envelope and validation.
@@ -732,7 +766,7 @@ Exit gate: the same terminal pane changes `/proc/<pid>/exe` on Unix, resumes the
 same thread on the candidate, preserves queued input, and does not lose or
 duplicate transcript events.
 
-### Stage 5: remote-control transfer and automated retirement
+### Stage 5: remote-control transfer and automated retirement — complete for natural drain
 
 - Transfer remote-control ownership after local drain.
 - Retire old when all gates are satisfied.
@@ -743,7 +777,7 @@ Exit gate: exactly one remote-control owner is visible throughout; an injected
 candidate or transfer failure returns routing and ownership to old without
 interrupting its active work.
 
-### Stage 6: one-time production bootstrap
+### Stage 6: one-time production bootstrap — complete
 
 - Build and stage the router-capable release.
 - Wait for the existing all-turns-idle safety gate.
