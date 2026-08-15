@@ -9,8 +9,19 @@ chore; the next rebase reorders them back under it. Keep each commit atomic
 `format-patch`ed to a PR.
 
 Current base: **rust-v0.148.0-alpha.12** (`ce9de503e3`; merge-base with
-`gabe/fork` is `902bd9e0`). Target for the next upgrade: **rust-v0.148.0-alpha.18**
+`gabe/fork` is `4af6dc74a0`). Target for the next upgrade: **rust-v0.148.0-alpha.18**
 (`e6bc18b8cd`), 112 upstream commits ahead.
+
+> **Verify the merge-base before every rebase**, per the triage checklist below —
+> do not trust this line. A prior revision of this file recorded `902bd9e0`,
+> which is an ancestor of both the tag and the branch but is *not* the boundary;
+> rebasing with `--onto <newtag> 902bd9e0` would have replayed an extra upstream
+> commit as fork work. Confirm with:
+>
+> ```bash
+> git merge-base rust-v0.148.0-alpha.12 gabe/fork
+> git merge-base --is-ancestor <candidate> gabe/fork
+> ```
 
 > **Reconciled 2026-08-14** against the real stack: 38 commits on
 > `rust-v0.148.0-alpha.12..gabe/fork`. This revision folds in the live
