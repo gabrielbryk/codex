@@ -278,6 +278,18 @@ pub(crate) trait HistoryCell: std::fmt::Debug + Send + Sync + Any {
         false
     }
 
+    /// Returns the app-server item id of the assistant message this cell renders.
+    ///
+    /// Transcript cells produced for one assistant message carry that message's
+    /// item id so consolidation can replace every cell already rendered for the
+    /// item, even when an out-of-band transcript write (a replayed hook,
+    /// approval, or notice) has split the streamed run. Position-based matching
+    /// alone would orphan the already-rendered prefix and then append the
+    /// authoritative full text, duplicating it.
+    fn agent_message_item_id(&self) -> Option<&str> {
+        None
+    }
+
     /// Returns a coarse "animation tick" when transcript output is time-dependent.
     ///
     /// The transcript overlay caches the rendered output of the in-flight active cell, so cells

@@ -751,7 +751,7 @@ impl TranscriptOverlay {
         }
     }
 
-    /// Replace a range of committed cells with a single consolidated cell.
+    /// Replace a range of committed cells with their consolidated replacement.
     ///
     /// Mirrors the splice performed on `App::transcript_cells` during
     /// `ConsolidateAgentMessage` so the Ctrl+T overlay stays in sync with the
@@ -761,7 +761,7 @@ impl TranscriptOverlay {
     pub(crate) fn consolidate_cells(
         &mut self,
         range: std::ops::Range<usize>,
-        consolidated: Arc<dyn HistoryCell>,
+        replacement: Vec<Arc<dyn HistoryCell>>,
     ) {
         let follow_bottom = self.view.is_scrolled_to_bottom();
         // Clamp the range to the overlay's cell count to avoid panic if the overlay has fewer
@@ -770,17 +770,17 @@ impl TranscriptOverlay {
         let clamped_start = range.start.min(clamped_end);
         if clamped_start < clamped_end {
             let removed = clamped_end - clamped_start;
+            let shrink = removed.saturating_sub(replacement.len());
             if let Some(highlight_cell) = self.highlight_cell.as_mut()
                 && *highlight_cell >= clamped_start
             {
                 if *highlight_cell < clamped_end {
                     *highlight_cell = clamped_start;
                 } else {
-                    *highlight_cell = highlight_cell.saturating_sub(removed.saturating_sub(1));
+                    *highlight_cell = highlight_cell.saturating_sub(shrink);
                 }
             }
-            self.cells
-                .splice(clamped_start..clamped_end, std::iter::once(consolidated));
+            self.cells.splice(clamped_start..clamped_end, replacement);
             if self
                 .highlight_cell
                 .is_some_and(|highlight_cell| highlight_cell >= self.cells.len())
@@ -1618,9 +1618,9 @@ mod tests {
 
         overlay.consolidate_cells(
             2..5,
-            Arc::new(TestCell {
+            vec![Arc::new(TestCell {
                 lines: vec![Line::from("consolidated")],
-            }),
+            })],
         );
 
         assert_eq!(
@@ -1645,9 +1645,9 @@ mod tests {
 
         overlay.consolidate_cells(
             2..5,
-            Arc::new(TestCell {
+            vec![Arc::new(TestCell {
                 lines: vec![Line::from("consolidated")],
-            }),
+            })],
         );
 
         assert_eq!(

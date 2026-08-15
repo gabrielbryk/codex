@@ -464,14 +464,18 @@ impl App {
                 inline_visualization_context,
                 scrollback_reflow,
                 deferred_history_cell,
+                agent_message_item_id,
             } => {
                 self.handle_consolidate_agent_message(
                     tui,
-                    source,
-                    cwd,
-                    inline_visualization_context,
-                    scrollback_reflow,
-                    deferred_history_cell,
+                    super::agent_message_consolidation::AgentMessageConsolidation {
+                        source,
+                        cwd,
+                        inline_visualization_context,
+                        scrollback_reflow,
+                        deferred_history_cell,
+                        agent_message_item_id,
+                    },
                 )?;
                 self.chat_widget.note_stream_consolidation_completed();
                 self.insert_pending_usage_output_after_stream_shutdown(tui);
@@ -489,7 +493,7 @@ impl App {
                         .splice(start..end, std::iter::once(consolidated.clone()));
 
                     if let Some(Overlay::Transcript(t)) = &mut self.overlay {
-                        t.consolidate_cells(start..end, consolidated.clone());
+                        t.consolidate_cells(start..end, vec![consolidated.clone()]);
                         tui.frame_requester().schedule_frame();
                     }
 

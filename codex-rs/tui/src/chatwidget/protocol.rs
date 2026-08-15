@@ -76,7 +76,9 @@ impl ChatWidget {
                 self.handle_item_completed_notification(notification, replay_kind);
             }
             ServerNotification::AgentMessageDelta(notification) => {
-                self.on_agent_message_delta(notification.delta);
+                let item_id = (!notification.item_id.is_empty())
+                    .then(|| std::sync::Arc::from(notification.item_id.as_str()));
+                self.on_agent_message_delta(item_id, notification.delta);
             }
             ServerNotification::PlanDelta(notification) => self.on_plan_delta(notification.delta),
             ServerNotification::ReasoningSummaryTextDelta(notification) => {
