@@ -351,10 +351,17 @@ server rollout request:
 
 ```bash
 codex-use-local-build --repo <candidate-worktree> --sha <full-sha> --rollout \
-  --expect serverDrainV1 --expect threadWriterLeaseV1
+  --expect 'server/drain/start' --expect threadWriterLeaseV1
 codex-app-server-rollout apply-pending
 codex-app-server-rollout status | jq
 ```
+
+Use the RPC method literal `server/drain/start` as the drain marker, not the `serverDrainV1`
+capability string. LLVM materializes that capability as immediate stores rather than one contiguous
+data string in an optimized build, so the packager's `strings` check reports a false negative and
+fails an otherwise valid release build. Note that `codex-use-local-build` also moves the
+`standalone/current` pointer, so newly launched TUIs pick up the package immediately, before any
+server generation is promoted.
 
 `desired-generation.json` remains present until the replacement is active and the old server has
 proved its drain barrier. A nonzero draining count is safe deferred completion. An error or
