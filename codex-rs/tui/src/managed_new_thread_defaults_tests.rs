@@ -4,7 +4,17 @@ use codex_protocol::openai_models::ReasoningEffort;
 use pretty_assertions::assert_eq;
 
 async fn test_config() -> Config {
-    let codex_home = tempfile::tempdir().expect("tempdir").keep();
+    // Nested under one fixed parent: .keep() disables the destructor, so each
+    // call leaks a directory permanently. See the note in
+    // chatwidget/tests/helpers.rs -- same leak, same reason for nesting rather
+    // than threading the guard out.
+    let parent = std::env::temp_dir().join("managed-new-thread-tests");
+    std::fs::create_dir_all(&parent).expect("tempdir parent");
+    let codex_home = tempfile::Builder::new()
+        .prefix("run-")
+        .tempdir_in(&parent)
+        .expect("tempdir")
+        .keep();
     ConfigBuilder::default()
         .codex_home(codex_home)
         .build()
