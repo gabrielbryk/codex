@@ -51,6 +51,7 @@ use crate::multi_agents::AgentPickerThreadEntry;
 use crate::multi_agents::SubAgentActivityDisplay;
 use assert_matches::assert_matches;
 
+use crate::app::agent_message_consolidation::AgentMessageConsolidation;
 use crate::app_command::AppCommand as Op;
 use crate::app_event::ConsolidationScrollbackReflow;
 use crate::diff_model::FileChange;
@@ -5907,11 +5908,14 @@ async fn directive_only_completion_removes_streamed_directive() -> Result<()> {
     let mut tui = crate::tui::test_support::make_test_tui()?;
     app.handle_consolidate_agent_message(
         &mut tui,
-        String::new(),
-        PathBuf::from("/tmp"),
-        /*inline_visualization_context*/ None,
-        ConsolidationScrollbackReflow::Required,
-        /*deferred_history_cell*/ None,
+        AgentMessageConsolidation {
+            source: String::new(),
+            cwd: PathBuf::from("/tmp"),
+            inline_visualization_context: None,
+            scrollback_reflow: ConsolidationScrollbackReflow::Required,
+            deferred_history_cell: None,
+            agent_message_item_id: None,
+        },
     )?;
 
     let rendered = app.render_transcript_lines_for_reflow(/*width*/ 80);
@@ -5952,12 +5956,16 @@ async fn required_stream_reflow_during_capped_initial_replay_survives_transcript
     let mut tui = crate::tui::test_support::make_test_tui()?;
     app.handle_consolidate_agent_message(
         &mut tui,
-        "Final answer:\n\n| Pattern | Outcome |\n| --- | --- |\n| Table tail | Preserved |"
-            .to_string(),
-        PathBuf::from("/tmp"),
-        /*inline_visualization_context*/ None,
-        ConsolidationScrollbackReflow::Required,
-        /*deferred_history_cell*/ None,
+        AgentMessageConsolidation {
+            source:
+                "Final answer:\n\n| Pattern | Outcome |\n| --- | --- |\n| Table tail | Preserved |"
+                    .to_string(),
+            cwd: PathBuf::from("/tmp"),
+            inline_visualization_context: None,
+            scrollback_reflow: ConsolidationScrollbackReflow::Required,
+            deferred_history_cell: None,
+            agent_message_item_id: None,
+        },
     )?;
     app.open_transcript_overlay(&mut tui);
     assert!(tui.is_alt_screen_active());

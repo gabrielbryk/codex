@@ -7,6 +7,7 @@ use crate::terminal_hyperlinks::remap_wrapped_line;
 use crate::wrapping::url_preserving_wrap_options;
 use crate::wrapping::word_wrap_line;
 use std::borrow::Cow;
+use std::sync::Arc;
 
 #[derive(Debug)]
 pub(crate) struct UserHistoryCell {
@@ -370,6 +371,7 @@ impl HistoryCell for ReasoningSummaryCell {
 pub(crate) struct AgentMessageCell {
     lines: Vec<HyperlinkLine>,
     is_first_line: bool,
+    agent_message_item_id: Option<Arc<str>>,
 }
 
 impl AgentMessageCell {
@@ -378,13 +380,19 @@ impl AgentMessageCell {
         Self {
             lines: plain_hyperlink_lines(lines),
             is_first_line,
+            agent_message_item_id: None,
         }
     }
 
-    pub(crate) fn new_hyperlink_lines(lines: Vec<HyperlinkLine>, is_first_line: bool) -> Self {
+    pub(crate) fn new_hyperlink_lines(
+        lines: Vec<HyperlinkLine>,
+        is_first_line: bool,
+        agent_message_item_id: Option<Arc<str>>,
+    ) -> Self {
         Self {
             lines,
             is_first_line,
+            agent_message_item_id,
         }
     }
 }
@@ -427,6 +435,10 @@ impl HistoryCell for AgentMessageCell {
     fn is_stream_continuation(&self) -> bool {
         !self.is_first_line
     }
+
+    fn agent_message_item_id(&self) -> Option<&str> {
+        self.agent_message_item_id.as_deref()
+    }
 }
 
 /// A consolidated agent message cell that stores raw markdown source and re-renders from it.
@@ -449,6 +461,7 @@ pub(crate) struct AgentMarkdownCell {
     cwd: PathBuf,
     inline_visualization_context: Option<crate::inline_visualization::InlineVisualizationContext>,
     rendered_lines: Option<MarkdownRenderCache>,
+    agent_message_item_id: Option<Arc<str>>,
 }
 
 impl AgentMarkdownCell {
@@ -463,6 +476,7 @@ impl AgentMarkdownCell {
             markdown_source,
             cwd,
             /*inline_visualization_context*/ None,
+            /*agent_message_item_id*/ None,
         )
     }
 
@@ -472,6 +486,7 @@ impl AgentMarkdownCell {
         inline_visualization_context: Option<
             crate::inline_visualization::InlineVisualizationContext,
         >,
+        agent_message_item_id: Option<Arc<str>>,
     ) -> Self {
         let rendered_lines =
             (!crate::inline_visualization::contains_inline_visualization(&markdown_source))
@@ -481,6 +496,7 @@ impl AgentMarkdownCell {
             cwd: cwd.to_path_buf(),
             inline_visualization_context,
             rendered_lines,
+            agent_message_item_id,
         }
     }
 }
@@ -503,6 +519,10 @@ fn normalize_whitespace_only_hyperlink_lines(mut lines: Vec<HyperlinkLine>) -> V
 impl HistoryCell for AgentMarkdownCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
         visible_lines(self.display_hyperlink_lines(width))
+    }
+
+    fn agent_message_item_id(&self) -> Option<&str> {
+        self.agent_message_item_id.as_deref()
     }
 
     fn display_hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {

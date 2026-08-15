@@ -512,7 +512,7 @@ async fn steer_enter_uses_pending_steers_while_final_answer_stream_is_active() {
     chat.on_task_started();
     // Keep the assistant stream open (no commit tick/finalize) to model the repro window:
     // user presses Enter while the final answer is still streaming.
-    chat.on_agent_message_delta("Final answer line\n".to_string());
+    chat.on_agent_message_delta(/*item_id*/ None, "Final answer line\n".to_string());
 
     chat.bottom_pane.set_composer_text(
         "queued while streaming".to_string(),
@@ -700,7 +700,7 @@ async fn steer_enter_during_final_stream_preserves_follow_up_prompts_in_order() 
     chat.on_task_started();
     // Simulate "dead mode" repro timing by keeping a final-answer stream active while the
     // user submits multiple follow-up prompts.
-    chat.on_agent_message_delta("Final answer line\n".to_string());
+    chat.on_agent_message_delta(/*item_id*/ None, "Final answer line\n".to_string());
 
     chat.bottom_pane
         .set_composer_text("first follow-up".to_string(), Vec::new(), Vec::new());
@@ -784,6 +784,7 @@ async fn manual_interrupt_restores_pending_steers_to_composer() {
     chat.thread_id = Some(ThreadId::new());
     chat.on_task_started();
     chat.on_agent_message_delta(
+        /*item_id*/ None,
         "Final answer line
 "
         .to_string(),
@@ -828,7 +829,7 @@ async fn esc_interrupt_sends_all_pending_steers_immediately_and_keeps_existing_d
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.thread_id = Some(ThreadId::new());
     chat.on_task_started();
-    chat.on_agent_message_delta("Final answer line\n".to_string());
+    chat.on_agent_message_delta(/*item_id*/ None, "Final answer line\n".to_string());
 
     chat.bottom_pane
         .set_composer_text("first pending steer".to_string(), Vec::new(), Vec::new());
@@ -930,7 +931,7 @@ async fn manual_interrupt_restores_pending_steer_mention_bindings_to_composer() 
     let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.thread_id = Some(ThreadId::new());
     chat.on_task_started();
-    chat.on_agent_message_delta("Final answer line\n".to_string());
+    chat.on_agent_message_delta(/*item_id*/ None, "Final answer line\n".to_string());
 
     let mention_bindings = vec![MentionBinding {
         sigil: '$',
@@ -974,6 +975,7 @@ async fn manual_interrupt_restores_pending_steers_before_queued_messages() {
     chat.thread_id = Some(ThreadId::new());
     chat.on_task_started();
     chat.on_agent_message_delta(
+        /*item_id*/ None,
         "Final answer line
 "
         .to_string(),

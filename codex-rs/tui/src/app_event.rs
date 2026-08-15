@@ -869,12 +869,16 @@ pub(crate) enum AppEvent {
     /// terminal scrollback to be rebuilt from the consolidated source-backed cell.
     /// `deferred_history_cell` lets callers add the final stream tail to the
     /// transcript without first writing its provisional render to scrollback.
+    /// `agent_message_item_id` identifies the assistant message being
+    /// consolidated so the handler can replace every cell already rendered for
+    /// that item, even when an out-of-band transcript write split the run.
     ConsolidateAgentMessage {
         source: String,
         cwd: PathBuf,
         inline_visualization_context: Option<InlineVisualizationContext>,
         scrollback_reflow: ConsolidationScrollbackReflow,
         deferred_history_cell: Option<Box<dyn HistoryCell>>,
+        agent_message_item_id: Option<std::sync::Arc<str>>,
     },
 
     /// Replace the contiguous run of streaming `ProposedPlanStreamCell`s at the

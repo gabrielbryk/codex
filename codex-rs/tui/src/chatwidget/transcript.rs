@@ -54,6 +54,11 @@ pub(super) struct TranscriptState {
     pub(super) plan_delta_buffer: String,
     /// True while a plan item is streaming.
     pub(super) plan_item_active: bool,
+    /// App-server item id of the assistant message currently streaming.
+    ///
+    /// Survives mid-item stream flushes so every transcript cell rendered for
+    /// the message can be matched by identity at consolidation time.
+    pub(super) streaming_agent_message_item_id: Option<std::sync::Arc<str>>,
 }
 
 impl TranscriptState {
@@ -99,6 +104,7 @@ impl TranscriptState {
         self.latest_proposed_plan_markdown = None;
         self.plan_delta_buffer.clear();
         self.plan_item_active = false;
+        self.streaming_agent_message_item_id = None;
     }
 }
 

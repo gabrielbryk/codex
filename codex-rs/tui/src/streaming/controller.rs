@@ -47,6 +47,7 @@ use ratatui::prelude::Stylize;
 use ratatui::text::Line;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -475,6 +476,11 @@ impl StreamCore {
 pub(crate) struct StreamController {
     core: StreamCore,
     header_emitted: bool,
+    /// App-server item id of the assistant message being streamed.
+    ///
+    /// Stamped onto every emitted cell so transcript consolidation can find all
+    /// cells already rendered for this item instead of guessing from position.
+    agent_message_item_id: Option<Arc<str>>,
 }
 
 impl StreamController {
@@ -502,7 +508,19 @@ impl StreamController {
         Self {
             core: StreamCore::new(width, cwd, render_mode, inline_visualization_context),
             header_emitted: false,
+            agent_message_item_id: None,
         }
+    }
+
+    /// Records the item id for the assistant message currently being streamed.
+    pub(crate) fn set_agent_message_item_id(&mut self, item_id: Option<Arc<str>>) {
+        if item_id.is_some() {
+            self.agent_message_item_id = item_id;
+        }
+    }
+
+    pub(crate) fn agent_message_item_id(&self) -> Option<Arc<str>> {
+        self.agent_message_item_id.clone()
     }
 
     pub(crate) fn push(&mut self, delta: &str) -> bool {
@@ -581,11 +599,15 @@ impl StreamController {
             return None;
         }
         Some(Box::new(
-            history_cell::AgentMessageCell::new_hyperlink_lines(lines, {
-                let header_emitted = self.header_emitted;
-                self.header_emitted = true;
-                !header_emitted
-            }),
+            history_cell::AgentMessageCell::new_hyperlink_lines(
+                lines,
+                {
+                    let header_emitted = self.header_emitted;
+                    self.header_emitted = true;
+                    !header_emitted
+                },
+                self.agent_message_item_id.clone(),
+            ),
         ))
     }
 }
