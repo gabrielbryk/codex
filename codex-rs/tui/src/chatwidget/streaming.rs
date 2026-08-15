@@ -20,12 +20,21 @@ impl ChatWidget {
     }
 
     pub(super) fn flush_answer_stream_with_separator(&mut self) {
-        self.flush_answer_stream(/*completed_message*/ None);
+        self.flush_answer_stream(
+            /*completed_message*/ None, /*completed_item_id*/ None,
+        );
     }
 
-    fn flush_answer_stream(&mut self, completed_message: Option<&str>) {
+    fn flush_answer_stream(
+        &mut self,
+        completed_message: Option<&str>,
+        completed_item_id: Option<Arc<str>>,
+    ) {
         let had_stream_controller = self.stream_controller.is_some();
         if let Some(mut controller) = self.stream_controller.take() {
+            let agent_message_item_id = completed_item_id
+                .or_else(|| controller.agent_message_item_id())
+                .or_else(|| self.transcript.streaming_agent_message_item_id.clone());
             let had_live_tail = controller.has_live_tail();
             self.clear_active_stream_tail();
             let (cell, streamed_source) = controller.finalize();
@@ -76,6 +85,7 @@ impl ChatWidget {
                     inline_visualization_context,
                     scrollback_reflow,
                     deferred_history_cell,
+                    agent_message_item_id,
                 });
             }
         }
@@ -124,22 +134,27 @@ impl ChatWidget {
         self.status_state.pending_status_indicator_restore = false;
     }
 
-    pub(super) fn finalize_completed_assistant_message(&mut self, message: Option<&str>) {
+    pub(super) fn finalize_completed_assistant_message(
+        &mut self,
+        message: Option<&str>,
+        item_id: Option<Arc<str>>,
+    ) {
         if self.stream_controller.is_none()
             && let Some(message) = message
             && !message.is_empty()
         {
-            self.handle_streaming_delta(message.to_string());
+            self.handle_streaming_delta_for_item(item_id.clone(), message.to_string());
         }
         // Item completion is authoritative. Use it for consolidation so any
         // deltas dropped by a saturated transport cannot truncate the transcript.
-        self.flush_answer_stream(message);
+        self.flush_answer_stream(message, item_id);
+        self.transcript.streaming_agent_message_item_id = None;
         self.handle_stream_finished();
         self.request_redraw();
     }
 
-    pub(super) fn on_agent_message_delta(&mut self, delta: String) {
-        self.handle_streaming_delta(delta);
+    pub(super) fn on_agent_message_delta(&mut self, item_id: Option<Arc<str>>, delta: String) {
+        self.handle_streaming_delta_for_item(item_id, delta);
     }
 
     pub(super) fn on_plan_delta(&mut self, delta: String) {
@@ -330,7 +345,10 @@ impl ChatWidget {
             }
         }
         let parsed = parse_assistant_markdown(&message, self.config.cwd.as_path());
-        self.finalize_completed_assistant_message(Some(parsed.visible_markdown.as_str()));
+        self.finalize_completed_assistant_message(
+            Some(parsed.visible_markdown.as_str()),
+            Some(Arc::from(item.id.as_str())),
+        );
         if matches!(item.phase, Some(MessagePhase::FinalAnswer) | None)
             && !parsed.visible_markdown.is_empty()
         {
@@ -447,8 +465,29 @@ impl ChatWidget {
         self.flush_interrupt_queue();
     }
 
+    #[cfg(test)]
     #[inline]
     pub(super) fn handle_streaming_delta(&mut self, delta: String) {
+        self.handle_streaming_delta_for_item(/*item_id*/ None, delta);
+    }
+
+    /// Streams `delta` for the assistant message identified by `item_id`.
+    ///
+    /// The item id is remembered on the controller so every emitted transcript
+    /// cell carries it. A mid-item flush (a replayed hook, an approval, a tool
+    /// call) starts a fresh controller for the *same* item; without the stamp,
+    /// consolidation could only see the trailing run and would leave the
+    /// already-rendered prefix behind next to the authoritative full message.
+    #[inline]
+    pub(super) fn handle_streaming_delta_for_item(
+        &mut self,
+        item_id: Option<Arc<str>>,
+        delta: String,
+    ) {
+        if item_id.is_some() {
+            self.transcript.streaming_agent_message_item_id = item_id.clone();
+        }
+        let item_id = item_id.or_else(|| self.transcript.streaming_agent_message_item_id.clone());
         if !delta.is_empty() {
             self.mark_safety_buffering_agent_message_started();
         }
@@ -479,6 +518,9 @@ impl ChatWidget {
                 self.history_render_mode(),
                 inline_visualization_context,
             ));
+        }
+        if let Some(controller) = self.stream_controller.as_mut() {
+            controller.set_agent_message_item_id(item_id);
         }
         if let Some(controller) = self.stream_controller.as_mut()
             && controller.push(&delta)

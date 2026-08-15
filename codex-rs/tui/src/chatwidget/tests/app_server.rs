@@ -201,7 +201,7 @@ async fn safety_buffering_remains_visible_until_turn_completes() {
     );
     assert!(chat.can_retry_safety_buffered_turn(turn_id));
 
-    chat.on_agent_message_delta("Visible response".to_string());
+    chat.on_agent_message_delta(/*item_id*/ None, "Visible response".to_string());
 
     assert!(!chat.can_retry_safety_buffered_turn(turn_id));
     assert!(render_bottom_popup(&chat, /*width*/ 80).contains(SAFETY_BUFFERING_HEADER_TEXT));

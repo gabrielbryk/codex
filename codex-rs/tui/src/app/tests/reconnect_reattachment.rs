@@ -195,3 +195,309 @@ fn reconnect_failure_message_snapshot() {
     "
     );
 }
+
+/// Drives the `AppEvent`s a live `App` loop would consume so `transcript_cells`
+/// reflects what the transcript actually renders.
+fn drain_transcript_events(
+    app: &mut App,
+    tui: &mut crate::tui::Tui,
+    app_event_rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+) {
+    while let Ok(event) = app_event_rx.try_recv() {
+        match event {
+            AppEvent::InsertHistoryCell(cell) => app.insert_history_cell(tui, cell),
+            AppEvent::ConsolidateAgentMessage {
+                source,
+                cwd,
+                inline_visualization_context,
+                scrollback_reflow,
+                deferred_history_cell,
+                agent_message_item_id,
+            } => app
+                .handle_consolidate_agent_message(
+                    tui,
+                    AgentMessageConsolidation {
+                        source,
+                        cwd,
+                        inline_visualization_context,
+                        scrollback_reflow,
+                        deferred_history_cell,
+                        agent_message_item_id,
+                    },
+                )
+                .expect("agent message consolidation should succeed"),
+            _ => {}
+        }
+    }
+}
+
+fn transcript_text(app: &App) -> Vec<String> {
+    app.transcript_cells
+        .iter()
+        .map(|cell| lines_to_single_string(&cell.transcript_lines(/*width*/ 200)))
+        .collect()
+}
+
+/// Replayed by `reconcile_queued_events_after_session_refresh`: hook notifications
+/// deliberately survive a session refresh, and delivering one finalizes the active
+/// assistant stream mid-item.
+fn reconnect_hook_started_notification(thread_id: ThreadId, turn_id: &str) -> ServerNotification {
+    ServerNotification::HookStarted(codex_app_server_protocol::HookStartedNotification {
+        thread_id: thread_id.to_string(),
+        turn_id: Some(turn_id.to_string()),
+        run: codex_app_server_protocol::HookRunSummary {
+            id: "user-prompt-submit:0:/hooks.json".to_string(),
+            event_name: codex_app_server_protocol::HookEventName::UserPromptSubmit,
+            handler_type: codex_app_server_protocol::HookHandlerType::Command,
+            execution_mode: codex_app_server_protocol::HookExecutionMode::Sync,
+            scope: codex_app_server_protocol::HookScope::Turn,
+            source_path: test_path_buf("/hooks.json").abs(),
+            source: codex_app_server_protocol::HookSource::User,
+            display_order: 0,
+            status: codex_app_server_protocol::HookRunStatus::Running,
+            status_message: Some("checking input policy".to_string()),
+            started_at: 1,
+            completed_at: None,
+            duration_ms: None,
+            entries: Vec::new(),
+        },
+    })
+}
+
+fn agent_message_completed_notification(
+    thread_id: ThreadId,
+    turn_id: &str,
+    item_id: &str,
+    text: String,
+) -> ServerNotification {
+    ServerNotification::ItemCompleted(codex_app_server_protocol::ItemCompletedNotification {
+        thread_id: thread_id.to_string(),
+        turn_id: turn_id.to_string(),
+        completed_at_ms: 0,
+        item: ThreadItem::AgentMessage {
+            id: item_id.to_string(),
+            text,
+            phase: None,
+            memory_citation: None,
+        },
+    })
+}
+
+struct StreamingReattachmentFixture {
+    app: App,
+    app_event_rx: tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+    tui: crate::tui::Tui,
+    app_server: AppServerSession,
+    thread_id: ThreadId,
+}
+
+impl StreamingReattachmentFixture {
+    async fn new(rollout_stamp: &str, rollout_time: &str) -> Result<Self> {
+        let (mut app, app_event_rx, _op_rx) = make_test_app_with_channels().await;
+        let tui = crate::tui::test_support::make_test_tui()?;
+        let thread_id = ThreadId::from_string(
+            &app_test_support::create_fake_rollout(
+                app.config.codex_home.as_path(),
+                rollout_stamp,
+                rollout_time,
+                "Reconnect streaming",
+                Some(&app.config.model_provider_id),
+                /*git_info*/ None,
+            )
+            .expect("streaming reconnect rollout should be created"),
+        )?;
+        let mut app_server =
+            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+        let started = app_server
+            .resume_thread(
+                app.config.clone(),
+                thread_id,
+                crate::app_server_session::ResumeModelSettings::RestoreFromThread,
+            )
+            .await?;
+        app.primary_thread_id = Some(thread_id);
+        app.active_thread_id = Some(thread_id);
+        app.attached_thread_ids.insert(thread_id);
+        app.thread_event_channels.insert(
+            thread_id,
+            ThreadEventChannel::new_with_session(
+                /*capacity*/ 16,
+                started.session.clone(),
+                started.turns.clone(),
+            ),
+        );
+        app.active_thread_rx = app
+            .thread_event_channels
+            .get_mut(&thread_id)
+            .expect("thread channel")
+            .receiver
+            .take();
+        app.chat_widget.handle_thread_session_quiet(started.session);
+        Ok(Self {
+            app,
+            app_event_rx,
+            tui,
+            app_server,
+            thread_id,
+        })
+    }
+
+    fn drain(&mut self) {
+        drain_transcript_events(&mut self.app, &mut self.tui, &mut self.app_event_rx);
+    }
+
+    fn start_turn(&mut self, turn_id: &str) {
+        self.app.chat_widget.handle_server_notification(
+            ServerNotification::TurnStarted(TurnStartedNotification {
+                thread_id: self.thread_id.to_string(),
+                turn: test_turn(turn_id, TurnStatus::InProgress, Vec::new()),
+            }),
+            /*replay_kind*/ None,
+        );
+        self.drain();
+        // Drop the session/turn framing cells so assertions describe the streamed item.
+        self.app.transcript_cells.clear();
+    }
+
+    fn stream_counts(
+        &mut self,
+        turn_id: &str,
+        item_id: &str,
+        counts: std::ops::RangeInclusive<u32>,
+    ) {
+        for n in counts {
+            self.app.chat_widget.handle_server_notification(
+                super::agent_message_delta_notification(
+                    self.thread_id,
+                    turn_id,
+                    item_id,
+                    &format!("{n}\n"),
+                ),
+                /*replay_kind*/ None,
+            );
+        }
+        self.drain();
+    }
+
+    fn complete_item(
+        &mut self,
+        turn_id: &str,
+        item_id: &str,
+        counts: std::ops::RangeInclusive<u32>,
+    ) {
+        let text: String = counts.map(|n| format!("{n}\n")).collect();
+        self.app.chat_widget.handle_server_notification(
+            agent_message_completed_notification(self.thread_id, turn_id, item_id, text),
+            /*replay_kind*/ None,
+        );
+        self.drain();
+    }
+}
+
+/// A transport sever mid-item must not make the transcript render the streamed
+/// prefix a second time when the authoritative item completion arrives.
+///
+/// Reattachment replays the interactive/hook events that
+/// `event_survives_session_refresh` preserves. Delivering one finalizes the live
+/// assistant stream mid-item, which used to leave the already-rendered prefix
+/// outside the trailing streaming run that consolidation replaces, so the
+/// authoritative full text landed next to it.
+#[tokio::test]
+async fn reattachment_renders_a_streamed_item_exactly_once() -> Result<()> {
+    let mut fixture =
+        StreamingReattachmentFixture::new("2026-08-15T10-00-00", "2026-08-15T10:00:00Z").await?;
+    fixture.start_turn("turn-stream");
+    fixture.stream_counts("turn-stream", "item-stream", 1..=9);
+    pretty_assertions::assert_eq!(
+        transcript_text(&fixture.app).join("\n").contains("9"),
+        true,
+        "the streamed prefix should already be rendered before the sever"
+    );
+
+    let failures = fixture
+        .app
+        .reattach_after_reconnect(
+            &mut fixture.app_server,
+            codex_app_server_client::ReconnectEpoch::FIRST,
+            /*previous*/ None,
+            /*current*/ None,
+        )
+        .await;
+    pretty_assertions::assert_eq!(failures, Vec::<String>::new());
+    fixture.drain();
+
+    fixture.app.handle_thread_event_now(
+        crate::app::thread_events::ThreadBufferedEvent::Notification(Box::new(
+            reconnect_hook_started_notification(fixture.thread_id, "turn-stream"),
+        )),
+    );
+    fixture.drain();
+
+    fixture.stream_counts("turn-stream", "item-stream", 10..=15);
+    fixture.complete_item("turn-stream", "item-stream", 1..=15);
+
+    let expected: String = (1..=15)
+        .map(|n| format!("{n}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let rendered = transcript_text(&fixture.app);
+    let assistant_cells = rendered
+        .iter()
+        .filter(|text| text.contains('1') && text.contains('9'))
+        .count();
+    pretty_assertions::assert_eq!(
+        assistant_cells,
+        1,
+        "the streamed item must be rendered once, saw: {rendered:#?}"
+    );
+    pretty_assertions::assert_eq!(
+        rendered
+            .last()
+            .map(|text| text.replace("• ", "").replace("  ", "")),
+        Some(expected),
+        "the surviving cell must carry the full authoritative message"
+    );
+    fixture.app_server.shutdown().await?;
+    Ok(())
+}
+
+/// The de-duplication must not swing into dropping transcript content: an
+/// unrelated notice written while the item was still streaming is not part of
+/// the message and has been rendered nowhere else, so it must survive.
+#[tokio::test]
+async fn reattachment_keeps_transcript_notices_interleaved_with_a_streamed_item() -> Result<()> {
+    let mut fixture =
+        StreamingReattachmentFixture::new("2026-08-15T10-00-01", "2026-08-15T10:00:01Z").await?;
+    fixture.start_turn("turn-notice");
+    fixture.stream_counts("turn-notice", "item-notice", 1..=5);
+
+    fixture
+        .app
+        .chat_widget
+        .add_info_message("App-server reconnected".to_string(), /*hint*/ None);
+    fixture.drain();
+
+    fixture.stream_counts("turn-notice", "item-notice", 6..=8);
+    fixture.complete_item("turn-notice", "item-notice", 1..=8);
+
+    let rendered = transcript_text(&fixture.app);
+    pretty_assertions::assert_eq!(
+        rendered
+            .iter()
+            .filter(|text| text.contains("App-server reconnected"))
+            .count(),
+        1,
+        "the interleaved notice must survive consolidation, saw: {rendered:#?}"
+    );
+    let assistant_cells = rendered
+        .iter()
+        .filter(|text| text.contains('8') && text.contains('1'))
+        .count();
+    pretty_assertions::assert_eq!(
+        assistant_cells,
+        1,
+        "the streamed item must be rendered once, saw: {rendered:#?}"
+    );
+    fixture.app_server.shutdown().await?;
+    Ok(())
+}

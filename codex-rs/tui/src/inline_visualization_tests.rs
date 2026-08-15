@@ -295,6 +295,7 @@ fn finalized_agent_cell_replays_visualization_link() {
         ),
         Path::new("/workspace"),
         Some(context),
+        /*agent_message_item_id*/ None,
     );
 
     let lines = cell.display_hyperlink_lines(/*width*/ 80);
@@ -351,6 +352,7 @@ fn transcript_overlay_remeasures_visualization_when_artifact_becomes_available()
         "::codex-inline-vis{file=\"chart.html\"}".to_string(),
         Path::new("/workspace"),
         Some(context.clone()),
+        /*agent_message_item_id*/ None,
     );
     let mut overlay = TranscriptOverlay::new(vec![Arc::new(cell)], RuntimeKeymap::defaults().pager);
     let area = Rect::new(
@@ -402,6 +404,7 @@ fn agent_code_blocks_preserve_visualization_directive_literals() {
             .to_string(),
         Path::new("/workspace"),
         Some(context),
+        /*agent_message_item_id*/ None,
     );
 
     let text = cell

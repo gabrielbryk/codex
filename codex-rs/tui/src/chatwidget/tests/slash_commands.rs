@@ -1143,7 +1143,7 @@ async fn interrupted_merged_message_history_encodes_mentions_once() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.thread_id = Some(ThreadId::new());
     chat.on_task_started();
-    chat.on_agent_message_delta("Final answer line\n".to_string());
+    chat.on_agent_message_delta(/*item_id*/ None, "Final answer line\n".to_string());
     let text = "use $figma now";
     chat.bottom_pane.set_composer_text_with_mention_bindings(
         text.to_string(),
@@ -1515,7 +1515,7 @@ async fn completed_token_activity_refresh_waits_for_active_stream() {
     set_chatgpt_auth(&mut chat);
 
     let request_id = dispatch_usage_and_expect_refresh(&mut chat, &mut rx);
-    chat.on_agent_message_delta("partial response".to_string());
+    chat.on_agent_message_delta(/*item_id*/ None, "partial response".to_string());
     assert!(chat.usage_history_insertion_blocked());
 
     assert!(
@@ -1545,8 +1545,8 @@ async fn completed_token_activity_refresh_waits_for_queued_stream_consolidation(
     set_chatgpt_auth(&mut chat);
 
     let request_id = dispatch_usage_and_expect_refresh(&mut chat, &mut rx);
-    chat.on_agent_message_delta("partial response".to_string());
-    chat.finalize_completed_assistant_message(/*message*/ None);
+    chat.on_agent_message_delta(/*item_id*/ None, "partial response".to_string());
+    chat.finalize_completed_assistant_message(/*message*/ None, /*item_id*/ None);
     assert!(chat.pending_stream_consolidations > 0);
 
     assert!(

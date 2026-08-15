@@ -131,6 +131,7 @@ pub(crate) fn thread_items_to_transcript_cells(
                         parsed.visible_markdown,
                         cwd.as_path(),
                         inline_visualization_context.clone(),
+                        /*agent_message_item_id*/ None,
                     )));
                 }
             }
