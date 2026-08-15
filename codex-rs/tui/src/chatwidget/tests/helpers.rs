@@ -6,9 +6,25 @@ use pretty_assertions::assert_eq;
 
 pub(super) async fn test_config() -> Config {
     // Start from the built-in defaults so tests do not inherit host/system config.
+    // Nested under ONE fixed parent rather than created at the root of TMPDIR.
+    //
+    // .keep() consumes the TempDir guard, so the destructor never runs and each
+    // call leaks its directory for the lifetime of the machine. Threading the
+    // guard out instead would change test_config's signature and cascade
+    // through make_chatwidget_manual to 803 call sites, which is not a diff
+    // worth carrying on a rebased fork.
+    //
+    // Nesting costs three lines and removes the damage that actually mattered:
+    // the leak was 22,544 entries at the TOP LEVEL of a tmpfs /tmp with a
+    // 1,500,000 inode cap, ~1,170 of them per hour. Past 100% every open() for
+    // a new file returns ENOSPC and unrelated processes wedge mid-write. As one
+    // directory it is a single entry that a cache reaper can own outright, and
+    // the per-run children go with it.
+    let parent = std::env::temp_dir().join("chatwidget-tests");
+    std::fs::create_dir_all(&parent).expect("chatwidget-tests parent");
     let codex_home = tempfile::Builder::new()
-        .prefix("chatwidget-tests-")
-        .tempdir()
+        .prefix("run-")
+        .tempdir_in(&parent)
         .expect("tempdir")
         .keep();
     let mut config =

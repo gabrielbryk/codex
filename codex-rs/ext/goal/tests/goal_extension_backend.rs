@@ -1497,7 +1497,11 @@ fn tool_call(tool_name: &str, call_id: &str, arguments: serde_json::Value) -> To
 }
 
 async fn test_runtime() -> anyhow::Result<Arc<codex_state::StateRuntime>> {
-    let tempdir = TempDir::new()?;
+    // Nested under one fixed parent: .keep() disables the destructor, so each
+    // call leaks a directory permanently. See chatwidget/tests/helpers.rs.
+    let parent = std::env::temp_dir().join("goal-extension-tests");
+    std::fs::create_dir_all(&parent)?;
+    let tempdir = TempDir::new_in(&parent)?;
     codex_state::StateRuntime::init(
         codex_state::SqliteConfig::new_for_testing(tempdir.keep().as_path().abs()),
         "test-provider".to_string(),
