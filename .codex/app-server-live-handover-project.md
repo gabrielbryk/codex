@@ -65,6 +65,21 @@ archives completed evidence before genuine drift starts another transaction, and
 Uprising now run the same handover-before-rollout sequence. The repair required no app-server wire
 protocol change and no router restart.
 
+The 2026-08-16 host reboot exposed a second, adjacent failure class in the same tooling, likewise
+repaired without any wire protocol change. A handover record left in a live phase pins router PIDs
+and their `/proc` start ticks, so after a reboot it could never be finalized or failed back, and
+reconciliation failed permanently rather than converging. Because handover reconcile is sequenced
+before the generation apply inside one rollout oneshot, that unresolvable record stopped Uprising's
+app-server from starting at all for ten hours. Records now carry a boot id and reconciliation
+discards one written under a previous boot.
+
+The same reboot showed that routed generations were launched without the daemon environment file
+that reconciliation compares them against, so every generation reported permanent, unrepairable
+environment drift and reconciliation tried to repair it through a daemon that does not own a routed
+generation. Generation launch now sources that file, and reconciliation defers generation-owned
+backends to the rollout. Both fixes are host-side; see `claude-process-guard` commits `d3f79ea` and
+`cd78ba6`.
+
 Separately, Fork Fleet registry validation succeeds while a fresh Codex plan fails during target
 revision resolution. The next upstream replay is blocked until `forkctl plan codex --json` resolves
 an immutable target successfully.
