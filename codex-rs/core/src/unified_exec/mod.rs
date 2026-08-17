@@ -92,7 +92,10 @@ impl UnifiedExecContext {
 
 #[derive(Debug)]
 pub(crate) struct ExecCommandRequest {
+    /// The model-selected command used for approvals, attribution, and presentation.
     pub command: Vec<String>,
+    /// The command actually passed to the execution backend after host-local wrapping.
+    pub execution_command: Vec<String>,
     pub shell_type: ShellType,
     pub hook_command: String,
     pub process_id: i32,

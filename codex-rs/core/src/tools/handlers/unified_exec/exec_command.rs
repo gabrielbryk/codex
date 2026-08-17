@@ -364,7 +364,8 @@ impl ExecCommandHandler {
         match manager
             .exec_command(
                 ExecCommandRequest {
-                    command: execution_command,
+                    command,
+                    execution_command,
                     shell_type,
                     hook_command: hook_command.clone(),
                     process_id,
