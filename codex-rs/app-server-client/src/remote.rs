@@ -81,6 +81,8 @@ use replay::CLIENT_USER_MESSAGE_ID_FIELD;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(10);
 const RECONNECT_DELAY: Duration = Duration::from_millis(250);
+const SERVER_DRAINING_ERROR_CODE: i64 = -32002;
+const SERVER_DRAINING_ERROR_TYPE: &str = "serverDraining";
 const REMOTE_APP_SERVER_MAX_WEBSOCKET_MESSAGE_SIZE: usize = 128 << 20;
 // Tungstenite still needs an HTTP request URI for the WebSocket handshake;
 // the bytes travel over the Unix socket, not TCP.
@@ -511,7 +513,40 @@ impl RemoteAppServerClient {
                                     }
                                     Ok(JSONRPCMessage::Error(error)) => {
                                         if let Some(pending) = pending_requests.remove(&error.id) {
-                                            let _ = pending.response_tx.send(Ok(Err(error.error)));
+                                            if pending.replay.is_some()
+                                                && is_server_draining_error(&error.error)
+                                            {
+                                                pending_requests.insert(error.id, pending);
+                                                let message = format!(
+                                                    "remote app server at `{endpoint}` is draining"
+                                                );
+                                                park_pending_requests(
+                                                    &mut pending_requests,
+                                                    ErrorKind::ConnectionAborted,
+                                                    &message,
+                                                );
+                                                let _ = stream.close(None).await;
+                                                let Some((next_endpoint, next_stream)) =
+                                                    reconnect_remote_stream(
+                                                        &mut command_rx,
+                                                        &event_tx,
+                                                        &mut reconnect,
+                                                        &initialize_params,
+                                                        &message,
+                                                        &mut pending_requests,
+                                                        &mut reconnect_state,
+                                                    )
+                                                    .await
+                                                else {
+                                                    return;
+                                                };
+                                                endpoint = next_endpoint;
+                                                stream = next_stream;
+                                            } else {
+                                                let _ = pending
+                                                    .response_tx
+                                                    .send(Ok(Err(error.error)));
+                                            }
                                         }
                                     }
                                     Ok(JSONRPCMessage::Notification(notification)) => {
@@ -873,6 +908,22 @@ impl RemoteAppServerClient {
         }
         Ok(())
     }
+}
+
+fn is_server_draining_error(error: &JSONRPCErrorError) -> bool {
+    error.code == SERVER_DRAINING_ERROR_CODE
+        && error
+            .data
+            .as_ref()
+            .and_then(|data| data.get("type"))
+            .and_then(serde_json::Value::as_str)
+            == Some(SERVER_DRAINING_ERROR_TYPE)
+        && error
+            .data
+            .as_ref()
+            .and_then(|data| data.get("retryable"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
 }
 
 async fn reconnect_remote_stream<S, Reconnect, ReconnectFuture>(

@@ -792,6 +792,8 @@ mod tests {
     use codex_app_server_protocol::AccountUpdatedNotification;
     use codex_app_server_protocol::ConfigRequirementsReadResponse;
     use codex_app_server_protocol::GetAccountResponse;
+    use codex_app_server_protocol::JSONRPCError;
+    use codex_app_server_protocol::JSONRPCErrorError;
     use codex_app_server_protocol::JSONRPCMessage;
     use codex_app_server_protocol::JSONRPCRequest;
     use codex_app_server_protocol::JSONRPCResponse;
@@ -2249,6 +2251,94 @@ mod tests {
         accept_async(stream)
             .await
             .expect("reconnect websocket upgrade should succeed")
+    }
+
+    #[tokio::test]
+    async fn remote_turn_start_is_replayed_after_server_starts_draining() {
+        let websocket_url =
+            start_reconnecting_test_remote_server(|mut websocket, listener| async move {
+                expect_remote_initialize(&mut websocket).await;
+                let JSONRPCMessage::Request(first) = read_websocket_message(&mut websocket).await
+                else {
+                    panic!("expected turn/start request");
+                };
+                assert_eq!(first.method, "turn/start");
+                write_websocket_message(
+                    &mut websocket,
+                    JSONRPCMessage::Error(JSONRPCError {
+                        id: first.id.clone(),
+                        error: JSONRPCErrorError {
+                            code: -32002,
+                            message:
+                                "server generation is draining; retry on the replacement generation"
+                                    .to_string(),
+                            data: Some(serde_json::json!({
+                                "type": "serverDraining",
+                                "generation": "old-generation",
+                                "replacementGeneration": "new-generation",
+                                "retryable": true,
+                            })),
+                        },
+                    }),
+                )
+                .await;
+
+                let mut websocket = accept_next_test_remote_connection(&listener).await;
+                expect_remote_initialize(&mut websocket).await;
+                let JSONRPCMessage::Request(replayed) =
+                    read_websocket_message(&mut websocket).await
+                else {
+                    panic!("expected replayed turn/start request");
+                };
+                assert_eq!(replayed, first);
+                write_websocket_message(
+                    &mut websocket,
+                    JSONRPCMessage::Response(JSONRPCResponse {
+                        id: replayed.id,
+                        result: serde_json::to_value(turn_start_response())
+                            .expect("response should serialize"),
+                    }),
+                )
+                .await;
+                let _ = websocket.next().await;
+            })
+            .await;
+
+        let mut client = RemoteAppServerClient::connect(test_remote_connect_args(websocket_url))
+            .await
+            .expect("remote client should connect");
+        let request_handle = client.request_handle();
+        let response = tokio::spawn(async move {
+            request_handle
+                .request(turn_start_request(
+                    RequestId::Integer(1),
+                    Some("submission-1"),
+                ))
+                .await
+        });
+
+        let event = timeout(Duration::from_secs(10), client.next_event())
+            .await
+            .expect("reconnect lifecycle event should arrive")
+            .expect("event stream should stay open");
+        let AppServerEvent::Reconnected { epoch, .. } = event else {
+            panic!("expected reconnected event");
+        };
+        client
+            .finish_reconnect(epoch)
+            .await
+            .expect("reconnect should release the parked request");
+        let response = timeout(Duration::from_secs(10), response)
+            .await
+            .expect("replayed turn/start should resolve before the timeout")
+            .expect("request task should finish")
+            .expect("request transport should succeed")
+            .expect("replayed turn/start should succeed");
+        let response: codex_app_server_protocol::TurnStartResponse =
+            serde_json::from_value(response).expect("response should deserialize");
+        assert_eq!(response, turn_start_response());
+
+        client.shutdown().await.expect("shutdown should complete");
     }
 
     #[tokio::test]
