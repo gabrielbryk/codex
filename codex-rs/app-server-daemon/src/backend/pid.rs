@@ -43,6 +43,8 @@ pub(crate) struct PidBackend {
 struct PidRecord {
     pid: u32,
     process_start_time: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    boot_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -264,10 +266,16 @@ impl PidBackend {
             .id()
             .context("spawned app-server process has no pid")?;
         let record = match read_process_start_time(pid).await {
-            Ok(process_start_time) => PidRecord {
+            Ok(Some(process_start_time)) => PidRecord {
                 pid,
                 process_start_time,
+                boot_id: current_boot_id().await?,
             },
+            Ok(None) => {
+                let _ = self.terminate_process(pid);
+                let _ = fs::remove_file(&self.pid_file).await;
+                bail!("spawned pid-managed app server {pid} has no process start time");
+            }
             Err(err) => {
                 let _ = self.terminate_process(pid);
                 let mut context =
@@ -674,12 +682,20 @@ fn force_terminate_process_group(_pid: u32) -> Result<()> {
 
 #[cfg(unix)]
 async fn process_matches_record(record: &PidRecord) -> Result<bool> {
+    if let (Some(record_boot_id), Some(current_boot_id)) = (
+        record.boot_id.as_deref(),
+        current_boot_id().await?.as_deref(),
+    ) && record_boot_id != current_boot_id
+    {
+        return Ok(false);
+    }
     if !process_exists(record.pid) {
         return Ok(false);
     }
 
     match read_process_start_time(record.pid).await {
-        Ok(start_time) => Ok(start_time == record.process_start_time),
+        Ok(Some(start_time)) => Ok(start_time == record.process_start_time),
+        Ok(None) => Ok(false),
         Err(_err) if !process_exists(record.pid) => Ok(false),
         Err(err) => Err(err),
     }
@@ -797,13 +813,13 @@ async fn inspect_empty_pid_reservation(
 }
 
 #[cfg(unix)]
-async fn read_process_start_time(pid: u32) -> Result<String> {
+async fn read_process_start_time(pid: u32) -> Result<Option<String>> {
     let output = Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "lstart="])
         .output()
         .await
         .context("failed to invoke ps for pid-managed app server")?;
-    if !output.status.success() {
+    if !output.status.success() && (!output.stdout.is_empty() || !output.stderr.is_empty()) {
         bail!("failed to read start time for pid-managed app server {pid}");
     }
 
@@ -811,9 +827,26 @@ async fn read_process_start_time(pid: u32) -> Result<String> {
         .context("pid-managed app server start time was not utf-8")?;
     let start_time = start_time.trim();
     if start_time.is_empty() {
-        bail!("pid-managed app server {pid} has no recorded start time");
+        return Ok(None);
     }
-    Ok(start_time.to_string())
+    Ok(Some(start_time.to_string()))
+}
+
+#[cfg(target_os = "linux")]
+async fn current_boot_id() -> Result<Option<String>> {
+    let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .await
+        .context("failed to read Linux boot ID")?;
+    let boot_id = boot_id.trim();
+    if boot_id.is_empty() {
+        bail!("Linux boot ID was empty");
+    }
+    Ok(Some(boot_id.to_string()))
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn current_boot_id() -> Result<Option<String>> {
+    Ok(None)
 }
 
 #[cfg(all(test, unix))]

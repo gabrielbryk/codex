@@ -11,6 +11,8 @@ use super::PidCommandKind;
 use super::PidFileState;
 use super::PidLogTail;
 use super::PidRecord;
+use super::current_boot_id;
+use super::process_matches_record;
 use super::read_process_start_time;
 use super::read_stderr_log_tail;
 use super::stderr_log_file_for_pid_file;
@@ -128,10 +130,12 @@ async fn stale_record_cleanup_preserves_replacement_record() {
     let stale = PidRecord {
         pid: 1,
         process_start_time: "old".to_string(),
+        boot_id: None,
     };
     let replacement = PidRecord {
         pid: 2,
         process_start_time: "new".to_string(),
+        boot_id: None,
     };
     tokio::fs::write(
         &pid_file,
@@ -149,6 +153,69 @@ async fn stale_record_cleanup_preserves_replacement_record() {
     );
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn previous_boot_record_is_stale_even_when_pid_exists() {
+    let pid = std::process::id();
+    let record = PidRecord {
+        pid,
+        process_start_time: read_process_start_time(pid)
+            .await
+            .expect("start time")
+            .expect("process exists"),
+        boot_id: Some("previous-boot".to_string()),
+    };
+
+    assert!(
+        !process_matches_record(&record)
+            .await
+            .expect("inspect record")
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn non_process_leader_thread_id_is_stale() {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        let tid = unsafe { libc::syscall(libc::SYS_gettid) as u32 };
+        sender.send(tid).expect("send tid");
+        std::thread::sleep(Duration::from_secs(1));
+    });
+    let tid = receiver.recv().expect("receive tid");
+    let record = PidRecord {
+        pid: tid,
+        process_start_time: "unused".to_string(),
+        boot_id: current_boot_id().await.expect("boot ID"),
+    };
+
+    assert!(
+        !process_matches_record(&record)
+            .await
+            .expect("inspect record")
+    );
+    thread.join().expect("join thread");
+}
+
+#[tokio::test]
+async fn matching_legacy_record_remains_active() {
+    let pid = std::process::id();
+    let record = PidRecord {
+        pid,
+        process_start_time: read_process_start_time(pid)
+            .await
+            .expect("start time")
+            .expect("process exists"),
+        boot_id: None,
+    };
+
+    assert!(
+        process_matches_record(&record)
+            .await
+            .expect("inspect record")
+    );
+}
+
 #[tokio::test]
 async fn stop_reaps_untracked_app_server_child() {
     let temp_dir = TempDir::new().expect("temp dir");
@@ -163,7 +230,11 @@ async fn stop_reaps_untracked_app_server_child() {
     let pid = child.id();
     let record = PidRecord {
         pid,
-        process_start_time: read_process_start_time(pid).await.expect("start time"),
+        process_start_time: read_process_start_time(pid)
+            .await
+            .expect("start time")
+            .expect("process exists"),
+        boot_id: current_boot_id().await.expect("boot ID"),
     };
     tokio::fs::write(
         &pid_file,
