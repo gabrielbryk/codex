@@ -12,6 +12,7 @@ use super::PidFileState;
 use super::PidLogTail;
 use super::PidRecord;
 use super::current_boot_id;
+use super::daemon_working_directory;
 use super::process_matches_record;
 use super::read_process_start_time;
 use super::read_stderr_log_tail;
@@ -358,5 +359,19 @@ async fn read_stderr_log_tail_returns_recent_complete_lines() {
             path: log_file,
             contents: "recent error\nusage".to_string(),
         })
+    );
+}
+
+#[test]
+fn daemon_working_directory_uses_installed_bin_directory() {
+    assert_eq!(
+        daemon_working_directory(std::path::Path::new(
+            "/home/user/.codex/packages/standalone/releases/local-abc/bin/codex"
+        )),
+        std::path::PathBuf::from("/home/user/.codex/packages/standalone/releases/local-abc/bin")
+    );
+    assert_eq!(
+        daemon_working_directory(std::path::Path::new("codex")),
+        std::path::PathBuf::from("/")
     );
 }

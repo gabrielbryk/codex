@@ -154,7 +154,15 @@ fn update_modes_for_identities(
 
 #[cfg(unix)]
 pub(crate) fn reexec_managed_updater(managed_codex_bin: &std::path::Path) -> Result<()> {
-    let err = StdCommand::new(managed_codex_bin)
+    // Keep the daemon rule: run from the installed binary's directory, never
+    // from whatever cwd the previous updater happened to hold.
+    let mut command = StdCommand::new(managed_codex_bin);
+    if let Some(parent) = managed_codex_bin.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        command.current_dir(parent);
+    }
+    let err = command
         .args(["app-server", "daemon", "pid-update-loop"])
         .exec();
     Err(err).with_context(|| {
