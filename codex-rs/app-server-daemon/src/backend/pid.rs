@@ -233,6 +233,10 @@ impl PidBackend {
         };
         command
             .args(self.command_args())
+            // Daemons must never inherit the launcher's cwd: if that directory
+            // is later deleted (e.g. a removed git worktree), every
+            // cwd-relative operation in the server starts failing with ENOENT.
+            .current_dir(daemon_working_directory(&self.codex_bin))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::from(stderr_log.into_std().await));
@@ -847,6 +851,17 @@ async fn current_boot_id() -> Result<Option<String>> {
 #[cfg(not(target_os = "linux"))]
 async fn current_boot_id() -> Result<Option<String>> {
     Ok(None)
+}
+
+/// Working directory for spawned daemons: the installed binary's directory,
+/// which exists for as long as the binary itself does. Falls back to `/` when
+/// the binary path has no usable parent (e.g. a bare name resolved via PATH).
+#[cfg_attr(not(unix), allow(dead_code))]
+fn daemon_working_directory(codex_bin: &Path) -> PathBuf {
+    match codex_bin.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("/"),
+    }
 }
 
 #[cfg(all(test, unix))]
