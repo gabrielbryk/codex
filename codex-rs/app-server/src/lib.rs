@@ -96,6 +96,7 @@ mod app_server_tracing;
 mod attestation;
 mod auth_mode;
 mod bespoke_event_handling;
+mod client_request_policy;
 mod code_mode_host;
 mod command_exec;
 mod config_layer;

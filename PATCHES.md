@@ -1,189 +1,109 @@
 # Fork patch manifest
 
-The `gabe/fork` branch is a patch stack rebased onto an upstream `rust-v*`
-release tag. Ordered **bottom → top**: upstreamable fixes first, local-env
-patches next, then defensive, then fork-feature (the live app-server handover
-stack), then docs/chore. Fixes added between rebases land on top of the lock
-chore; the next rebase reorders them back under it. Keep each commit atomic
-(one fix + its tests) so it can be dropped when upstream covers it, or
-`format-patch`ed to a PR.
+The `gabe/fork` branch is a downstream patch stack on an immutable upstream
+`rust-v*` release tag. Fork Fleet owns the logical patch mapping; this file is
+the human review surface for intent, supersession decisions, conflict watches,
+and release validation.
 
-Current base: **rust-v0.148.0-alpha.12** (`ce9de503e3`; merge-base with
-`gabe/fork` is `4af6dc74a0`). Target for the next upgrade: **rust-v0.148.0-alpha.18**
-(`e6bc18b8cd`), 112 upstream commits ahead.
+Current upstream base: **`rust-v0.149.1`**
+(`ff29a44391deccde0aba0f8390337d7f3c319ea4`). The prior source boundary was
+**`rust-v0.148.0-alpha.12`**
+(`4af6dc74a035b8f177a1588abddef4f6c605464b`).
 
-> **Verify the merge-base before every rebase**, per the triage checklist below —
-> do not trust this line. A prior revision of this file recorded `902bd9e0`,
-> which is an ancestor of both the tag and the branch but is *not* the boundary;
-> rebasing with `--onto <newtag> 902bd9e0` would have replayed an extra upstream
-> commit as fork work. Confirm with:
->
-> ```bash
-> git merge-base rust-v0.148.0-alpha.12 gabe/fork
-> git merge-base --is-ancestor <candidate> gabe/fork
-> ```
+The 2026-08-24 upgrade reviewed all 49 source commits as 21 logical patches.
+No maintained logical patch was fully superseded by `0.149.1`. Seven patches remain clean
+downstream applications; fourteen were reworked because upstream now provides
+an adjacent primitive or changed the integration seam. The old alpha-only
+format/version commits are not maintained behavior: stable normalization is
+regenerated from the `0.149.1` tag's dependency graph.
 
-> **Reconciled 2026-08-14** against the real stack: 38 commits on
-> `rust-v0.148.0-alpha.12..gabe/fork`. This revision folds in the live
-> app-server handover stack (draining generations, passive daemon status,
-> idle-thread unload, private generation sockets), request latency/token
-> telemetry, MCP runtime thread attribution, scoped-command display, the TUI
-> reconnect/reattachment cluster, orphan-output persistence adapted to rollout
-> items, and the workspace-normalization chores. Several rows from the
-> alpha.4-era table were squashed together during later rebases (rmcp OAuth
-> hardening; the old 3-commit turn/start replay patch); this table reflects
-> the current commit boundaries, not the historical ones.
+## Maintained logical patches
 
-| # | Commit subject | Category | Files | Upstream status |
-|---|---|---|---|---|
-| 1 | `feat(app-server): make remote turn submission resilient` (`426b2bedfa`) | upstreamable | `app-server-client/src/{lib,remote}.rs`, `app-server/src/request_processors/turn_processor.rs`, `app-server/tests/suite/v2/turn_start.rs`, `tui/src/app_server_session.rs` | Fork-only; candidate to PR upstream (openai/codex#13949). This is the current single-commit shape of what the alpha.4 table carried as two separate patches — row 1 (`fix: reconnect remote app-server client`) and row 15 (`feat: replay in-flight turn/start across a reconnect`, 3 commits) — squashed together at a later rebase. `client_user_message_id` is treated as an idempotency key: a bounded, process-wide, per-thread cache records the `TurnStartResponse` a keyed submission produced and returns it verbatim on repeat, rather than starting a second turn; a request without a key keeps prior behavior. `app-server-client` parks replay-safe requests (method on a small allowlist, `turn/start` only, and carrying a `clientUserMessageId`) across a reconnect instead of failing them, re-sending under their original JSON-RPC id once the stream reinitializes; give-up is conservative (replay once, abandon after 15s). The TUI stamps a fresh UUID per `turn/start`. **Conflict watch for alpha.18:** `app-server/tests/suite/v2/turn_start.rs` is touched upstream by `f898ebcafd` ("Route curated plugin catalogs by authentication mode") and `app-server/src/request_processors/turn_processor.rs`-adjacent `thread_processor.rs`/`thread_state.rs` by three more upstream commits (`9341b38310` thread-queue APIs, `4343b2bdc4` thread revert, `c6dee5f49f` thread-revert subscriptions) — all additive (new enum variants, new struct fields), so expect mechanical, not semantic, conflicts. Re-evaluate each release; drop once upstream makes `turn/start` idempotent and replays it across reconnects itself. **This patch is now the base layer for the TUI reconnect/reattachment cluster (rows 34–38 below) — do not reorder it below `fa50b61f26` (row 26) or the replay-state refactor loses its foundation.** |
-| 2 | `fix(external-agent): import from compact boundary` (`26a6f9f776`) | upstreamable | `external-agent-migration/src/sessions/{records_cla,records_cla_tests}.rs` | Fork-only; general feature — candidate to PR upstream. Unchanged in substance since alpha.4 (old row 2); patches the `read_session_import` loop in the Claude-specific reader to resume from the last compact boundary rather than the session start. Re-check at alpha.18 whether upstream touched `records_cla.rs` again (`git log` shows no hits between alpha.12 and alpha.18 for this file as of this reconciliation — clean carry expected). |
-| 3 | `fix(uds): accept sticky rendezvous directories` (`adacd99d13`) | local-env | `uds/src/{lib,lib_tests}.rs` | Fork-only forever — specific to the shared sticky `/tmp` socket dir. Unchanged since alpha.4 (old row 4). |
-| 4 | `fix(app-server-daemon): disable stock fork updater` (`3e8a07844f`) | local-env | `app-server-daemon/src/lib.rs` | Fork-only forever — the managed-fork deploy must not let the stock updater snap `standalone/current` back to upstream stock. Unchanged since alpha.4 (old row 5). **Watch:** `app-server-daemon/src/lib.rs` is now heavily grown by the live-handover stack (rows 20–21, 29, 32); confirm this one-line disable survives each of those merges — a divergent-copy risk in miniature if a future rebase re-adds the updater call inside a new code path this patch doesn't touch. |
-| 5 | `fix(rmcp-client): harden OAuth recovery flows` (`5f07914b3d`) | defensive | `rmcp-client/src/{lib,oauth,rmcp_client,startup_error,oauth_http_client,slack_oauth_envelope,slack_oauth_envelope_tests}.rs`, `rmcp-client/src/oauth/{refresh_transaction,resolved_store}.rs`, `rmcp-client/src/oauth/tests/persistor_tests.rs`, `rmcp-client/tests/streamable_http_recovery.rs` | Fork-only; strong candidate to PR upstream. This single commit is the squashed union of what alpha.4 carried as three rows: old row 6 (`invalid_grant` startup-error classification — still present at `startup_error.rs:57`, matching on `message.contains("invalid_grant")`), old row 7 (compare-and-delete guard `delete_if_stale` + reactive 401 recovery `is_auth_required_401`/`refresh_after_unauthorized`), and old row 14 (Slack Web-API OAuth envelope). **Drop triage for `invalid_grant` (old row 6, the standing "strongest drop candidate"):** checked `rmcp-client` for upstream OAuth-shape changes between alpha.12 and alpha.18 — none found (`git log alpha.12..alpha.18 -- codex-rs/rmcp-client` shows only two unrelated Guardian-evidence commits touching `bin/test_stdio_server.rs`; `AuthError::TokenRefreshFailed`/`TokenRefreshRejected` are unchanged, and `rmcp = "=3.0.0"` did not bump). No new evidence this cycle to drop it — re-run the same check at the next upgrade, since 0.147.0-alpha.4's `61de0d8fe8` split already narrowed the reachable path once and could narrow it again. **Divergent-copy hazard still open (old row 7c):** `delete_oauth_tokens_from_file_if_stale` remains a fork-owned twin of upstream's `delete_oauth_tokens_from_file`; diff the two on every upgrade, not just when `deny.toml`/`reqwest` exceptions change. **Build constraint carried forward:** must keep using `codex-http-client` types, not raw `reqwest`, per `deny.toml`'s `bans` list. |
-| 6 | `fix(core): persist orphaned tool outputs` (`bd1d827d7e`) | upstreamable | `core/src/context_manager/{history,history_tests,normalize}.rs`, `core/src/session/{mod,turn}.rs`, `core/tests/suite/client.rs` | Fork-only; strong candidate to PR upstream. Same substance as old row 12: `ensure_call_outputs_present` returns the injected outputs, `ContextManager::backfill_missing_call_outputs` applies the repair in place, `Session::backfill_missing_call_outputs` records them into history + rollout before each prompt build. **Amended at this base by row 29 (`bf4b604307`)** — see that row for the follow-up that adapts the persistence call site to `RolloutItem::ResponseItem(ResponseItemEnvelope::new(..))` instead of the old `persist_rollout_response_items` helper, which upstream removed. **Conflict watch for alpha.18:** `core/src/context_manager/history.rs` and `history_tests.rs` are both touched by upstream `a70211249a` ("Expose conversation history to tool lifecycle extensions"), and `history_tests.rs` additionally by `395723b238` ("Source multi-agent instructions from the model catalog"). Read `a70211249a` first — if it restructures `ContextManager::for_prompt` or the snapshot/backfill seam this patch hooks, this is a rework, not a clean reapply. `core/src/session/mod.rs` is also one of the busiest upstream files in range (11 commits touch it — see row 29's conflict note), so expect a genuine three-way merge, not just a line-offset conflict. Re-evaluate each release; drop once upstream persists the repair itself. |
-| 7 | `fix(core): fail waits for gone agents` (`75af059db7`) | upstreamable | `core/src/tools/handlers/multi_agents/wait.rs`, `core/src/tools/handlers/multi_agents_tests.rs`, `core/tests/suite/agent_execution.rs` | Fork-only; candidate to PR upstream. Unchanged in substance since alpha.4 (old row 13): fails a target that is neither live nor in the agent registry instead of returning an empty `not_found` status, and re-checks the registry on the timeout path so a target that vanishes mid-wait doesn't run to the deadline. Re-evaluate each release; drop once upstream fails the wait on definitively-missing targets. |
-| 8 | `feat(core): support scoped command launcher` (`3af7fe4bc2`) | fork-feature | `core/src/tools/handlers/unified_exec/exec_command.rs` | New since alpha.4. First half of a two/three-commit cluster (with rows 15 and 22) that gives the external status-line command (row 14) a launcher that can spawn a command scoped rather than inheriting the caller's full exec environment. Not upstreamable as-is — the launcher shape is coupled to this fork's status-line command protocol. Re-evaluate if upstream ships an equivalent scoped-launch primitive for unified_exec. **Conflict watch:** `unified_exec/exec_command.rs` is not in the alpha.12–alpha.18 upstream touch list for the 8 named hotspot files, but it is a live file elsewhere in `core/src/tools/handlers/`; re-check `unified_exec.rs` and siblings for upstream churn before reapplying rows 8/15/22 as a group — they are logically one feature and should conflict-resolve together, not independently. |
-| 9 | `fix(app-server): bound idle thread residency` (`60026b5e1c`) | fork-feature | `app-server/README.md`, `app-server/src/request_processors/thread_lifecycle.rs` | New since alpha.4. Early piece of the live-handover resource-safety line (see the project doc's "Resource safety" ledger row): bounds how long an idle thread stays loaded before its listener and writer lock are released. Precursor to row 32's fuller idle auto-attached-thread unload. Fork-owned; not upstreamable as-is since it is part of the generation-lifecycle design, but the underlying idle-eviction idea could be pitched independently. Re-evaluate together with row 32. |
-| 10 | `fix(tui): keep app-server transport failures non-fatal` (`0b0ceedef9`) | upstreamable | `tui/src/app/app_server_events.rs`, `tui/src/app/thread_routing.rs`, `tui/src/app/tests/{fatal_exit,turn_submission}.rs` | Fork-only; candidate to PR upstream. This is old rows 8 and 9 merged into one commit: (a) non-fatal handling for `try_submit_active_thread_op_via_app_server` failure arms (`/compact`, `/rename`, `/review`, background-terminal cleanup, `!` shell, config reload, guardian-approval) — each now warns + renders a chat error and returns `Ok(true)` instead of propagating with `?`; (b) the resume-hint line on the one remaining fatal exit (`AppServerEvent::Disconnected` → `AppEvent::FatalExitRequest`), appending `\nResume this session with: codex resume <thread-id>` via `codex_utils_cli::resume_command` — confirmed still present at `app_server_events.rs:79-80`. **Conflict watch:** `app_server_events.rs` is touched upstream by `a0bed4be21` ("Keep the composer editable during TUI startup") — read that commit before reapplying; startup-input handling and the fatal-exit path are different regions of the same file, so expect a textual, not semantic, conflict, but confirm the diff doesn't touch the same `match` arm. Re-evaluate each release; drop once upstream stops exiting the TUI on failed thread ops and prints its own resume hint. |
-| 11 | `fix(tui): retry overloaded turn steering` (`630a1b0b93`) | defensive | `tui/src/app.rs`, `tui/src/app/{steer_retry,steer_retry_tests,thread_routing}.rs`, `tui/src/chatwidget/input_restore.rs`, `tui/src/chatwidget/tests/review_mode.rs`, plus one new `.snap` fixture | New since alpha.4. Retries a `turn/steer` call that fails with a server-side overload/capacity error instead of dropping the steer and silently reverting the composer to its pre-steer draft. Fork-only; candidate to PR upstream as a general resilience fix — overload errors are not fork-specific. Re-evaluate once upstream's own steer path gets retry coverage; watch for upstream changes to `TypedRequestError` overload classification. |
-| 12 | `fix(config): isolate alternate Codex homes` (`e424d488a5`) | local-env | `config/src/loader/{mod,tests}.rs` | Fork-only forever — specific to the dual `.codex` / `.codex-uprising` setup. Same as old row 3; note it now sits later in the bottom→top order than in the alpha.4 table because of intervening rebases — position drift, not a content change. **Conflict watch:** `config/src/loader/mod.rs` is also touched by row 14 (status-line command) and appears in the alpha.12–alpha.18 upstream range indirectly through `core/src/config/{mod,config_tests,config_loader_tests}.rs` churn; keep this patch's hunk isolated to the home-selection function so it doesn't entangle with the status-line config-loading change. |
-| 13 | `feat(utils-pty): add contained process spawning` (`18e23667ab`) | upstreamable | `utils/pty/Cargo.toml`, `utils/pty/src/{lib,pipe,tests}.rs`, `utils/pty/src/win/{job,mod,suspended}.rs`, `utils/pty/src/windows_tests.rs` | Fork-only; candidate to PR upstream as a general-purpose primitive. Same as old row 17 (`spawn_contained_process`/`spawn_piped_contained_process`, Windows Job-Object suspended-spawn path). Consumed by row 14's `status_line_command/process.rs`. Linux-only deploy here, so the Windows path is not currently load-bearing; re-check upstream's own process-driver signal work each release (previously synergistic with `6b23635a7e`, not currently superseded). |
-| 14 | `feat(tui): add external status line command mode` (`4440ef4dfc`) | fork-feature | `tui/src/status_line_command/*` (new), `tui/src/chatwidget/status_line_command.rs` (new) + `chatwidget/{status_controls,status_surfaces,constructor,session_flow,tests}.rs`, `tui/src/app/{event_dispatch,background_requests,tests}.rs`, `tui/src/app_event.rs`, `tui/src/bottom_pane/*`, `tui/src/branch_summary.rs`, `tui/src/status/{rate_limits,tests}.rs`, `tui/src/terminal_hyperlinks.rs`, `tui/src/token_usage.rs`, `tui/src/lib.rs`, `config/src/{loader/mod,types}.rs`, `core/src/config/*`, `core/config.schema.json`, snapshot fixtures | Same feature as old row 16, still squashed at this base. Not upstreamable as-is — the wire schema is Codex-owned protocol surface. **Note:** `is_recoverable_turn_start_failure` and `handle_turn_start_rejection` (the old row-10 logic) now first appear inside this commit's diff of `event_dispatch.rs` per `git log -S`, an artifact of how a prior `--onto` rebase folded overlapping hunks — the logic is unchanged, only its attribution moved. Do not treat this as evidence the turn/start patch was dropped; it is alive and still needs the row-1 conflict watch applied. The ratatui halfwidth-sound-mark cell-width fix from alpha.4 (`crate::width::display_width`/`char_width` instead of raw `unicode_width`) carries forward unchanged — **ratatui did not bump between alpha.12 and alpha.18** (checked `Cargo.toml`; still pinned via the workspace override), so this specific hazard is dormant this cycle, but re-check on every future upgrade per the standing rule: any column/cell arithmetic in fork-owned TUI code must use `crate::width::*`, never `unicode_width` directly. |
-| 15 | `refactor(core): isolate scoped command wrapping` (`2326acf590`) | fork-feature | `core/src/tools/handlers/unified_exec.rs`, `core/src/tools/handlers/unified_exec/{exec_command,scoped_command,scoped_command_tests}.rs` | New since alpha.4. Middle piece of the scoped-command cluster (rows 8, 15, 22): extracts the scoped-launch wrapping into its own `scoped_command.rs` module so the display-hiding fix (row 22) has a single seam to patch. Fork-owned; reapply as a group with rows 8 and 22. |
-| 16 | `feat(core): attribute MCP runtimes to threads` (`369e2f172e`) | upstreamable | `codex-mcp/src/{server,server_tests}.rs`, `core/src/session/mcp_runtime.rs` | New since alpha.4. Tags each MCP server's stdio child environment with `CODEX_WORKLOAD_THREAD_ID` and `CODEX_WORKLOAD_TYPE=mcp` via `with_stdio_runtime_env`, so a runtime inventory or process-guard tool can attribute an MCP subprocess back to the thread that spawned it — closes a blind spot where a leaked/zombie MCP server had no attributable owner. Candidate to PR upstream as a general observability improvement; not fork-specific in principle. Re-evaluate once upstream exposes equivalent thread-scoped env attribution for MCP child processes. |
-| 17 | `chore(tui): apply rustfmt` (`d8caa630da`) | chore | one file, formatting only | Pure `rustfmt` pass, 1 insertion/1 deletion. Not a logical patch; drop/regenerate as needed, never conflicts meaningfully. |
-| 18 | `chore: normalize alpha.9 workspace metadata` (`ea1fb2fef9`) | chore | 25 files, lockfile/version-stamp churn | Interim lock-restamp commit from when the branch briefly sat on alpha.9 mid-development. Superseded by row 28 (`64024d1def`, alpha.12 restamp). Per the standing rule (old row 11 / History note), do not carry an intermediate restamp forward across a rebase — only the final restamp for the new base survives. Drop this commit specifically at the alpha.18 rebase; its work is redone by the alpha.18 equivalent of row 28. |
-| 19 | `docs: plan live app-server handover` (`f83782219a`) | chore | `.codex/app-server-live-handover-project.md` (new, 853 lines) | Adds the live-handover project doc itself. Not a code patch — pure fork-internal planning doc, deliberately outside `docs/`. No upstream-status triage applies; carries forward as long as the project doc exists. Superseded content-wise by rows 23–25, 30, 33 (later doc-status updates to the same file) — squash candidate at the next rebase if the intermediate revisions aren't independently useful history. |
-| 20 | `feat(app-server): add passive daemon status` (`741b78cc78`) | fork-feature | `app-server-daemon/src/backend/{mod,pid}.rs`, `app-server-daemon/src/lib.rs`, `cli/src/main.rs` | New since alpha.4. Adds read-only generation/PID/start-time status reporting to the daemon backend without changing lifecycle behavior — the "passive" half of the live-handover identity work, ahead of row 21's active drain protocol. Fork-owned, tied to the external stable-router design; not upstreamable as-is. Re-evaluate against upstream's own daemon/status surface if one appears. |
-| 21 | `feat(app-server): support draining generations` (`bb73039b7b`) | fork-feature | `app-server-daemon/src/backend/{mod,pid,pid_tests}.rs`, `app-server-daemon/src/lib.rs`, `app-server-protocol/schema/**`, `app-server-protocol/src/lib.rs`, `app-server-protocol/src/protocol/{common,v1}.rs`, `app-server-protocol/src/protocol/v2/{mod,server_lifecycle}.rs`, `app-server-transport/src/transport/{mod,remote_control/*}.rs`, `app-server/src/{generation_lifecycle,generation_lifecycle_tests,lib,message_processor}.rs`, `app-server/src/request_processors/{initialize_processor,thread_processor}.rs`, `app-server/tests/suite/v2/{initialize,mod,server_drain}.rs` | The largest single commit in the stack (31 files, +939/−82). Implements the project doc's Stage 2/3: `server/drain/start|status|cancel`, the `Accepting`/`Draining{generation,target_generation,started_at}` state machine, additive `serverIdentity` in the initialize response (`instanceId`, `generation`, `sourceSha`, `protocolRevision`, `capabilities: ["serverDrainV1","threadWriterLeaseV1"]`), and admission-check gating at the request-processor layer per the doc's exhaustive work-producing-RPC classification. Fork-owned protocol surface (`app-server-protocol/src/protocol/v2/server_lifecycle.rs` is Codex-owned per the project doc's Source Ownership section); not upstreamable as a whole, though the initialize-identity idea could be pitched narrowly. **Conflict watch, the most important one in the stack:** `app-server/src/request_processors/thread_processor.rs` is touched by three upstream commits in range — `c6dee5f49f` (thread-subscription preservation across revert), `4343b2bdc4` (thread revert), `683716cee9` (effective-permissions trust) — and `app-server/src/thread_state.rs` (touched by rows 32/34-38 downstream of this one) is touched by `9341b38310` (thread-queue APIs) and `4343b2bdc4`. All four upstream commits are additive (new request variants, new struct fields/enum arms), so the merge is wide but mechanical — the risk is missing that a new upstream request type (e.g. `thread/revert`, `thread/queue/*`) also needs an admission-check classification added to this patch's drain-rejection list, which no compiler error will catch. **Explicitly re-run the drain-admission exhaustiveness check from the project doc's Verification plan against every new upstream v2 request method introduced between alpha.12 and alpha.18.** |
-| 22 | `fix(core): hide scoped launcher from command display` (`161867f597`) | defensive | `core/src/tools/handlers/unified_exec/exec_command.rs` | New since alpha.4. Last piece of the scoped-command cluster (rows 8, 15, 22): prevents the internal scoped-launch wrapper command from leaking into the user-visible command display/transcript. Security-adjacent (avoids exposing internal plumbing as if it were the user's command). Reapply as a group with rows 8 and 15; all three touch overlapping regions of `exec_command.rs` and should conflict-resolve together. |
-| 23 | `docs: define live handover release boundary` (`9888f513e5`) | chore | `.codex/app-server-live-handover-project.md` | Doc-only update to the release-boundary section. See row 19. |
-| 24 | `docs: specify router failback guarantees` (`ec64087ba4`) | chore | `.codex/app-server-live-handover-project.md` | Doc-only update to the router-handover/failback section. See row 19. |
-| 25 | `docs: record handover isolation constraints` (`224867e9d7`) | chore | `.codex/app-server-live-handover-project.md` | Doc-only, 8-line addition on shared-state isolation constraints. See row 19. |
-| 26 | `refactor(app-server-client): isolate replay state` (`fa50b61f26`) | fork-feature | `app-server-client/src/remote.rs`, `app-server-client/src/remote/replay.rs` (new) | New since alpha.4. Extracts row 1's parked-request replay bookkeeping out of `remote.rs` into its own `replay.rs` module — pure refactor, no behavior change, done to give the reconnect/reattachment cluster (rows 34–38) a stable seam to build on. Reapply immediately after row 1 and before rows 34–38; reordering it later will re-conflict the extraction against reattachment logic that now lives in the extracted module. |
-| 27 | `feat(telemetry): trace model request latency and tokens` (`cf06541b9b`) | upstreamable | `core/src/session/turn.rs`, `core/tests/suite/otel.rs`, `otel/src/events/session_telemetry.rs` | New since alpha.4. Adds `SessionTelemetry::record_llm_request_identity` (correlates `session.id`/`user.account_id`/`user.email` onto the request span — collectors must map account to a bounded label and strip raw identity before export, per the doc comment) and `record_llm_request_response` (records `gen_ai.usage.input_tokens`, cache-read tokens, and provider latency onto the same span that owns the request). Candidate to PR upstream as a general OTEL improvement — request-scoped latency/token attribution is not fork-specific, though the account-identity correlation piece may be too deployment-specific to upstream as-is and could be split off. Re-evaluate once upstream's own request span carries per-request token/latency fields. |
-| 28 | `chore: normalize alpha.12 workspace artifacts` (`64024d1def`) | chore | `codex-rs/Cargo.lock` + 26 other lock/version files | The live restamp for this base (successor to row 18's alpha.9 interim restamp), equivalent in role to the alpha.4 table's old row 11. Regenerated every release; drop + recreate at the alpha.18 rebase. Run `just bazel-lock-check` after regenerating — record the result at the next upgrade rather than assuming it still passes. |
-| 29 | `fix(core): adapt orphan output persistence to rollout items` (`bf4b604307`) | upstreamable | `core/src/session/mod.rs`, `core/tests/suite/openai_file_mcp.rs` | Amendment to row 6. Upstream removed `persist_rollout_response_items`; this patch adapts row 6's `Session::backfill_missing_call_outputs` call site to map each injected item through `ResponseItemEnvelope::new` into `RolloutItem::ResponseItem` and call `persist_rollout_items` directly, matching upstream's current rollout-item API. **Conflict watch:** `core/src/session/mod.rs` is the single busiest upstream file in the alpha.12–alpha.18 range for this stack — 11 upstream commits touch it (`395723b238` model-catalog instructions, `23094236ac` extension-approval-before-Guardian, `1c4f42863c` Guardian v2 auto-review, `fdbab67c66`/`535795f7d1`/`781445f7c6` turn/thread environment-selection centralization, `9341b38310` thread-queue APIs, `bff03ecce5` developer-message retention across compaction, `1992f8c018` auto-reviewed-model approval policies, `588e18aae5` executor-disconnect capability recovery, `a70211249a` tool-lifecycle conversation-history exposure). Rows 6 and 29 together are a small, surgical hook into `backfill_missing_call_outputs`/`run_turn`; the risk is not that the hook itself conflicts textually (it's a few lines) but that one of the environment-selection-centralization commits (`fdbab67c66`/`535795f7d1`/`781445f7c6`) restructures the surrounding function signature this patch calls into. Read those three together before reapplying — they are one logical upstream change split across three commits. Re-evaluate each release; drop once upstream persists the repair itself (same drop criterion as row 6). |
-| 30 | `docs: update handover integration status` (`274ea9c1a8`) | chore | `.codex/app-server-live-handover-project.md` | Doc-only. See row 19. |
-| 31 | `fix(tui): isolate unrelated remote threads` (`6bc718decf`) | defensive | `tui/src/app/{app_server_events,thread_routing}.rs`, `tui/src/app/tests.rs` | New since alpha.4. Precursor to the reconnect/reattachment cluster: ensures a broadcast/notification for a thread the local TUI does not own (e.g. another remote client's thread on a shared app-server) is not folded into this TUI's reconnect/attachment bookkeeping. Without this, the cluster's "attached thread set" (rows 34–38) could be poisoned by unrelated threads. Fork-only, tied to the remote-control/multi-client design; not upstreamable as-is. |
-| 32 | `[app-server] let idle auto-attached threads unload` (`9c819839b7`) | fork-feature | `app-server/README.md`, `app-server/src/extensions.rs`, `app-server/src/request_processors.rs`, `app-server/src/request_processors/{thread_lifecycle,thread_lifecycle_tests,thread_processor,thread_processor_tests,turn_processor}.rs`, `app-server/src/thread_state.rs` | New since alpha.4 (this is the commit the task's staleness banner names as `9c819839b7b9`). Extends row 9's idle-thread bound to auto-attached threads specifically (threads the app-server attached on the client's behalf rather than ones the client explicitly subscribed to), so an idle auto-attach doesn't pin a thread loaded indefinitely and block generation retirement. Directly serves the project doc's retirement gate ("retirement requires both no loaded threads and no router connections"). **Conflict watch:** shares `app-server/src/thread_state.rs` with row 21's admission work and with upstream's `9341b38310`/`4343b2bdc4` (both additive). Also shares `thread_processor.rs` with row 21 and upstream's `c6dee5f49f`/`683716cee9`. Reapply after row 21 in the replay order; resolve by keeping all four struct/enum additions (this patch's, row 21's, and both upstream's) rather than picking a side. |
-| 33 | `docs: update live handover project status` (`d7bb3d1dd5`) | chore | `.codex/app-server-live-handover-project.md` | Doc-only. See row 19. This is the revision current at HEAD; its content matches the "Status" section quoted in the project doc as of 2026-08-14. |
-| 34 | `fix(app-server-client): gate replay on reattachment` (`d8e876801f`) | fork-feature | `app-server-client/src/{lib,remote}.rs` | First commit of the TUI reconnect/reattachment cluster (rows 34–38), and the one explicitly named in this reconciliation's source memory note. Adds `ReconnectState` and `finish_reconnect`, gating row 1/26's replay logic so a parked `turn/start` is not replayed until the TUI has finished reattaching its owned threads on the new connection — closing the gap the project doc calls out under "Mid-turn connection migration remains a later phase" / TUI-recovery's "Still planned" column ("Replay gating until reattachment"). This row is the fix for exactly that gap. Fork-only, no upstream equivalent exists (upstream doesn't have this reconnect model at all). **Conflict watch:** `app-server-client/src/lib.rs` and `remote.rs` are not in the 8 named hotspot files but are logically continuous with row 1/26's changes to the same files — reapply rows 1, 26, 34, 37 (the other `lib.rs`/`remote.rs` touch) as one connected sequence, resolving each in the order given; do not cherry-pick them independently. |
-| 35 | `fix(tui): reattach threads after reconnect` (`c1a7b10f96`) | fork-feature | `tui/src/app.rs`, `tui/src/app/{app_server_events,event_dispatch}.rs`, `tui/src/app/reconnect_reattachment.rs` (new), `tui/src/app/tests.rs`, `tui/src/app/tests/reconnect_reattachment.rs` (new), `tui/src/app_event.rs`, `tui/src/app_server_session.rs`, `tui/src/onboarding/onboarding_screen.rs` | Second commit of the cluster. New `reconnect_reattachment.rs` module; `reattachment_failure_message` renders a chat error naming which threads failed to reattach rather than silently dropping them. Implements the project doc's Stage 1 exit gate for the primary/displayed/side thread set: after a reconnect, the TUI now issues `thread/resume` for its owned threads instead of leaving reconnection transport-transparent. Fork-only; candidate to PR upstream eventually (this is exactly the Stage 1 gap the doc lists as "prototype only" for upstream's own reconnect model), but not yet — the doc explicitly says the `fix/tui-reconnect-safety` worktree's primitives must be *ported* onto `gabe/fork` with an explicit owned-thread set, and its autonomous generation-selection policy must NOT be merged unchanged now that the router is the routing authority. Do not reintroduce that prototype's policy code during this upgrade. **Conflict watch:** `event_dispatch.rs` is touched upstream by `58d2daba45` (TUI startup input hardening) and `ca83f7908c` (running-task exit choices) — both are in different regions of the file (startup/input replay vs. this patch's reattachment dispatch), so expect line-offset, not semantic, conflicts, but diff both upstream commits in full before assuming that. |
-| 36 | `fix(tui): track authoritative thread attachments` (`d954575147`) | fork-feature | `tui/src/app.rs`, `tui/src/app/{app_server_events,reconnect_reattachment,session_lifecycle,side,test_support}.rs`, `tui/src/app/tests.rs`, `tui/src/app/tests/reconnect_reattachment.rs`, `tui/src/app/thread_routing.rs` | Third commit. Adds `reconnect_thread_ids` and makes the server's attachment state authoritative over the TUI's locally cached one after a reconnect, closing a duplicate/stale-attachment race the first two cluster commits left open. Fork-only, same rationale and upstream posture as row 35. |
-| 37 | `fix(tui): reconcile reconnect state safely` (`2e666c2836`) | fork-feature | `app-server-client/src/{lib,remote}.rs`, `tui/src/app.rs`, `tui/src/app/{app_server_events,displayed_thread_transition (new),event_dispatch,input,reconnect_reattachment,session_lifecycle,side}.rs`, `tui/src/app/tests.rs`, `tui/src/app/tests/reconnect_reattachment.rs`, `tui/src/app/thread_routing.rs`, `tui/src/app_event.rs`, `tui/src/app_server_session.rs` | Fourth and largest cluster commit (15 files, +761/−63). Adds `displayed_thread_transition.rs` to distinguish "the thread the user is currently looking at" from "threads attached in the background" during reconciliation, and hardens `session_lifecycle.rs`'s attach check to require both `is_thread_attached` and a live entry in `thread_event_channels` (row 38 shows the fixture-alignment follow-up to this exact check). This is the row doing the actual "reconcile without duplicating already-rendered items" work the project doc's Stage 1 exit gate requires. Fork-only. **Conflict watch:** touches `app-server-client/src/lib.rs`/`remote.rs` again (see row 34's note — reapply 1→26→34→37 as a connected sequence) and `event_dispatch.rs`/`app_server_events.rs` again (see row 35's note on `58d2daba45`/`a0bed4be21`). |
-| 38 | `fix(tui): align reconnect ownership fixtures` (`6be0e6749a`) | chore | `tui/src/app/{reconnect_reattachment,session_lifecycle}.rs`, `tui/src/app/tests.rs` | Fifth and final cluster commit — test/fixture alignment only (11 insertions/14 deletions): widens `reconnect_thread_ids` visibility to `pub(super)`, simplifies a `try_recv` loop, and tightens `session_lifecycle.rs`'s attach check (`is_thread_attached(thread_id) && self.thread_event_channels.contains_key(&thread_id)`) to match what row 37 introduced but didn't fully thread through. Not independently upstreamable; travels with rows 34–37 as one feature. |
+| Patch | Category | `0.149.1` decision | Current upstream assessment |
+|---|---|---|---|
+| `remote-turn-resilience` | upstreamable | rework | Upstream now echoes and queues `clientUserMessageId`; the fork still supplies bounded request replay and server-side idempotency across ambiguous reconnects. |
+| `claude-history-compact-import` | upstreamable | apply | No upstream equivalent for importing Claude history from the latest compact boundary. |
+| `uds-rendezvous-hardening` | local environment | apply | Secure sticky rendezvous-directory support remains downstream-only. |
+| `disable-stock-fork-updater` | local environment | apply | Required so stock update logic cannot replace the packaged fork runtime. |
+| `mcp-oauth-recovery-hardening` | defensive | rework | Upstream now provides issuer binding/tracking, locked atomic fallback-token writes, and `invalid_grant` classification. The fork still supplies stale compare-delete, refresh-token preservation, the host/executor collision guard, reactive live-401 retry, and Slack envelope normalization. |
+| `orphan-tool-output-persistence` | upstreamable | rework | Upstream repairs orphan outputs in request snapshots but does not persist the repair to durable rollout history. |
+| `agent-wait-gone-failure` | upstreamable | apply | Upstream returns immediate `NotFound`; the fork additionally preserves an explicit model-visible failure contract. |
+| `scoped-command-runtime` | fork feature | apply | Per-thread command and MCP child attribution remains downstream-only. |
+| `idle-thread-residency` | fork feature | rework | Retains the five-minute idle bound and explicit-versus-implicit subscription semantics on the current listener lifecycle. |
+| `tui-transport-recovery` | upstreamable | rework | Retains non-fatal app-server request failures and recovery messaging on the current TUI event flow. |
+| `tui-steer-overload-retry` | upstreamable | rework | Retains bounded steering retry and composer-input requeue around upstream overload handling. |
+| `alternate-codex-home-isolation` | local environment | apply | Required for independent Primary and Uprising homes. |
+| `contained-pty-spawning` | upstreamable | rework | Retains supervised PTY containment while using current upstream process primitives. |
+| `external-status-line` | fork feature | rework | Upstream expanded native status configuration; the fork retains only its bounded external command runner, parser, wire format, and config seam. |
+| `alpha-workspace-normalization` | release chore | rework | Alpha-specific edits are superseded; the replacement is stable `0.149.1` lock, schema, and snapshot normalization from the tag lockfile. |
+| `live-app-server-handover` | fork feature | rework | No upstream equivalent. The drain classifier is now exhaustive over `ClientRequest` and explicitly reviews `0.149.1` queue, project, and thread-revert RPCs. |
+| `agent-request-observability` | upstreamable | rework | Retains thread/turn correlation and per-request latency/token outcomes without duplicating upstream telemetry. |
+| `tui-thread-ownership-isolation` | defensive | rework | Retains isolation from unrelated broadcast threads on the current TUI ownership model. |
+| `tui-reconnect-correctness` | fork feature | rework | Retains replay gating, authoritative reattachment, event reconciliation, and streamed-item identity on current upstream TUI transitions. |
+| `fork-patch-manifest-maintenance` | release chore | rework | This manifest and internal handover ledger are regenerated for the stable release. |
+| `tmp-inode-test-hygiene` | defensive | apply | The fork's known temporary-directory leak sites remain present upstream. |
 
-| 39 | `fix(tui): consolidate streamed items by identity` | upstreamable | `tui/src/app/agent_message_consolidation.rs`, `tui/src/app/event_dispatch.rs`, `tui/src/app_event.rs`, `tui/src/chatwidget/{protocol,streaming,transcript}.rs`, `tui/src/history_cell/{mod,messages}.rs`, `tui/src/pager_overlay.rs`, `tui/src/streaming/controller.rs`, `tui/src/thread_transcript.rs`, `tui/src/app/tests/reconnect_reattachment.rs` | Follow-up to the reconnect cluster (rows 34–38), fixing a transcript duplication race they made reachable. `ConsolidateAgentMessage` used to pick the cells it replaces *positionally* (`trailing_run_start::<AgentMessageCell>`), so any transcript write landing between an assistant message's streamed prefix and its authoritative `ItemCompleted` orphaned that prefix and rendered the full message beside it — the streamed bytes twice. Reattachment is exactly such a window: `reconcile_queued_events_after_session_refresh` replays the interactive/hook events `event_survives_session_refresh` preserves, and the reconnect also re-lists skills/plugins, each of which can write to the transcript mid-item. The fix stamps every streamed `AgentMessageCell` and every consolidated `AgentMarkdownCell` with the app-server item id (new `HistoryCell::agent_message_item_id`), carries that id on `AppEvent::ConsolidateAgentMessage`, and consolidates *by identity*: all cells for the item collapse into one, and unrelated cells caught inside the replaced span are preserved rather than dropped. Regression coverage: `reattachment_renders_a_streamed_item_exactly_once` and `reattachment_keeps_transcript_notices_interleaved_with_a_streamed_item`. Not fork-specific — the positional scan is upstream's; strong candidate to PR upstream. |
+## Important integration invariants
 
-| 40 | `fix(app-server-daemon): pin daemon cwd to installed bin directory` (`0969faa56c`) | upstreamable | `app-server-daemon/src/backend/{pid,pid_tests}.rs`, `app-server-daemon/src/update_loop.rs` | Added 2026-08-19, after the 2026-08-14 reconciliation (like the other post-reconciliation commits between `6be0e6749a` and this one, which still need rows at the next upgrade). Spawned daemons inherited the launcher's cwd; deleting that directory later (a removed git worktree, in the 2026-08-19 outage) made every cwd-relative server operation fail with ENOENT — config reloads (`skills/list`) and `turn/start` cwd validation broke for all clients of both codex homes at once. Pins `PidBackend::start()` spawns (app-server and update-loop) and the `reexec_managed_updater` re-exec to the managed binary's own directory via `daemon_working_directory()`. Not fork-specific — upstream's spawn has the same inheritance; candidate to PR upstream. |
+- `turn/start` replay is allowed only with a non-empty
+  `clientUserMessageId`, is bounded, and is not released until owned threads
+  reattach after reconnect.
+- Drain admission must be exhaustive over `ClientRequest`. New request variants
+  must choose both named policy flags: whether they start new work and whether
+  they can create an implicit attachment. Existing-turn continuation operations
+  such as steering, interrupting, writing to a command/process, and stopping
+  realtime remain available while draining.
+- Idle auto-attached threads do not count as retaining subscribers; explicit
+  clients do. Active threads never unload.
+- The stable router owns generation selection. TUI reconnect logic reattaches
+  owned threads but does not independently select or promote generations.
+- OAuth recovery uses the shared upstream token-store locks. The fork's
+  compare-and-delete function must remain behaviorally aligned with the
+  upstream unconditional delete path except for its intentional stale-token
+  and executor-ownership guards.
+- External status-line execution stays bounded and contained. Do not duplicate
+  upstream native status rendering or use raw `unicode_width` for TUI cell
+  arithmetic.
+- App-server protocol changes require stable and experimental schema fixture
+  regeneration. The root `write-app-server-schema` recipe invokes
+  `app-server-protocol/scripts/write_schema_fixtures.py`.
+- Stable release normalization starts from the tag's `Cargo.lock` dependency
+  selections. Never use an unconstrained lockfile regeneration to manufacture
+  a clean diff.
 
-**Squash status:** row 1 is the alpha.12-era squash of the alpha.4 table's old rows 1 and 15 (4 original commits → 1). Row 5 is the alpha.12-era squash of old rows 6, 7, and 14 (originally 2-3 commits → 1). Row 14 remains the alpha.4 squash of the 30-commit statusline stack, content-unchanged. Rows 8/15/22 and rows 34–39 are each a cohesive multi-commit feature cluster that should be replayed and conflict-resolved as a unit, not commit-by-commit.
+## Superseded historical patches
 
-## History note — dropped patches
+No maintained logical patch was fully superseded by `0.149.1`. The following
+entries describe historical components or release artifacts that are no longer
+independent downstream behavior.
 
-- **Stale rebase lock chore** (`chore: rebase fork onto rust-v0.146.0`,
-  `888f445642`): dropped at rust-v0.147.0-alpha.4, not replaced. See row 28's
-  note — the pattern repeats every rebase: only the final lock restamp for the
-  new base survives; an interim restamp from mid-development (row 18 this
-  cycle) does not carry forward.
+- The old monolithic MCP OAuth patch was superseded by upstream's modular OAuth
+  implementation. In `0.149.1`, upstream also supersedes its issuer
+  binding/tracking, locked and atomic fallback-token writes, and
+  `invalid_grant` classification components. The downstream patch retains only
+  stale compare-delete, refresh-token preservation, the host/executor collision
+  guard, reactive live-401 retry, and Slack envelope normalization.
+- MCP connection-manager reaping was superseded by upstream connection reuse;
+  replaying it would tear down active connections.
+- The standalone TUI `turn/start` error patch was upstreamed. Its fork-specific
+  transport/replay residue lives in the remote resilience and TUI recovery
+  patches.
+- Intermediate alpha.9 and alpha.12 lock/version restamps and standalone
+  rustfmt commits are release artifacts, not maintained behavior. Regenerate
+  one final stable normalization per release.
 
-- **MCP OAuth 401-recovery** (`harden local mcp oauth recovery`): mostly
-  upstreamed in rust-v0.145.0 as the `rmcp-client/src/oauth/` module. Dropped
-  from the stack — do not reintroduce the old monolithic `oauth.rs` patch. The
-  two pieces the rewrite dropped are reapplied as row 5 above (compare-and-delete
-  guard + reactive live-401 recovery), reworked to the new module shape.
+## Per-upgrade verification
 
-- **MCP connection-manager reap** (`fix(mcp): reap superseded MCP connection
-  managers on refresh`): superseded in rust-v0.146.0-alpha.x by upstream PR
-  #34952 + #34957. Dropped; do not reapply — under the reuse design, replaying
-  the old drain would tear down connections the current runtime is actively
-  using.
-
-- **turn/start non-fatal in the TUI** (`fix(tui): surface turn/start failure in
-  chat instead of exiting`): upstreamed in rust-v0.146.0-alpha.1 as PR #34636.
-  Dropped as a standalone patch; its narrow residue (widening the guard to
-  `TypedRequestError::Transport` for `turn/start` specifically, because this
-  fork's reconnect path fails pending requests before reconnecting) now lives
-  inside row 1/row 14 — see row 1's note on why a `git log -S` search attributes
-  the `is_recoverable_turn_start_failure` symbol to row 14's commit boundary
-  rather than a dedicated commit. **Do not read that attribution as evidence
-  the patch was dropped a second time; it is live and needs the row 1 conflict
-  watch applied at every upgrade.**
-
-- **Restore upstream status surface snapshots** (`test(tui): restore upstream
-  status surface snapshots`, `f151d915e2`, old row 18): not present as a
-  separate commit in the current 38-commit stack. The alpha.9/alpha.12 status-line
-  squash (row 14) appears to have re-recorded its own snapshots cleanly this
-  time rather than baking in machine-specific values again — confirm this
-  explicitly at the alpha.18 rebase by re-running the snapshot suite from a
-  non-`/tmp` checkout before concluding the drop is safe; do not assume it from
-  the commit's absence alone.
-
-## Upstream watch list (carried from rust-v0.147.0-alpha.4, re-verified 2026-08-14)
-
-- **Release artifact renamed AND recompressed** (`3d1d26915a`). Still true;
-  not re-checked against alpha.18 specifically this cycle — re-verify at
-  upgrade time.
-- **Code mode is out-of-process only** (`97576b1794`). Still true.
-- **Protocol types now ship precomputed** (`acd540f158`/`4642370542`). Still
-  true — row 21 adds new protocol types in `app-server-protocol/src/protocol/v2/`
-  and must run `just write-app-server-schema` before every commit that touches
-  that module, not just at rebase time.
-- **`PlannedTools` is gone** (`89a0eed93c` cluster). Not directly relevant to
-  the current stack; no fork patch does custom tool registration at this base.
-- **`isPinned` was removed outright** (`85c6da1c79`). Not relevant; no fork
-  code reads thread metadata's pin field.
-- **Divergent-copy hazard.** Confirmed still open for
-  `delete_oauth_tokens_from_file_if_stale` (row 5). **New instance found this
-  cycle:** row 32's idle-auto-attach unload and row 21's drain-admission
-  checks are two separate fork-owned classifiers over the same request set
-  (`app-server/src/request_processors/thread_processor.rs`,
-  `app-server/src/thread_state.rs`) that must independently learn about any
-  new upstream v2 request method (e.g. `thread/queue/*`, `thread/revert`) —
-  neither automatically covers the other. Diff both classifiers against the
-  full v2 request enum after every upgrade, not just the ones that visibly
-  conflict.
-- **New for this cycle — environment-selection centralization.** Upstream's
-  `fdbab67c66`/`535795f7d1`/`781445f7c6` centralize turn/thread environment
-  selection state and all three touch `core/src/session/mod.rs`, which rows 6
-  and 29 also hook. Read all three together as one logical upstream change
-  before reapplying rows 6/29 — see row 29's conflict note.
-- **New for this cycle — no ratatui or rmcp version bump between alpha.12 and
-  alpha.18.** Checked directly (`git diff` on `codex-rs/Cargo.toml` for both
-  crates): neither moved. The row-14 cell-width hazard and the row-5
-  `rmcp`-shape hazard are both dormant this cycle specifically because of
-  that — re-run both checks at the next upgrade regardless, since neither
-  hazard depends on this being a "quiet" cycle to eventually recur.
-
-### Known-failing tests in this environment (not regressions)
-
-`codex-tui ide_context::ipc::tests` — 5 failures plus 1 timeout, all reporting
-`IDE context socket directory is writable by other users`. Cause is the
-machine's `umask 002`. `tui/src/ide_context/` is byte-identical to upstream.
-Do not re-investigate each upgrade; do re-confirm the file is still untouched.
-
-Run tests through `just test`, not raw `cargo test` — the justfile sets
-`rust_min_stack = 8388608`.
-
-## Triage checklist (each upgrade)
-
-1. `git log --oneline <newtag>..HEAD` — review the carried stack. **Verify the
-   real base first** with `git merge-base --is-ancestor <tag> HEAD`.
-2. For each patch above: is the behavior + its tests now upstream? If yes, drop.
-   If partially, rework against the new upstream shape. Else reapply.
-3. Rebase with `--onto <newtag> <oldtag>` (tags are not linear ancestors).
-4. Validate, rebuild, install, reconcile via the `upgrade-codex-fork` skill.
-5. Tag `fork/<newversion>`; update this file's base + any status changes.
-6. Post-rebase verification beyond "tests pass":
-   - `git range-diff <pre-rebase-tag>...HEAD` — every commit should be `=`;
-     audit each `!` and account for every dropped/added entry.
-   - Grep for each patch's key symbols and each named regression test.
-   - Attribute every file in `git diff --name-only <newtag>..HEAD` to a patch;
-     anything unattributable is an accidental upstream revert.
-   - Diff any fork twin of an upstream function against its sibling.
-   - For the reconnect/reattachment cluster (rows 34–38) specifically: run the
-     project doc's Stage 1 exit gate by hand — sever the TUI socket mid-stream
-     and confirm it resumes rather than exits, receives completion exactly
-     once, and can answer a pending approval.
+1. Verify the recorded source base and target tag by full SHA; do not infer the
+   boundary from ancestry between release tags.
+2. Review every logical patch for full, partial, or absent upstream coverage.
+3. Replay into a fresh Fork Fleet worktree and resolve conflicts by behavior,
+   never wholesale `ours` or `theirs` selection.
+4. Regenerate config/app-server schemas and review every TUI snapshot change.
+5. Validate locked Cargo metadata, Bazel lock parity, argument comments, scoped
+   crate tests, the complete `just test` suite, and the release build.
+6. Attribute every file in `git diff rust-v0.149.1..HEAD` to a logical patch or
+   stable release normalization.
+7. Publish a dated safety ref before updating `gabe/fork`, use an exact
+   `--force-with-lease`, create the annotated `fork/0.149.1` tag, package the
+   exact published SHA, and use natural drain for the live rollout.

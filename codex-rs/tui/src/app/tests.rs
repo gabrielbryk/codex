@@ -563,11 +563,14 @@ async fn visible_unattached_thread_cannot_surface_an_approval() -> Result<()> {
 
     let resolution = app
         .pending_app_server_requests
-        .take_resolution(Op::ExecApproval {
-            id: "approval-1".to_string(),
-            turn_id: None,
-            decision: codex_app_server_protocol::CommandExecutionApprovalDecision::Accept,
-        })
+        .take_resolution(
+            &visible_only.to_string(),
+            Op::ExecApproval {
+                id: "approval-1".to_string(),
+                turn_id: None,
+                decision: codex_app_server_protocol::CommandExecutionApprovalDecision::Accept,
+            },
+        )
         .expect("approval resolution should serialize");
     pretty_assertions::assert_eq!(resolution, None);
     app_server.shutdown().await?;

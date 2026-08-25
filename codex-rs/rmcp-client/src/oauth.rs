@@ -1779,6 +1779,7 @@ mod tests {
             super::FallbackTokenEntry {
                 server_name: "executor:colliding-server".to_string(),
                 server_url: url.to_string(),
+                issuer: None,
                 client_id: "client".to_string(),
                 access_token: "access".to_string(),
                 expires_at: Some(0),
@@ -1789,7 +1790,7 @@ mod tests {
         );
         super::write_fallback_file(&store)?;
 
-        let error = super::delete_oauth_tokens_from_file_if_stale(&key, None)
+        let error = super::delete_oauth_tokens_from_file_if_stale(&key, /*expected*/ None)
             .expect_err("executor-keyed delete must fail closed against a host-owned entry");
         assert!(
             error.to_string().contains("conflicts with a host-owned"),

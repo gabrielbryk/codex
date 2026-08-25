@@ -9,6 +9,7 @@ use serde_json::json;
 use tokio::sync::OwnedRwLockReadGuard;
 use tokio::sync::RwLock;
 
+use crate::client_request_policy::client_request_policy;
 use crate::error_code::INVALID_REQUEST_ERROR_CODE;
 
 const SERVER_DRAINING_ERROR_CODE: i64 = -32002;
@@ -92,7 +93,7 @@ impl GenerationLifecycle {
         &self,
         request: &ClientRequest,
     ) -> Result<Option<WorkAdmissionPermit>, JSONRPCErrorError> {
-        if !request_starts_new_work(request.method_name()) {
+        if !client_request_policy(request).requires_drain_admission() {
             return Ok(None);
         }
         self.acquire_work_permit().await.map(Some)
@@ -153,31 +154,6 @@ fn invalid_lifecycle_request(message: impl Into<String>) -> JSONRPCErrorError {
         message: message.into(),
         data: None,
     }
-}
-
-fn request_starts_new_work(method: &str) -> bool {
-    matches!(
-        method,
-        "thread/start"
-            | "thread/resume"
-            | "thread/fork"
-            | "thread/archive"
-            | "thread/delete"
-            | "thread/unarchive"
-            | "thread/compact/start"
-            | "thread/shellCommand"
-            | "thread/rollback"
-            | "thread/inject_items"
-            | "thread/name/set"
-            | "thread/metadata/update"
-            | "thread/settings/update"
-            | "thread/memoryMode/set"
-            | "turn/start"
-            | "review/start"
-            | "thread/realtime/start"
-            | "command/exec"
-            | "process/spawn"
-    )
 }
 
 #[cfg(test)]

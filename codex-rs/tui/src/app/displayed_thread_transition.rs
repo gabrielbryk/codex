@@ -5,6 +5,7 @@ use codex_protocol::ThreadId;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DisplayedThreadTransitionReason {
     AdjacentThreadNavigation,
+    AgentsOverviewSelection,
     AgentPickerSelection,
     AutomaticClosedThreadFailover,
     SessionLineageAttachment,
@@ -19,6 +20,7 @@ impl DisplayedThreadTransitionReason {
     fn as_str(self) -> &'static str {
         match self {
             Self::AdjacentThreadNavigation => "adjacent_thread_navigation",
+            Self::AgentsOverviewSelection => "agents_overview_selection",
             Self::AgentPickerSelection => "agent_picker_selection",
             Self::AutomaticClosedThreadFailover => "automatic_closed_thread_failover",
             Self::SessionLineageAttachment => "session_lineage_attachment",

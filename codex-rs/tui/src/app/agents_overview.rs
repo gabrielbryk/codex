@@ -3,6 +3,7 @@
 use super::agents_overview_view::AgentsOverviewGroup;
 use super::agents_overview_view::AgentsOverviewRow;
 use super::agents_overview_view::AgentsOverviewView;
+use super::displayed_thread_transition::DisplayedThreadTransitionReason;
 use super::*;
 use crate::bottom_pane::SelectionDescriptionLayout;
 use crate::bottom_pane::SelectionItem;
@@ -505,8 +506,13 @@ impl App {
         }
 
         if self.current_displayed_thread_id() != Some(root_thread_id) {
-            self.select_agent_thread_and_discard_side(tui, app_server, root_thread_id)
-                .await?;
+            self.select_agent_thread_and_discard_side(
+                tui,
+                app_server,
+                root_thread_id,
+                DisplayedThreadTransitionReason::AgentsOverviewSelection,
+            )
+            .await?;
         }
         self.replay_agents_overview_requests(app_server, root_thread_id)
             .await;

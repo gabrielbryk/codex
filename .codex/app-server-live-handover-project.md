@@ -2,12 +2,13 @@
 
 ## Status
 
-Status snapshot: 2026-08-14. Natural-drain v1 is implemented and deployed. The maintained
-`gabe/fork` branch is based on `rust-v0.148.0-alpha.12` and currently ends at
-`9c819839b7b93c25d57a19a8f830a8b833bda804`. Primary and Uprising both route new clients to an
-accepting generation built from that exact source SHA. This is an internal implementation guide for
-Gabe's local Codex fork and its source-owned host lifecycle tooling. It deliberately lives outside
-the user-facing `docs/` tree.
+Status snapshot: 2026-08-24. Natural-drain v1 and reconnect/reattachment recovery are implemented.
+The maintained `gabe/fork` patch stack is based on stable `rust-v0.149.1`; publication creates the
+matching `fork/0.149.1` release tag. Live process and generation state is intentionally not encoded
+in this document because active connections can remain pinned to an older generation during a safe drain;
+use `codex-server-status --json` for the current runtime truth. This is an internal implementation
+guide for Gabe's local Codex fork and its source-owned host lifecycle tooling. It deliberately lives
+outside the user-facing `docs/` tree.
 
 The implemented first release covers server identity, synchronized drain
 admission, existing cross-process thread writer locks, private generation
@@ -32,30 +33,31 @@ confirmation window. All socket-health writers classify persisted handover and f
 `starting`, preventing a legacy direct app-server from claiming the temporarily absent canonical
 pathname.
 
-Mid-turn connection migration remains a later phase. The deployed fork keeps transport failures
-non-fatal and has bounded replay bookkeeping, but it does **not** yet reattach explicitly owned
-threads before replay, reconcile buffered reconnect state, or automatically migrate a TUI after a
-planned drain. Natural drain keeps each accepted connection on its original server until that
-connection closes. Remote control transfers exactly once at the retirement boundary; this is
-generation ownership transfer, not transport migration of an active remote client.
+The fork now gates replay until explicitly owned threads reattach, reconciles buffered events
+against authoritative resumed snapshots, and reconnects clients when a server reports a planned
+drain. It still does not transfer an accepted socket or a running Rust future between processes.
+Natural drain keeps each accepted connection on its original server until that connection closes or
+the client reconnects at a safe transport boundary. Remote control transfers exactly once at the
+retirement boundary; this is generation ownership transfer, not migration of an active in-process
+task.
 
 ### Implementation ledger
 
 The following table is authoritative for this document. A capability is not deployed merely because
 prototype code exists on another branch.
 
-| Area | Implemented in `gabe/fork` and deployed | Still planned or prototype-only |
+| Area | Implemented in the maintained `gabe/fork` stack | Still planned or out of scope |
 |---|---|---|
 | App-server generation lifecycle | Identity, passive status, drain start/status/cancel, admission control, writer leases, idle unload, private generation sockets, retirement | No in-flight turn serialization or cross-process task transfer |
 | Stable router | Connection-affine routing, JSON-RPC inspection, generation selection, active-writer conflict observation, guarded recovery/takeover modes, router-process handover/failback | Authoritative persisted ownership provenance, stable broker/policy-worker split, quiescent policy-worker handoff |
-| TUI recovery | Transport errors remain non-fatal; unrelated broadcast threads are excluded from the TUI-owned reconnect set; overloaded steering is retried | Replay gating until reattachment, explicit owned-thread reattachment, snapshot/event rebase, automatic planned-drain migration |
+| TUI recovery | Transport errors remain non-fatal; unrelated broadcast threads are excluded from the owned reconnect set; replay waits for explicit owned-thread reattachment; buffered events reconcile against resumed snapshots; planned server drain triggers reconnect; overloaded steering is retried | Executable re-exec at a safe UI boundary and in-place accepted-socket transfer remain out of scope |
 | Resource safety | Explicit-vs-implicit app-server subscriptions, idle thread unloading, per-generation FD limit of 8,192 | Admission pressure thresholds and automatic pressure-triggered rollout |
 | Observability and maintenance | Request latency/token telemetry, exact build identity, rollout evidence, Fork Fleet logical patch registry | More operator-facing ownership/pin diagnostics and further router/client module extraction |
 
-The remaining `fix/tui-reconnect-safety` worktree is a prototype source, not a deployable patch
-stack. Its useful reconnect primitives must be ported onto `gabe/fork` with an explicit owned-thread
-set. Its autonomous TUI generation-selection policy must not be merged unchanged because the
-protocol-aware router is now the generation-routing authority.
+The historical `fix/tui-reconnect-safety` worktree is not a deployable patch stack. Its useful
+reconnect primitives were ported onto `gabe/fork` with an explicit owned-thread set. Its autonomous
+TUI generation-selection policy remains intentionally excluded because the protocol-aware router is
+the generation-routing authority.
 
 ### Current operational blockers
 
@@ -80,9 +82,10 @@ generation. Generation launch now sources that file, and reconciliation defers g
 backends to the rollout. Both fixes are host-side; see `claude-process-guard` commits `d3f79ea` and
 `cd78ba6`.
 
-Separately, Fork Fleet registry validation succeeds while a fresh Codex plan fails during target
-revision resolution. The next upstream replay is blocked until `forkctl plan codex --json` resolves
-an immutable target successfully.
+Fork Fleet now resolves immutable release targets, records the source boundary separately from the
+upstream tag, and validates required quick, full, and release profiles before publication. The
+`rust-v0.149.1` replay also replaces the old string drain allowlist with an exhaustive
+`ClientRequest` policy so queue, project, and thread-revert additions cannot silently bypass review.
 
 ### Delivered release boundary
 
@@ -102,9 +105,9 @@ The production-ready natural-drain boundary includes:
 - crash-resumable stable-router replacement and active-phase failback without closing accepted
   streams on either router process.
 
-The full roadmap is not complete until the reconnect/reattach and TUI safe-boundary executable
-handoff acceptance criteria are proven. Those are P2 follow-on features and are not required to use
-natural drain safely.
+The full roadmap is not complete until TUI safe-boundary executable handoff is implemented and
+proven. Reconnect and reattachment are now part of the maintained stack; executable replacement is
+still a P2 follow-on and is not required to use natural drain safely.
 
 ## Executive decision
 
@@ -113,9 +116,10 @@ Use a hybrid design:
 - external tooling owns the stable control socket, app-server generations,
   health checks, promotion, rollback, process scopes, and package pointers;
 - Codex app-server adds a small backward-compatible identity and drain API;
-- natural-drain v1 makes no TUI or app-server-client changes;
-- later phases may add reconnect/reattach and safe-boundary TUI replacement
-  without changing the external router contract.
+- natural-drain v1 keeps the router protocol-blind while the app-server client and TUI own
+  reconnect, replay gating, and thread reattachment;
+- a later phase may add safe-boundary TUI replacement without changing the external router
+  contract.
 
 A raw external socket router is sufficient to preserve existing connections
 while new connections move to a candidate generation. It is not sufficient to
@@ -414,7 +418,7 @@ The initialize response should add optional, backward-compatible fields:
 
 ```json
 {
-  "userAgent": "codex_cli_rs/0.148.0-alpha.9",
+  "userAgent": "codex_cli_rs/0.149.1",
   "codexHome": "/home/gabe/.codex",
   "platformFamily": "unix",
   "platformOs": "linux",
@@ -509,10 +513,11 @@ shutdown/removal path, which releases its `$CODEX_HOME/thread-writer-locks`
 file lock. Retirement requires both no loaded threads and no router connections.
 Cancellation is allowed only before the first writer is released.
 
-Because v1 does not migrate connections, `thread/resume` is rejected on a
-draining generation. A TUI whose transport fails during drain may need to wait
-for the old ownership to release and resume through the new generation; seamless
-mid-drain reconnect is part of the later reattachment phase.
+Because v1 does not migrate accepted connections, `thread/resume` is rejected on a draining
+generation. The remote client reconnects after planned drain, waits for the replacement generation,
+and gates request replay until the TUI has reattached its explicitly owned threads. If the old
+writer has not released yet, the retry remains bounded and visible rather than creating concurrent
+ownership.
 
 ## Remote client reconnect behavior
 
@@ -735,7 +740,7 @@ Exit gate: the harness can detect lost subscription, duplicate events, missing
 completion, wrong-generation connection routing, concurrent rollout writers,
 and SQLite or process-resource ownership violations.
 
-### Stage 1: reconnect identity and thread reattachment — prototype only
+### Stage 1: reconnect identity and thread reattachment — implemented
 
 - Optional initialize server identity and capabilities are implemented.
 - Surface successful reconnects from the remote client.
@@ -750,11 +755,12 @@ can answer a pending approval.
 This stage improves ordinary transient disconnect behavior independently of
 rolling upgrades.
 
-### Stage 2: server drain protocol — natural-drain subset complete
+### Stage 2: server drain protocol — complete
 
-- Drain state, status, cancellation, and structured `serverDraining` rejection are implemented.
-  Planned-drain notification exists only on the prototype branch and is not deployed.
-- Add admission checks for all work-producing RPCs.
+- Drain state, status, cancellation, planned-drain reconnect, and structured `serverDraining`
+  rejection are implemented.
+- Admission classification is exhaustive over `ClientRequest`; queue, project, and thread-revert
+  methods added by `0.149.1` have explicit policy decisions.
 - Expose required drain-completion gauges.
 - Update app-server API documentation and generated schemas.
 
@@ -973,8 +979,9 @@ The delivered v1 is accepted when all of these are simultaneously true:
 - metrics, alerts, audit JSONL, and per-request evidence identify incomplete and failed rollouts;
 - Fork Fleet embeds the exact source SHA and performs a genuinely source-distinct canary/build.
 
-These criteria do not claim that an already-running TUI process changes executables or that a
-broken socket is reattached mid-turn. Those remain in the full-project criteria below.
+These criteria do not claim that an already-running TUI process changes executables. Reattachment
+after an ordinary or planned reconnect is implemented; safe executable replacement remains in the
+full-project criteria below.
 
 ## Acceptance criteria
 
