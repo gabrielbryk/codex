@@ -853,6 +853,7 @@ async fn startup_thread_started_discards_another_threads_buffered_events() {
     let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
     app.pending_startup_thread_start = true;
     let other_thread_id = ThreadId::new();
+    app.attached_thread_ids.insert(other_thread_id);
     app.enqueue_primary_thread_notification(ServerNotification::McpServerStatusUpdated(
         McpServerStatusUpdatedNotification {
             thread_id: Some(other_thread_id.to_string()),
@@ -1016,6 +1017,7 @@ async fn owned_subagent_approval_before_thread_started_is_preserved() -> Result<
             crate::app_server_session::ResumeModelSettings::RestoreFromThread,
         )
         .await?;
+    app.attached_thread_ids.insert(child_thread_id);
     let request = exec_approval_request(
         child_thread_id,
         "turn-1",
