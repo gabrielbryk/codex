@@ -26,7 +26,7 @@ async fn compact_command_activity_groups_successes_and_preserves_full_transcript
     assert!(transcript.contains("$ printf first\nfirst\n"));
     assert!(transcript.contains("$ printf second\nsecond\n"));
 
-    chat.on_agent_message_delta("Finished\n".to_string());
+    chat.on_agent_message_delta(/*item_id*/ None, "Finished\n".to_string());
     let cells = drain_insert_history(&mut rx);
     assert_eq!(cells.len(), 2);
     assert_eq!(

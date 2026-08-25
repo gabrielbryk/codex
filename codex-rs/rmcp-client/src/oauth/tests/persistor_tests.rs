@@ -459,6 +459,7 @@ async fn refresh_after_unauthorized_forces_provider_refresh_for_fresh_token() ->
     // so only a reactive 401 recovery should reach the provider — the exact gap Fix #2 closes.
     let mut initial = sample_tokens();
     initial.url = expired.url.clone();
+    initial.issuer = expired.issuer.clone();
     assert!(
         !crate::oauth::token_needs_refresh(initial.expires_at),
         "the fixture must look fresh to the proactive expiry gate"
@@ -506,6 +507,7 @@ async fn refresh_after_unauthorized_rejected_grant_preserves_credentials() -> Re
     let (_env, server, expired) = test_context().await?;
     let mut initial = sample_tokens();
     initial.url = expired.url.clone();
+    initial.issuer = expired.issuer.clone();
     Mock::given(method("POST"))
         .and(path("/oauth/token"))
         .and(body_string_contains("grant_type=refresh_token"))

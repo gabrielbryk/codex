@@ -30,6 +30,7 @@ fn runtime_attribution_is_added_only_to_stdio_servers() {
             bearer_token_env_var: None,
             http_headers: None,
             env_http_headers: None,
+            http_headers_helper: None,
         }))
         .with_stdio_runtime_env("CODEX_WORKLOAD_THREAD_ID", "thread-1".to_string());
     assert_eq!(
@@ -39,6 +40,7 @@ fn runtime_attribution_is_added_only_to_stdio_servers() {
             bearer_token_env_var: None,
             http_headers: None,
             env_http_headers: None,
+            http_headers_helper: None,
         }
     );
 }

@@ -2084,6 +2084,7 @@ impl ThreadRequestProcessor {
                 thread_id,
                 request_id.connection_id,
                 /*raw_events_enabled*/ false,
+                ThreadSubscriptionKind::Explicit,
             )
             .await?,
             EnsureConversationListenerResult::ConnectionClosed

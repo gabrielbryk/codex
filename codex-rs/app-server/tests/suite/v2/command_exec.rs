@@ -1116,6 +1116,9 @@ async fn command_exec_process_ids_are_connection_scoped_and_disconnect_terminate
                 marker,
             ],
             "processId": "shared-process",
+            "sandboxPolicy": {
+                "type": "dangerFullAccess",
+            },
             "streamStdoutStderr": true,
         })),
     )

@@ -279,6 +279,7 @@ fn agent_message_completed_notification(
             text,
             phase: None,
             memory_citation: None,
+            delivery: None,
         },
     })
 }
