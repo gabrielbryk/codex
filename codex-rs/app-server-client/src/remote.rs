@@ -1624,21 +1624,27 @@ mod tests {
     #[test]
     fn replay_is_limited_to_idempotent_turn_start_requests() {
         assert!(
-            ReplayState::for_request(&turn_start_jsonrpc_request(1, Some("submission-1")))
-                .is_some(),
+            ReplayState::for_request(&turn_start_jsonrpc_request(
+                /*id*/ 1,
+                Some("submission-1")
+            ))
+            .is_some(),
             "turn/start carrying an idempotency key should be replayable"
         );
         assert!(
-            ReplayState::for_request(&turn_start_jsonrpc_request(2, None)).is_none(),
+            ReplayState::for_request(&turn_start_jsonrpc_request(
+                /*id*/ 2, /*client_user_message_id*/ None
+            ),)
+            .is_none(),
             "turn/start without an idempotency key must not be replayed"
         );
         assert!(
-            ReplayState::for_request(&turn_start_jsonrpc_request(3, Some(""))).is_none(),
+            ReplayState::for_request(&turn_start_jsonrpc_request(/*id*/ 3, Some(""))).is_none(),
             "an empty idempotency key must not be treated as a key"
         );
         assert!(
             ReplayState::for_request(&jsonrpc_request(
-                4,
+                /*id*/ 4,
                 "turn/interrupt",
                 serde_json::json!({ CLIENT_USER_MESSAGE_ID_FIELD: "submission-1" }),
             ))
@@ -1652,11 +1658,11 @@ mod tests {
         let mut pending_requests = HashMap::new();
         let mut replayable = track_request(
             &mut pending_requests,
-            turn_start_jsonrpc_request(1, Some("submission-1")),
+            turn_start_jsonrpc_request(/*id*/ 1, Some("submission-1")),
         );
         let mut not_replayable = track_request(
             &mut pending_requests,
-            jsonrpc_request(2, "account/read", serde_json::json!({})),
+            jsonrpc_request(/*id*/ 2, "account/read", serde_json::json!({})),
         );
 
         park_pending_requests(
@@ -1687,7 +1693,7 @@ mod tests {
         let mut pending_requests = HashMap::new();
         let mut parked = track_request(
             &mut pending_requests,
-            turn_start_jsonrpc_request(1, Some("submission-1")),
+            turn_start_jsonrpc_request(/*id*/ 1, Some("submission-1")),
         );
 
         park_pending_requests(
@@ -1722,7 +1728,7 @@ mod tests {
         let mut pending_requests = HashMap::new();
         let mut request = track_request(
             &mut pending_requests,
-            turn_start_jsonrpc_request(1, Some("submission-1")),
+            turn_start_jsonrpc_request(/*id*/ 1, Some("submission-1")),
         );
 
         park_pending_requests(&mut pending_requests, ErrorKind::BrokenPipe, "first drop");

@@ -965,7 +965,7 @@ mod tests {
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
-        expect_remote_initialize_with_identity(websocket, None).await;
+        expect_remote_initialize_with_identity(websocket, /*server_identity*/ None).await;
     }
 
     async fn expect_remote_initialize_with_identity<S>(
@@ -2470,7 +2470,7 @@ mod tests {
         let err = timeout(
             Duration::from_secs(10),
             client.request_typed::<codex_app_server_protocol::TurnStartResponse>(
-                turn_start_request(RequestId::Integer(1), None),
+                turn_start_request(RequestId::Integer(1), /*client_user_message_id*/ None),
             ),
         )
         .await

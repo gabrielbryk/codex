@@ -17,6 +17,8 @@ use codex_app_server_protocol::RemoteControlPairingStartParams;
 use codex_app_server_protocol::RemoteControlPairingStartResponse;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
+use tokio::io::AsyncBufReadExt;
+use tokio::io::BufReader;
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tokio::time::Duration;
@@ -344,19 +346,25 @@ async fn assert_refresh_failure_blocks_websocket(
     expires_in: time::Duration,
     response_delay: Duration,
 ) {
-    let listener = TcpListener::bind("127.0.0.1:0")
+    let refresh_listener = TcpListener::bind("127.0.0.1:0")
         .await
-        .expect("listener should bind");
-    let remote_control_url = remote_control_url_for_listener(&listener);
-    let remote_control_target =
+        .expect("refresh listener should bind");
+    let websocket_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("websocket listener should bind");
+    let remote_control_url = remote_control_url_for_listener(&refresh_listener);
+    let mut remote_control_target =
         normalize_remote_control_url(&remote_control_url).expect("target should parse");
-    let (connects_done_tx, connects_done_rx) = oneshot::channel();
+    remote_control_target.websocket_url =
+        normalize_remote_control_url(&remote_control_url_for_listener(&websocket_listener))
+            .expect("websocket target should parse")
+            .websocket_url;
     let server_task = tokio::spawn(async move {
-        let (stream, request_line) = accept_http_request(&listener).await;
-        assert_eq!(
-            request_line,
-            "POST /backend-api/wham/remote/control/server/refresh HTTP/1.1"
-        );
+        let stream = accept_matching_http_request(
+            &refresh_listener,
+            "POST /backend-api/wham/remote/control/server/refresh HTTP/1.1",
+        )
+        .await;
         tokio::time::sleep(response_delay).await;
         respond_with_status_and_headers(
             stream,
@@ -365,7 +373,6 @@ async fn assert_refresh_failure_blocks_websocket(
             "upstream unavailable",
         )
         .await;
-        assert_no_connection_until_connect_finishes(&listener, connects_done_rx).await;
     });
     let codex_home = TempDir::new().expect("temp dir should create");
     let state_db = remote_control_state_runtime(&codex_home).await;
@@ -384,6 +391,7 @@ async fn assert_refresh_failure_blocks_websocket(
     .await
     .expect_err("required refresh failure should block websocket connect");
     let refresh_completed_at = time::OffsetDateTime::now_utc();
+    assert_no_pending_connection(&websocket_listener).await;
     let deferred_err = connect_test_websocket(
         &remote_control_target,
         state_db.as_ref(),
@@ -392,9 +400,7 @@ async fn assert_refresh_failure_blocks_websocket(
     )
     .await
     .expect_err("required refresh deadline should block websocket reconnect");
-    connects_done_tx
-        .send(())
-        .expect("server should wait for connect attempts to finish");
+    assert_no_pending_connection(&websocket_listener).await;
 
     server_task.await.expect("server task should succeed");
     assert!(refresh_err.to_string().contains("HTTP 502 Bad Gateway"));
@@ -451,17 +457,66 @@ async fn accept_test_websocket(listener: &TcpListener) -> WebSocketStream<TcpStr
         .expect("websocket handshake should succeed")
 }
 
-async fn assert_no_connection_until_connect_finishes(
-    listener: &TcpListener,
-    mut connect_done_rx: oneshot::Receiver<()>,
-) {
-    tokio::select! {
-        accepted = listener.accept() => {
-            accepted.expect("unexpected websocket connection should be accepted");
-            panic!("required refresh failure must not proceed to websocket connect");
+async fn assert_no_pending_connection(listener: &TcpListener) {
+    let no_websocket = timeout(Duration::from_millis(50), async {
+        loop {
+            let request_line = read_probe_tolerant_request_line(listener).await;
+            assert_ne!(
+                request_line, "GET /backend-api/wham/remote/control/server HTTP/1.1",
+                "required refresh failure must not proceed to websocket connect",
+            );
         }
-        connect_done = &mut connect_done_rx => {
-            connect_done.expect("connect completion should be reported");
+    })
+    .await;
+    assert!(no_websocket.is_err(), "websocket observation must time out");
+}
+
+async fn accept_matching_http_request(listener: &TcpListener, expected: &str) -> TcpStream {
+    loop {
+        let (stream, request_line) = read_probe_tolerant_http_request(listener).await;
+        if request_line == expected {
+            return stream;
         }
+    }
+}
+
+async fn read_probe_tolerant_request_line(listener: &TcpListener) -> String {
+    read_probe_tolerant_http_request(listener).await.1
+}
+
+async fn read_probe_tolerant_http_request(listener: &TcpListener) -> (TcpStream, String) {
+    loop {
+        let (stream, _) = listener
+            .accept()
+            .await
+            .expect("connection observation should accept");
+        let mut reader = BufReader::new(stream);
+        let mut request_line = Vec::new();
+        let Ok(Ok(_)) = timeout(
+            Duration::from_millis(100),
+            reader.read_until(b'\n', &mut request_line),
+        )
+        .await
+        else {
+            continue;
+        };
+        loop {
+            let mut header = Vec::new();
+            let Ok(Ok(_)) = timeout(
+                Duration::from_millis(100),
+                reader.read_until(b'\n', &mut header),
+            )
+            .await
+            else {
+                break;
+            };
+            if header == b"\r\n" || header.is_empty() {
+                break;
+            }
+        }
+        return (
+            reader.into_inner(),
+            String::from_utf8_lossy(&request_line).trim().to_string(),
+        );
     }
 }

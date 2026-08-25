@@ -1736,13 +1736,13 @@ mod turn_start_dedupe_tests {
     fn lookup_returns_the_recorded_response_for_the_same_thread_and_key() {
         let mut cache = TurnStartDedupeCache::default();
         cache.record(
-            thread_id(1),
+            thread_id(/*last_octet*/ 1),
             "key".to_string(),
             turn_start_response("turn-1"),
         );
 
         assert_eq!(
-            cache.lookup(thread_id(1), "key"),
+            cache.lookup(thread_id(/*last_octet*/ 1), "key"),
             Some(turn_start_response("turn-1"))
         );
     }
@@ -1751,18 +1751,18 @@ mod turn_start_dedupe_tests {
     fn lookup_is_scoped_to_the_thread_and_key() {
         let mut cache = TurnStartDedupeCache::default();
         cache.record(
-            thread_id(1),
+            thread_id(/*last_octet*/ 1),
             "key".to_string(),
             turn_start_response("turn-1"),
         );
 
         assert_eq!(
-            cache.lookup(thread_id(2), "key"),
+            cache.lookup(thread_id(/*last_octet*/ 2), "key"),
             None,
             "another thread must not see this submission"
         );
         assert_eq!(
-            cache.lookup(thread_id(1), "other-key"),
+            cache.lookup(thread_id(/*last_octet*/ 1), "other-key"),
             None,
             "a different submission must not be treated as a duplicate"
         );
@@ -1772,19 +1772,19 @@ mod turn_start_dedupe_tests {
     fn recording_the_same_key_twice_keeps_a_single_entry() {
         let mut cache = TurnStartDedupeCache::default();
         cache.record(
-            thread_id(1),
+            thread_id(/*last_octet*/ 1),
             "key".to_string(),
             turn_start_response("turn-1"),
         );
         cache.record(
-            thread_id(1),
+            thread_id(/*last_octet*/ 1),
             "key".to_string(),
             turn_start_response("turn-2"),
         );
 
         assert_eq!(cache.entries.len(), 1);
         assert_eq!(
-            cache.lookup(thread_id(1), "key"),
+            cache.lookup(thread_id(/*last_octet*/ 1), "key"),
             Some(turn_start_response("turn-2"))
         );
     }
@@ -1794,7 +1794,7 @@ mod turn_start_dedupe_tests {
         let mut cache = TurnStartDedupeCache::default();
         for index in 0..=TURN_START_DEDUPE_CAPACITY {
             cache.record(
-                thread_id(1),
+                thread_id(/*last_octet*/ 1),
                 format!("key-{index}"),
                 turn_start_response(&format!("turn-{index}")),
             );
@@ -1802,12 +1802,15 @@ mod turn_start_dedupe_tests {
 
         assert_eq!(cache.entries.len(), TURN_START_DEDUPE_CAPACITY);
         assert_eq!(
-            cache.lookup(thread_id(1), "key-0"),
+            cache.lookup(thread_id(/*last_octet*/ 1), "key-0"),
             None,
             "the oldest submission should have been evicted"
         );
         assert_eq!(
-            cache.lookup(thread_id(1), &format!("key-{TURN_START_DEDUPE_CAPACITY}")),
+            cache.lookup(
+                thread_id(/*last_octet*/ 1),
+                &format!("key-{TURN_START_DEDUPE_CAPACITY}"),
+            ),
             Some(turn_start_response(&format!(
                 "turn-{TURN_START_DEDUPE_CAPACITY}"
             )))

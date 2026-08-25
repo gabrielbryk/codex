@@ -18,7 +18,7 @@ fn server_error(method: &str, code: i64) -> TypedRequestError {
 
 #[test]
 fn retries_turn_steer_overload_three_times_with_bounded_backoff() {
-    let error = server_error("turn/steer", -32001);
+    let error = server_error("turn/steer", /*code*/ -32001);
     let mut retry = SteerOverloadRetry::default();
 
     let delays = (0..MAX_RETRIES)
@@ -36,8 +36,8 @@ fn retries_turn_steer_overload_three_times_with_bounded_backoff() {
 #[test]
 fn does_not_retry_unrelated_failures() {
     let errors = [
-        server_error("turn/steer", -32602),
-        server_error("turn/start", -32001),
+        server_error("turn/steer", /*code*/ -32602),
+        server_error("turn/start", /*code*/ -32001),
         TypedRequestError::Transport {
             method: "turn/steer".to_string(),
             source: io::Error::other("connection closed"),
@@ -54,7 +54,10 @@ fn does_not_retry_unrelated_failures() {
 #[tokio::test]
 async fn overload_then_success_submits_once_without_duplication() {
     let attempts = Cell::new(0);
-    let mut responses = VecDeque::from([Err(server_error("turn/steer", -32001)), Ok("accepted")]);
+    let mut responses = VecDeque::from([
+        Err(server_error("turn/steer", /*code*/ -32001)),
+        Ok("accepted"),
+    ]);
     let delays = Cell::new(0);
 
     let outcome = retry_turn_steer_with_sleep(
@@ -81,7 +84,7 @@ async fn persistent_overload_returns_nonfatal_outcome_after_bounded_retries() {
     let outcome = retry_turn_steer_with_sleep(
         async || {
             attempts.set(attempts.get() + 1);
-            Err::<(), _>(server_error("turn/steer", -32001))
+            Err::<(), _>(server_error("turn/steer", /*code*/ -32001))
         },
         async |_| {
             delays.set(delays.get() + 1);

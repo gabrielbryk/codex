@@ -3246,6 +3246,6 @@ mod tests {
         assert!(!is_recoverable_turn_start_failure(Some(&transport_error(
             "thread/compact/start"
         ))));
-        assert!(!is_recoverable_turn_start_failure(None));
+        assert!(!is_recoverable_turn_start_failure(/*error*/ None));
     }
 }
