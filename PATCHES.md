@@ -70,6 +70,9 @@ regenerated from the `0.149.1` tag's dependency graph.
 - Stable release normalization starts from the tag's `Cargo.lock` dependency
   selections. Never use an unconstrained lockfile regeneration to manufacture
   a clean diff.
+- Fork Fleet validation runs through `scripts/fork_fleet_validation.py`, which exposes only named
+  validation actions and supplies the bounded local toolchain plus checksum-verified V8 artifacts
+  without inheriting the Worklens daemon environment.
 
 ## Superseded historical patches
 
