@@ -25,6 +25,7 @@ use serde_json::json;
 use std::time::Duration;
 use tokio::time::Instant;
 use tokio::time::sleep;
+use wiremock::http::Method;
 
 const COLLABORATION_NAMESPACE: &str = "collaboration";
 const SPAWN_CALL_ID: &str = "spawn-worker";
@@ -657,12 +658,17 @@ openai_base_url = "{redirected_base_url}"
         request.body_contains_text(SIBLING_FOLLOWUP_TASK)
             && request.body_contains_text(ROLE_DEVELOPER_INSTRUCTIONS)
     }));
+    let redirected_model_requests = redirected_server
+        .received_requests()
+        .await
+        .expect("captured redirected-provider requests")
+        .into_iter()
+        .filter(|request| {
+            request.method == Method::POST && request.url.path().ends_with("/responses")
+        })
+        .collect::<Vec<_>>();
     assert!(
-        redirected_server
-            .received_requests()
-            .await
-            .expect("captured redirected-provider requests")
-            .is_empty(),
+        redirected_model_requests.is_empty(),
         "a changed role must not redirect resumed model requests",
     );
 

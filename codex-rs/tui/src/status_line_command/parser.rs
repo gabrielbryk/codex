@@ -327,12 +327,12 @@ fn apply_sgr(style: &mut Style, params: &[u16]) -> Result<(), StatusLineCommandP
             24 => *style = style.remove_modifier(Modifier::UNDERLINED),
             27 => *style = style.remove_modifier(Modifier::REVERSED),
             29 => *style = style.remove_modifier(Modifier::CROSSED_OUT),
-            30..=37 => style.fg = Some(ansi_color(param - 30, false)),
+            30..=37 => style.fg = Some(ansi_color(param - 30, /*bright*/ false)),
             39 => style.fg = None,
-            40..=47 => style.bg = Some(ansi_color(param - 40, false)),
+            40..=47 => style.bg = Some(ansi_color(param - 40, /*bright*/ false)),
             49 => style.bg = None,
-            90..=97 => style.fg = Some(ansi_color(param - 90, true)),
-            100..=107 => style.bg = Some(ansi_color(param - 100, true)),
+            90..=97 => style.fg = Some(ansi_color(param - 90, /*bright*/ true)),
+            100..=107 => style.bg = Some(ansi_color(param - 100, /*bright*/ true)),
             38 | 48 => {
                 let color = parse_extended_color(params, &mut index)?;
                 if param == 38 {

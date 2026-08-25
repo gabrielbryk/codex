@@ -246,7 +246,7 @@ async fn same_cwd_thread_reset_rejects_old_dependency_results() {
     chat.set_status_line_git_summary(old_owner, cwd, StatusLineGitSummary::default());
     assert!(!chat.set_status_line_workspace_headline(
         old_owner,
-        10,
+        /*request_id*/ 10,
         Ok(
             crate::workspace_messages::WorkspaceHeadlineFetchResult::Available(Some(
                 "stale headline".to_string(),
