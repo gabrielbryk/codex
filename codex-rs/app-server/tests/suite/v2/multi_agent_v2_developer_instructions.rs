@@ -548,6 +548,22 @@ async fn cold_resume_preserves_effective_developer_instructions_for_worker(
                 || responses::namespace_child_tool(&body, "functions", name).is_some()
         })
     };
+    let redirect_request_summaries = |requests: &[wiremock::Request]| {
+        requests
+            .iter()
+            .map(|request| {
+                (
+                    request.method.clone(),
+                    request.url.path().to_string(),
+                    request.headers.get("thread-id").cloned(),
+                    String::from_utf8_lossy(&request.body)
+                        .chars()
+                        .take(160)
+                        .collect::<String>(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
 
     let server = responses::start_mock_server().await;
     let redirect_server = responses::start_mock_server().await;
@@ -738,13 +754,14 @@ async fn cold_resume_preserves_effective_developer_instructions_for_worker(
             })
             .await?;
         assert_eq!(reattached, baseline);
+        let redirect_requests = redirect_server
+            .received_requests()
+            .await
+            .expect("redirect mock requests");
         assert!(
-            redirect_server
-                .received_requests()
-                .await
-                .expect("redirect mock requests")
-                .is_empty(),
-            "warm child reattach must ignore caller provider overrides"
+            redirect_requests.is_empty(),
+            "warm child reattach must ignore caller provider overrides: {:#?}",
+            redirect_request_summaries(&redirect_requests),
         );
         let shutdown = timeout(READ_TIMEOUT, app_server.shutdown_gracefully()).await??;
         assert!(
@@ -1019,13 +1036,14 @@ features.shell_tool = false
         assert!(!has_shell_tool(&resumed_child_request));
     }
     assert_developer_instructions(&resumed_child_request, "resumed");
+    let redirect_requests = redirect_server
+        .received_requests()
+        .await
+        .expect("redirect mock requests");
     assert!(
-        redirect_server
-            .received_requests()
-            .await
-            .expect("redirect mock requests")
-            .is_empty(),
-        "caller or role config redirected the owner-restored child"
+        redirect_requests.is_empty(),
+        "caller or role config redirected the owner-restored child: {:#?}",
+        redirect_request_summaries(&redirect_requests),
     );
 
     Ok(())
