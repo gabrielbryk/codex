@@ -33,7 +33,11 @@ Read each selected reference completely before acting:
 - When delegation is authorized or work is long-running: [coordination and status](references/coordination-and-status.md)
 - Every run report and every `improve`: [improvement and reporting](references/improvement-and-reporting.md)
 
-Repository `AGENTS.md` remains authoritative for Codex code style and test ordering.
+Repository `AGENTS.md` remains authoritative for Codex code style and test ordering. Before any
+mutation, delegation, validation, or build, read the complete root `AGENTS.md` from the candidate
+worktree plus any more-specific `AGENTS.md` governing touched paths. Do not assume a delegated
+agent inherits that policy; put the requirement and exact candidate path in every editing or testing
+prompt.
 
 ## Start a Durable Run
 
@@ -73,11 +77,17 @@ Use this order and do not reopen an earlier phase without new evidence:
 - Capture complete lint output once, batch all mechanical repairs, then rerun the lint once.
 - Reuse persistent Cargo/Bazel/download caches while isolating mutable runtime state.
 - Serialize heavy Rust/Bazel/package builds; parallelize only independent analysis and mechanical
-  edits with disjoint ownership.
+  edits with disjoint ownership between gates.
+- Join every writer lane, review and stage its intended changes, and freeze the candidate before a
+  read-only heavy gate. No candidate edits, even to disjoint files, may overlap that gate. A
+  formatter, fixer, or generator that writes the candidate must be the only writer.
 - Delegate every safely separable mechanical or evidence task to Luna by default. Use Terra only for
   bounded semantic uncertainty and Sol/frontier only for high-risk ambiguity or release safety.
 - Run every heavy gate through `codex-upgrade-workflow gate`; compare broad failure membership with
   `codex-upgrade-workflow compare-failures` before considering a rerun.
+- Treat the gate helper's `inputFingerprint` as an invocation fingerprint, not a source snapshot.
+  Record and compare the candidate HEAD/index tree before and after every gate; invalidate results
+  whose candidate input changed while the command ran.
 - On resume, reuse a completed checkpoint only when its exact SHA, input fingerprint, and artifact
   still match. Session restart alone never invalidates a gate.
 - Load only summaries and novel failures into agent context. Do not stream passing-test output.

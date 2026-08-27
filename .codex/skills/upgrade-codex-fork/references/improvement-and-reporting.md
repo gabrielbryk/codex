@@ -63,7 +63,12 @@ Final reports separate:
 
 ## Improve mode
 
-Self-improvement occurs only after an upgrade reaches a terminal boundary:
+Self-improvement normally occurs only after an upgrade reaches a terminal boundary. If the user
+explicitly requests an immediate correction to a concrete workflow defect during an active run,
+limit the change to the source-owned skill, keep the candidate and runtime untouched, record the
+improve run separately, and resume the active upgrade afterward.
+
+For the normal terminal improvement pass:
 
 1. Read the terminal report, bounded candidate logs, transcript summary, and exact failed command.
 2. Classify each issue with an allowed friction code and distinguish deterministic tooling defects

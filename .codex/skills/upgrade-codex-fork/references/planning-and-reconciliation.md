@@ -88,10 +88,13 @@ wholesale ours/theirs for RMCP, TUI orchestration, app-server daemon, or process
 Candidate rerere has auto-staging disabled; review and stage every reused resolution.
 
 Use the workflow helper's coordinator-owned heavy-gate lock for every expensive build or test. The
-primary agent schedules and records those gates; delegated agents may analyze bounded results or
-make disjoint mechanical edits, but must not launch competing Cargo, Bazel, Clippy, full-test, or
-package commands. After finalization changes the candidate SHA, invalidate only gates that depend
-on that SHA and regenerate the relevant bounded evidence; do not rerun unrelated gates.
+primary agent schedules and records those gates. Delegated agents may analyze bounded results at
+any time and may make disjoint mechanical edits only during an explicit edit phase; they must not
+launch competing Cargo, Bazel, Clippy, full-test, or package commands. Before a gate, join every
+writer lane, review and stage the intended edits, record the candidate snapshot, and freeze the
+candidate until the result is captured. After finalization changes the candidate SHA, invalidate
+only gates that depend on that SHA and regenerate the relevant bounded evidence; do not rerun
+unrelated gates.
 
 Continue and inspect with:
 

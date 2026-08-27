@@ -8,7 +8,8 @@ green. Move from cheap deterministic evidence to expensive broad evidence exactl
 Before a long command:
 
 1. Verify its executable, cwd, required environment, target triple, output path, and timeout.
-2. Confirm the candidate is clean and still at the recorded SHA.
+2. Confirm every writer lane has joined and the candidate is still at the recorded HEAD. Review and
+   stage every intended change; require no unstaged or untracked source files.
 3. Isolate mutable `HOME`, `TMPDIR`, sockets, and test state when required, but reuse persistent
    Cargo, Bazel, V8/download, and package build caches keyed by toolchain/candidate.
 4. Direct the complete raw log to a bounded artifact. Print only duration, totals, failed test
@@ -41,9 +42,39 @@ codex-upgrade-workflow gate \
 ```
 
 The helper holds the host-wide lock through completion and result capture, writes a capped private
-redacted log, and emits a compact outcome plus input fingerprint. A delegated agent may prepare the
-command or inspect its bounded artifact, but may not start a competing heavy gate. Independent
-read-only analysis and disjoint mechanical edits may continue while the gate runs.
+redacted log, and emits a compact outcome plus `inputFingerprint`. That fingerprint covers the gate
+invocation (cwd, argv, selected environment, timeout, and log limit); it does **not** prove that the
+candidate source stayed unchanged.
+
+Before a read-only gate, record the candidate HEAD and staged index tree after reviewing all edits.
+Require no unstaged or untracked source files, then freeze the candidate until the result is
+captured. After the gate, verify the same HEAD/index tree and the same absence of unstaged or
+untracked source files. Pair this candidate snapshot with the helper's invocation fingerprint in the
+checkpoint. A delegated agent may prepare the command or inspect its bounded artifact, but may not
+start a competing heavy gate. Read-only analysis may continue; no agent or command may edit any
+candidate file, even one outside the crate under test.
+
+From the candidate worktree, the minimal snapshot evidence is:
+
+```bash
+git rev-parse HEAD
+git write-tree
+git diff --quiet
+git ls-files --others --exclude-standard
+```
+
+The last command must print nothing. Record the first two values, run the final two checks again
+after the gate, and compare the HEAD/tree values exactly. Do not use a blind `git add -A` to make
+these checks pass; review every intended file before staging it.
+
+For a formatter, fixer, generator, or other intentionally mutating gate, the command must be the
+candidate's sole writer. Its pre-command snapshot is invalidated by design: review and stage its
+output and record a new frozen snapshot before accepting any later read-only gate.
+
+If source changes during a read-only gate, let the command finish rather than killing a Rust build,
+record the candidate-input drift in the gate note, and do not count its pass or failure as
+authoritative. Once all writers have joined, rerun only the affected narrow gate on the frozen
+candidate. Do not restart a broad canary merely because its input drifted.
 
 ## Gate order
 
@@ -109,6 +140,10 @@ required target/baseline evidence.
 
 ## Hard stop rules
 
+- Do not start a read-only gate while any agent retains candidate write authority or while the
+  candidate has unreviewed, unstaged, or untracked source changes.
+- Do not dispatch or follow up candidate-writing work until the current read-only gate result and
+  post-gate snapshot are captured.
 - Never run more than one broad canary for an unchanged candidate SHA.
 - A broad rerun requires both a candidate change relevant to a deterministic prior failure and a
   reviewed reason that targeted tests cannot cover it.
