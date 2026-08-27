@@ -2,10 +2,11 @@
 
 ## Status
 
-Status snapshot: 2026-08-24. Natural-drain v1 and reconnect/reattachment recovery are implemented.
-The maintained `gabe/fork` patch stack is based on stable `rust-v0.149.1`; publication creates the
-matching `fork/0.149.1` release tag. Live process and generation state is intentionally not encoded
-in this document because active connections can remain pinned to an older generation during a safe drain;
+Status snapshot: 2026-08-27. Natural-drain v1 and reconnect/reattachment recovery are implemented.
+The prepared Fork Fleet candidate targets stable `rust-v0.150.1`; if it is later published, its
+matching release tag is `fork/0.150.1`. This document does not assert that this candidate has been
+published or cut over. Live process and generation state is intentionally not encoded in this document
+because active connections can remain pinned to an older generation during a safe drain;
 use `codex-server-status --json` for the current runtime truth. This is an internal implementation
 guide for Gabe's local Codex fork and its source-owned host lifecycle tooling. It deliberately lives
 outside the user-facing `docs/` tree.
@@ -84,8 +85,8 @@ backends to the rollout. Both fixes are host-side; see `claude-process-guard` co
 
 Fork Fleet now resolves immutable release targets, records the source boundary separately from the
 upstream tag, and validates required quick, full, and release profiles before publication. The
-`rust-v0.149.1` replay also replaces the old string drain allowlist with an exhaustive
-`ClientRequest` policy so queue, project, and thread-revert additions cannot silently bypass review.
+`rust-v0.150.1` replay retains the exhaustive `ClientRequest` drain policy in place of the old string
+allowlist, so queue, project, and thread-revert additions cannot silently bypass review.
 
 ### Delivered release boundary
 
@@ -418,7 +419,7 @@ The initialize response should add optional, backward-compatible fields:
 
 ```json
 {
-  "userAgent": "codex_cli_rs/0.149.1",
+  "userAgent": "codex_cli_rs/0.150.1",
   "codexHome": "/home/gabe/.codex",
   "platformFamily": "unix",
   "platformOs": "linux",
