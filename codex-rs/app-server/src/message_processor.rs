@@ -34,7 +34,6 @@ use crate::request_processors::FsRequestProcessor;
 use crate::request_processors::GitRequestProcessor;
 use crate::request_processors::InitializeRequestProcessor;
 use crate::request_processors::MarketplaceRequestProcessor;
-use crate::request_processors::McpEventStreamReady;
 use crate::request_processors::McpEventStreams;
 use crate::request_processors::McpRequestProcessor;
 use crate::request_processors::PluginRequestProcessor;
@@ -905,15 +904,6 @@ impl MessageProcessor {
             &codex_request,
         );
 
-        let event_stream_ready = match &codex_request {
-            ClientRequest::McpServerEventStreamStart { params, .. } => Some(
-                session
-                    .mcp_event_streams
-                    .start(connection_id, params.clone(), self.mcp_processor.clone())
-                    .await?,
-            ),
-            _ => None,
-        };
         let serialization_scope = codex_request.serialization_scope();
         let error_request_id = connection_request_id.clone();
         let rpc_gate = Arc::clone(&session.rpc_gate);
@@ -929,7 +919,6 @@ impl MessageProcessor {
                         codex_request,
                         request_context,
                         session,
-                        event_stream_ready,
                     )
                     .await;
                 if let Err(error) = result {
@@ -958,7 +947,6 @@ impl MessageProcessor {
         codex_request: ClientRequest,
         request_context: RequestContext,
         session: Arc<ConnectionSessionState>,
-        event_stream_ready: Option<McpEventStreamReady>,
     ) -> Result<(), JSONRPCErrorError> {
         let connection_id = connection_request_id.connection_id;
         let app_server_client_name = session.app_server_client_name().map(str::to_string);
@@ -972,7 +960,15 @@ impl MessageProcessor {
             .generation_lifecycle
             .admit_request(&codex_request)
             .await?;
-
+        let event_stream_ready = match &codex_request {
+            ClientRequest::McpServerEventStreamStart { params, .. } => Some(
+                session
+                    .mcp_event_streams
+                    .start(connection_id, params.clone(), self.mcp_processor.clone())
+                    .await?,
+            ),
+            _ => None,
+        };
         let result: Result<Option<ClientResponsePayload>, JSONRPCErrorError> = match codex_request {
             ClientRequest::Initialize { .. } => {
                 panic!("Initialize should be handled before initialized request dispatch");

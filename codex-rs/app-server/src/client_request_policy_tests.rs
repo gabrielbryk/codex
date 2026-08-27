@@ -1,4 +1,6 @@
 use codex_app_server_protocol::ClientRequest;
+use codex_app_server_protocol::McpServerEventStreamStartParams;
+use codex_app_server_protocol::McpServerEventStreamStopParams;
 use codex_app_server_protocol::ProjectCreateParams;
 use codex_app_server_protocol::ProjectListParams;
 use codex_app_server_protocol::RequestId;
@@ -7,7 +9,9 @@ use codex_app_server_protocol::ThreadGoalSetParams;
 use codex_app_server_protocol::ThreadQueueStartParams;
 use codex_app_server_protocol::ThreadRevertParams;
 use codex_app_server_protocol::ThreadSectionMoveParams;
+use codex_app_server_protocol::ThreadTimelineListParams;
 use pretty_assertions::assert_eq;
+use serde_json::json;
 
 use super::ClientRequestPolicy;
 use super::client_request_policy;
@@ -96,4 +100,48 @@ fn target_added_reads_remain_available_during_drain() {
     };
 
     assert_eq!(client_request_policy(&request), ClientRequestPolicy::NONE);
+}
+
+#[test]
+fn target_added_timeline_and_event_stream_requests_have_explicit_drain_policy() {
+    let requests = [
+        (
+            ClientRequest::ThreadTimelineList {
+                request_id: request_id(),
+                params: ThreadTimelineListParams {
+                    thread_id: "thread".to_string(),
+                    cursor: None,
+                    limit: None,
+                },
+            },
+            ClientRequestPolicy::NONE,
+        ),
+        (
+            ClientRequest::McpServerEventStreamStart {
+                request_id: request_id(),
+                params: McpServerEventStreamStartParams {
+                    thread_id: "thread".to_string(),
+                    server: "codex_apps".to_string(),
+                    subscription_id: "subscription".to_string(),
+                    name: "events".to_string(),
+                    arguments: json!({}),
+                    meta: None,
+                },
+            },
+            ClientRequestPolicy::WORK,
+        ),
+        (
+            ClientRequest::McpServerEventStreamStop {
+                request_id: request_id(),
+                params: McpServerEventStreamStopParams {
+                    subscription_id: "subscription".to_string(),
+                },
+            },
+            ClientRequestPolicy::NONE,
+        ),
+    ];
+
+    for (request, expected_policy) in requests {
+        assert_eq!(client_request_policy(&request), expected_policy);
+    }
 }

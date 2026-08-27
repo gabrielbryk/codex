@@ -70,7 +70,8 @@ pub(crate) fn client_request_policy(request: &ClientRequest) -> ClientRequestPol
         | ClientRequest::TurnStart { .. }
         | ClientRequest::ThreadRealtimeStart { .. }
         | ClientRequest::OneOffCommandExec { .. }
-        | ClientRequest::ProcessSpawn { .. } => ClientRequestPolicy::WORK,
+        | ClientRequest::ProcessSpawn { .. }
+        | ClientRequest::McpServerEventStreamStart { .. } => ClientRequestPolicy::WORK,
 
         ClientRequest::Initialize { .. }
         | ClientRequest::ServerDiagnostics { .. }
@@ -100,6 +101,7 @@ pub(crate) fn client_request_policy(request: &ClientRequest) -> ClientRequestPol
         | ClientRequest::ThreadRead { .. }
         | ClientRequest::ThreadTurnsList { .. }
         | ClientRequest::ThreadItemsList { .. }
+        | ClientRequest::ThreadTimelineList { .. }
         | ClientRequest::SkillsList { .. }
         | ClientRequest::SkillsExtraRootsSet { .. }
         | ClientRequest::HooksList { .. }
@@ -159,6 +161,7 @@ pub(crate) fn client_request_policy(request: &ClientRequest) -> ClientRequestPol
         | ClientRequest::McpServerRefresh { .. }
         | ClientRequest::McpServerStatusList { .. }
         | ClientRequest::McpResourceRead { .. }
+        | ClientRequest::McpServerEventStreamStop { .. }
         | ClientRequest::McpServerToolCall { .. }
         | ClientRequest::WindowsSandboxSetupStart { .. }
         | ClientRequest::WindowsSandboxReadiness { .. }

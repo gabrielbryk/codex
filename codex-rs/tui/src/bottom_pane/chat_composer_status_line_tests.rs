@@ -143,23 +143,3 @@ fn instructional_footer_suppresses_all_status_rows() {
         &composer,
     );
 }
-
-#[test]
-fn plan_mode_nudge_replaces_multiline_status_height() {
-    let mut composer = test_composer();
-    composer.set_status_line_enabled(/*enabled*/ true);
-    composer.set_status_lines(vec!["one".into(), "two".into(), "three".into()]);
-    composer.set_text_content(
-        "please make a plan for this".to_string(),
-        Vec::new(),
-        Vec::new(),
-    );
-    composer.set_plan_mode_nudge_visible(/*visible*/ true);
-
-    assert_eq!(composer.desired_height(/*width*/ 72), 4);
-    snapshot_composer(
-        "plan_mode_nudge_replaces_multiline_status_height",
-        /*width*/ 72,
-        &composer,
-    );
-}

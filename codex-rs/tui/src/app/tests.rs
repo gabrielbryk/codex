@@ -823,6 +823,7 @@ async fn active_thread_drain_yields_after_frame_deadline_without_dropping_events
         crate::token_usage::TokenUsage {
             input_tokens: 4,
             cached_input_tokens: 1,
+            cache_write_input_tokens: 0,
             output_tokens: 5,
             reasoning_output_tokens: 0,
             total_tokens: 10,
@@ -851,6 +852,7 @@ async fn active_thread_drain_yields_after_frame_deadline_without_dropping_events
         crate::token_usage::TokenUsage {
             input_tokens: 4,
             cached_input_tokens: 1,
+            cache_write_input_tokens: 0,
             output_tokens: 10,
             reasoning_output_tokens: 0,
             total_tokens: 15,
@@ -887,7 +889,12 @@ async fn selected_side_thread_close_is_handled_by_foreground_event_owner() -> Re
         .insert(side_thread_id, SideThreadState::new(primary_thread_id));
 
     let mut tui = crate::tui::test_support::make_test_tui()?;
-    app.select_agent_thread(&mut tui, &mut app_server, side_thread_id)
+    app.select_agent_thread_with_reason(
+        &mut tui,
+        &mut app_server,
+        side_thread_id,
+        displayed_thread_transition::DisplayedThreadTransitionReason::AgentPickerSelection,
+    )
         .await?;
     assert_eq!(app.active_thread_id, Some(side_thread_id));
     let event = app
@@ -2526,6 +2533,58 @@ async fn should_attach_live_thread_for_selection_skips_closed_metadata_only_thre
     app.thread_event_channels
         .insert(thread_id, ThreadEventChannel::new(/*capacity*/ 1));
     assert!(!app.should_attach_live_thread_for_selection(thread_id));
+
+    app.thread_event_channels
+        .get_mut(&thread_id)
+        .expect("live channel")
+        .mark_replay_only();
+    assert!(app.should_attach_live_thread_for_selection(thread_id));
+
+    app.attached_thread_ids.insert(thread_id);
+    assert!(!app.should_attach_live_thread_for_selection(thread_id));
+}
+
+#[tokio::test]
+async fn replay_only_thread_channel_converts_to_live_after_later_resume() -> Result<()> {
+    let mut app = make_test_app().await;
+    let thread_id = ThreadId::from_string(
+        &app_test_support::create_fake_rollout(
+            app.config.codex_home.as_path(),
+            "2025-01-05T12-00-00",
+            "2025-01-05T12:00:00Z",
+            "Seed completed turn",
+            Some(&app.config.model_provider_id),
+            /*git_info*/ None,
+        )
+        .expect("materialize seed rollout"),
+    )?;
+    let mut app_server =
+        crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref()).await?;
+    let mut replay_only_channel = ThreadEventChannel::new(/*capacity*/ 1);
+    replay_only_channel.mark_replay_only();
+    app.thread_event_channels
+        .insert(thread_id, replay_only_channel);
+    app.agent_navigation.upsert(
+        thread_id,
+        Some("Scout".to_string()),
+        Some("worker".to_string()),
+        /*is_closed*/ false,
+    );
+
+    assert!(app.should_attach_live_thread_for_selection(thread_id));
+    assert!(
+        app.attach_live_thread_for_selection(&mut app_server, thread_id)
+            .await?
+    );
+    assert!(app.is_thread_attached(thread_id));
+    assert_eq!(
+        app.thread_event_channels
+            .get(&thread_id)
+            .map(ThreadEventChannel::attachment),
+        Some(ThreadEventAttachment::Live)
+    );
+    assert!(!app.should_attach_live_thread_for_selection(thread_id));
+    Ok(())
 }
 
 #[tokio::test]

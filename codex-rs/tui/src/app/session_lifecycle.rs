@@ -428,6 +428,15 @@ impl App {
         };
         if live_attached {
             self.attached_thread_ids.insert(thread_id);
+            // A fallback channel has no app-server listener. Replace it with the default live
+            // channel after a later successful resume so liveness and selection keep agreeing.
+            if self
+                .thread_event_channels
+                .get(&thread_id)
+                .is_some_and(|channel| channel.attachment() == ThreadEventAttachment::ReplayOnly)
+            {
+                self.thread_event_channels.remove(&thread_id);
+            }
         }
         let channel = self.ensure_thread_channel(thread_id);
         if !live_attached {
@@ -582,7 +591,11 @@ impl App {
     }
 
     pub(super) fn should_attach_live_thread_for_selection(&self, thread_id: ThreadId) -> bool {
-        !self.thread_event_channels.contains_key(&thread_id)
+        !self.is_thread_attached(thread_id)
+            && self
+                .thread_event_channels
+                .get(&thread_id)
+                .is_none_or(|channel| channel.attachment() == ThreadEventAttachment::ReplayOnly)
             && self
                 .agent_navigation
                 .get(&thread_id)

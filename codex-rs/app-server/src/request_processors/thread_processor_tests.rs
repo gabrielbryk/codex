@@ -105,19 +105,31 @@ mod thread_processor_behavior_tests {
     }
 
     use super::super::*;
+    use app_test_support::MockResponsesConfig;
+    use app_test_support::TestAppServer;
+    use app_test_support::create_fake_parented_rollout_with_source;
+    use app_test_support::create_fake_rollout;
+    use app_test_support::create_mock_responses_server_repeating_assistant;
+    use app_test_support::rollout_path;
     use crate::outgoing_message::OutgoingEnvelope;
     use crate::outgoing_message::OutgoingMessage;
     use anyhow::Result;
     use chrono::DateTime;
     use chrono::Utc;
     use codex_app_server_protocol::ServerRequestPayload;
+    use codex_app_server_protocol::ThreadResumeResponse;
     use codex_app_server_protocol::ThreadItem;
+    use codex_app_server_protocol::ThreadStartParams;
+    use codex_app_server_protocol::ThreadUnsubscribeParams;
+    use codex_app_server_protocol::TurnStartParams;
     use codex_app_server_protocol::ToolRequestUserInputParams;
+    use codex_app_server_protocol::UserInput;
     use codex_config::CloudConfigBundleLoader;
     use codex_config::LoaderOverrides;
     use codex_config::SessionThreadConfig;
     use codex_config::StaticThreadConfigLoader;
     use codex_config::ThreadConfigSource;
+    use codex_features::Feature;
     use codex_model_provider_info::ModelProviderInfo;
     use codex_model_provider_info::WireApi;
     use codex_protocol::ThreadId;
@@ -127,9 +139,13 @@ mod thread_processor_behavior_tests {
     use codex_protocol::models::PermissionProfile;
     use codex_protocol::openai_models::ReasoningEffort;
     use codex_protocol::protocol::AskForApproval;
+    use codex_protocol::protocol::MultiAgentVersion;
     use codex_protocol::protocol::SessionSource;
     use codex_protocol::protocol::SubAgentSource;
     use codex_protocol::protocol::TurnEnvironmentSelections;
+    use codex_rollout::RolloutItem;
+    use codex_rollout::append_rollout_item_to_path;
+    use codex_rollout::read_session_meta_line;
     use codex_state::ThreadMetadataBuilder;
     use codex_thread_store::StoredThread;
     use codex_utils_absolute_path::test_support::PathBufExt;
@@ -914,6 +930,104 @@ mod thread_processor_behavior_tests {
     }
 
     #[tokio::test]
+    async fn loaded_parent_owned_v2_child_ignores_resume_override() -> Result<()> {
+        const ROOT_TIMESTAMP: &str = "2026-08-27T10-00-00";
+        const CHILD_TIMESTAMP: &str = "2026-08-27T10-01-00";
+        let server = create_mock_responses_server_repeating_assistant("Done").await;
+        let codex_home = TempDir::new()?;
+        MockResponsesConfig::new(&server.uri())
+            .disable_feature(Feature::MultiAgentV2)
+            .enable_feature(Feature::Collab)
+            .write(codex_home.path())?;
+        let root_thread_id = create_fake_rollout(
+            codex_home.path(),
+            ROOT_TIMESTAMP,
+            "2026-08-27T10:00:00Z",
+            "Parent",
+            Some("mock_provider"),
+            /*git_info*/ None,
+        )?;
+        let parent_thread_id = ThreadId::from_string(&root_thread_id)?;
+        let root_rollout_path = rollout_path(codex_home.path(), ROOT_TIMESTAMP, &root_thread_id);
+        let mut root_meta = read_session_meta_line(&root_rollout_path).await?;
+        root_meta.meta.multi_agent_version = Some(MultiAgentVersion::V2);
+        append_rollout_item_to_path(&root_rollout_path, &RolloutItem::SessionMeta(root_meta))
+            .await?;
+
+        let child_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id,
+            depth: 1,
+            agent_path: None,
+            agent_nickname: None,
+            agent_role: None,
+        });
+        let child_thread_id = create_fake_parented_rollout_with_source(
+            codex_home.path(),
+            CHILD_TIMESTAMP,
+            "2026-08-27T10:01:00Z",
+            "Child",
+            Some("mock_provider"),
+            /*git_info*/ None,
+            child_source,
+            parent_thread_id.into(),
+            parent_thread_id,
+        )?;
+        let child_rollout_path = rollout_path(codex_home.path(), CHILD_TIMESTAMP, &child_thread_id);
+        let mut child_meta = read_session_meta_line(&child_rollout_path).await?;
+        child_meta.meta.multi_agent_version = Some(MultiAgentVersion::V2);
+        append_rollout_item_to_path(&child_rollout_path, &RolloutItem::SessionMeta(child_meta))
+            .await?;
+
+        let replacement_cwd = TempDir::new()?;
+        let mut app_server = TestAppServer::builder()
+            .with_codex_home(codex_home.path())
+            .build_initialized()
+            .await?;
+
+        let parent_resume_id = app_server
+            .send_thread_resume_request(ThreadResumeParams {
+                thread_id: root_thread_id,
+                ..Default::default()
+            })
+            .await?;
+        let _: ThreadResumeResponse = tokio::time::timeout(
+            Duration::from_secs(10),
+            app_server.read_response(parent_resume_id),
+        )
+        .await??;
+
+        let child_resume_id = app_server
+            .send_thread_resume_request(ThreadResumeParams {
+                thread_id: child_thread_id.clone(),
+                ..Default::default()
+            })
+            .await?;
+        let ThreadResumeResponse {
+            cwd: initial_cwd, ..
+        } = tokio::time::timeout(
+            Duration::from_secs(10),
+            app_server.read_response(child_resume_id),
+        )
+        .await??;
+
+        let child_resume_id = app_server
+            .send_thread_resume_request(ThreadResumeParams {
+                thread_id: child_thread_id,
+                cwd: Some(replacement_cwd.path().display().to_string()),
+                ..Default::default()
+            })
+            .await?;
+        let ThreadResumeResponse { cwd, .. } = tokio::time::timeout(
+            Duration::from_secs(10),
+            app_server.read_response(child_resume_id),
+        )
+        .await??;
+        assert_eq!(cwd, initial_cwd);
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn read_summary_from_rollout_returns_empty_preview_when_no_user_message() -> Result<()> {
         use codex_protocol::protocol::SessionMetaLine;
         use codex_rollout::RolloutItem;
@@ -1388,6 +1502,86 @@ mod thread_processor_behavior_tests {
             manager.wait_for_thread_subscriber(thread_id),
         )
         .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn loaded_idle_resume_preserves_explicit_rejoin_then_applies_override_after_unsubscribe()
+    -> Result<()> {
+        let server = create_mock_responses_server_repeating_assistant("Done").await;
+        let codex_home = TempDir::new()?;
+        MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+        let replacement_cwd = TempDir::new()?;
+        let mut app_server = TestAppServer::builder()
+            .with_codex_home(codex_home.path())
+            .build_initialized()
+            .await?;
+
+        let started = app_server.start_thread(ThreadStartParams::default()).await?;
+        let thread_id = started.thread.id;
+        let initial_cwd = started.thread.cwd;
+        let requested_cwd = replacement_cwd.path().display().to_string();
+
+        let turn_id = app_server
+            .send_turn_start_request(TurnStartParams {
+                thread_id: thread_id.clone(),
+                input: vec![UserInput::Text {
+                    text: "materialize rollout".to_string(),
+                    text_elements: Vec::new(),
+                }],
+                ..Default::default()
+            })
+            .await?;
+        let _: codex_app_server_protocol::TurnStartResponse = tokio::time::timeout(
+            Duration::from_secs(10),
+            app_server.read_response(turn_id),
+        )
+        .await??;
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            app_server.read_stream_until_notification_message("turn/completed"),
+        )
+        .await??;
+
+        let resume_id = app_server
+            .send_thread_resume_request(ThreadResumeParams {
+                thread_id: thread_id.clone(),
+                cwd: Some(requested_cwd.clone()),
+                ..Default::default()
+            })
+            .await?;
+        let ThreadResumeResponse { cwd, .. } = tokio::time::timeout(
+            Duration::from_secs(10),
+            app_server.read_response(resume_id),
+        )
+        .await??;
+        assert_eq!(cwd, initial_cwd);
+
+        let unsubscribe_id = app_server
+            .send_thread_unsubscribe_request(ThreadUnsubscribeParams {
+                thread_id: thread_id.clone(),
+            })
+            .await?;
+        let _: codex_app_server_protocol::ThreadUnsubscribeResponse = tokio::time::timeout(
+            Duration::from_secs(10),
+            app_server.read_response(unsubscribe_id),
+        )
+        .await??;
+
+        let resume_id = app_server
+            .send_thread_resume_request(ThreadResumeParams {
+                thread_id,
+                cwd: Some(requested_cwd),
+                ..Default::default()
+            })
+            .await?;
+        let ThreadResumeResponse { cwd, .. } = tokio::time::timeout(
+            Duration::from_secs(10),
+            app_server.read_response(resume_id),
+        )
+        .await??;
+        assert_eq!(cwd.as_path(), replacement_cwd.path());
+
         Ok(())
     }
 
