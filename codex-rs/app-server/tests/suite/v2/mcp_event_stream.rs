@@ -387,7 +387,11 @@ async fn mcp_event_stream_start_rejection_does_not_reserve_a_subscription() -> R
         app_server.read_notification("turn/started"),
     )
     .await??;
-    timeout(Duration::from_secs(5), responses_server.wait_for_request_count(1)).await?;
+    timeout(
+        Duration::from_secs(5),
+        responses_server.wait_for_request_count(1),
+    )
+    .await?;
 
     let drain: ServerDrainResponse = app_server
         .request(|request_id| ClientRequest::ServerDrainStart {
@@ -417,7 +421,11 @@ async fn mcp_event_stream_start_rejection_does_not_reserve_a_subscription() -> R
     .await??;
     assert_eq!(rejected.error.code, -32002);
     assert_eq!(
-        rejected.error.data.as_ref().and_then(|data| data.get("type")),
+        rejected
+            .error
+            .data
+            .as_ref()
+            .and_then(|data| data.get("type")),
         Some(&json!("serverDraining"))
     );
     assert!(

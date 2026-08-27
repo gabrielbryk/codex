@@ -6,11 +6,11 @@ mod advanced_reasoning_tests;
 mod background_exit_tests;
 #[path = "tests/connector_policy.rs"]
 mod connector_policy;
+mod fatal_exit;
 #[path = "tests/key_chords.rs"]
 mod key_chords;
 #[path = "tests/mcp_startup.rs"]
 mod mcp_startup;
-mod fatal_exit;
 mod model_catalog;
 #[path = "tests/patch_approval_tests.rs"]
 mod patch_approval_tests;
@@ -895,7 +895,7 @@ async fn selected_side_thread_close_is_handled_by_foreground_event_owner() -> Re
         side_thread_id,
         displayed_thread_transition::DisplayedThreadTransitionReason::AgentPickerSelection,
     )
-        .await?;
+    .await?;
     assert_eq!(app.active_thread_id, Some(side_thread_id));
     let event = app
         .active_thread_rx

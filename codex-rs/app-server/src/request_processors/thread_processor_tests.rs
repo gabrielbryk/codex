@@ -105,24 +105,24 @@ mod thread_processor_behavior_tests {
     }
 
     use super::super::*;
+    use crate::outgoing_message::OutgoingEnvelope;
+    use crate::outgoing_message::OutgoingMessage;
+    use anyhow::Result;
     use app_test_support::MockResponsesConfig;
     use app_test_support::TestAppServer;
     use app_test_support::create_fake_parented_rollout_with_source;
     use app_test_support::create_fake_rollout;
     use app_test_support::create_mock_responses_server_repeating_assistant;
     use app_test_support::rollout_path;
-    use crate::outgoing_message::OutgoingEnvelope;
-    use crate::outgoing_message::OutgoingMessage;
-    use anyhow::Result;
     use chrono::DateTime;
     use chrono::Utc;
     use codex_app_server_protocol::ServerRequestPayload;
-    use codex_app_server_protocol::ThreadResumeResponse;
     use codex_app_server_protocol::ThreadItem;
+    use codex_app_server_protocol::ThreadResumeResponse;
     use codex_app_server_protocol::ThreadStartParams;
     use codex_app_server_protocol::ThreadUnsubscribeParams;
-    use codex_app_server_protocol::TurnStartParams;
     use codex_app_server_protocol::ToolRequestUserInputParams;
+    use codex_app_server_protocol::TurnStartParams;
     use codex_app_server_protocol::UserInput;
     use codex_config::CloudConfigBundleLoader;
     use codex_config::LoaderOverrides;
@@ -1517,7 +1517,9 @@ mod thread_processor_behavior_tests {
             .build_initialized()
             .await?;
 
-        let started = app_server.start_thread(ThreadStartParams::default()).await?;
+        let started = app_server
+            .start_thread(ThreadStartParams::default())
+            .await?;
         let thread_id = started.thread.id;
         let initial_cwd = started.thread.cwd;
         let requested_cwd = replacement_cwd.path().display().to_string();
@@ -1532,11 +1534,9 @@ mod thread_processor_behavior_tests {
                 ..Default::default()
             })
             .await?;
-        let _: codex_app_server_protocol::TurnStartResponse = tokio::time::timeout(
-            Duration::from_secs(10),
-            app_server.read_response(turn_id),
-        )
-        .await??;
+        let _: codex_app_server_protocol::TurnStartResponse =
+            tokio::time::timeout(Duration::from_secs(10), app_server.read_response(turn_id))
+                .await??;
         tokio::time::timeout(
             Duration::from_secs(10),
             app_server.read_stream_until_notification_message("turn/completed"),
@@ -1550,11 +1550,9 @@ mod thread_processor_behavior_tests {
                 ..Default::default()
             })
             .await?;
-        let ThreadResumeResponse { cwd, .. } = tokio::time::timeout(
-            Duration::from_secs(10),
-            app_server.read_response(resume_id),
-        )
-        .await??;
+        let ThreadResumeResponse { cwd, .. } =
+            tokio::time::timeout(Duration::from_secs(10), app_server.read_response(resume_id))
+                .await??;
         assert_eq!(cwd, initial_cwd);
 
         let unsubscribe_id = app_server
@@ -1575,11 +1573,9 @@ mod thread_processor_behavior_tests {
                 ..Default::default()
             })
             .await?;
-        let ThreadResumeResponse { cwd, .. } = tokio::time::timeout(
-            Duration::from_secs(10),
-            app_server.read_response(resume_id),
-        )
-        .await??;
+        let ThreadResumeResponse { cwd, .. } =
+            tokio::time::timeout(Duration::from_secs(10), app_server.read_response(resume_id))
+                .await??;
         assert_eq!(cwd.as_path(), replacement_cwd.path());
 
         Ok(())
