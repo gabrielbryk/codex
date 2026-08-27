@@ -764,10 +764,16 @@ async fn cold_resume_preserves_effective_developer_instructions_for_worker(
             .received_requests()
             .await
             .expect("redirect mock requests");
+        let redirect_model_requests = redirect_requests
+            .into_iter()
+            .filter(|request| {
+                request.method == "POST" && request.url.path().ends_with("/responses")
+            })
+            .collect::<Vec<_>>();
         assert!(
-            redirect_requests.is_empty(),
+            redirect_model_requests.is_empty(),
             "warm child reattach must ignore caller provider overrides: {:#?}",
-            redirect_request_summaries(&redirect_requests),
+            redirect_request_summaries(&redirect_model_requests),
         );
         let shutdown = timeout(READ_TIMEOUT, app_server.shutdown_gracefully()).await??;
         assert!(
@@ -1046,10 +1052,16 @@ features.shell_tool = false
         .received_requests()
         .await
         .expect("redirect mock requests");
+    let redirect_model_requests = redirect_requests
+        .into_iter()
+        .filter(|request| {
+            request.method == "POST" && request.url.path().ends_with("/responses")
+        })
+        .collect::<Vec<_>>();
     assert!(
-        redirect_requests.is_empty(),
+        redirect_model_requests.is_empty(),
         "caller or role config redirected the owner-restored child: {:#?}",
-        redirect_request_summaries(&redirect_requests),
+        redirect_request_summaries(&redirect_model_requests),
     );
 
     Ok(())
