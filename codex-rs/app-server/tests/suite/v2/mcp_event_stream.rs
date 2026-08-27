@@ -389,7 +389,7 @@ async fn mcp_event_stream_start_rejection_does_not_reserve_a_subscription() -> R
     .await??;
     timeout(
         Duration::from_secs(5),
-        responses_server.wait_for_request_count(1),
+        responses_server.wait_for_request_count(/*count*/ 1),
     )
     .await?;
 
