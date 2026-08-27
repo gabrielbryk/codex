@@ -730,10 +730,16 @@ async fn ensure_v2_child_loaded_preserves_evicted_parent_authority() {
     check_v2_agent_reload(V2ReloadRoute::NestedParent).await;
 }
 
+#[tokio::test]
+async fn ensure_v2_child_loaded_restores_same_id_provider_after_role_reapply() {
+    check_v2_agent_reload(V2ReloadRoute::NestedParentWithRoleProviderUpdate).await;
+}
+
 #[derive(Clone, Copy)]
 enum V2ReloadRoute {
     Sender,
     NestedParent,
+    NestedParentWithRoleProviderUpdate,
 }
 
 async fn spawn_v2_reload_test_child(
@@ -741,12 +747,13 @@ async fn spawn_v2_reload_test_child(
     config: Config,
     parent: &CodexThread,
     task_name: &str,
+    agent_role: Option<&str>,
 ) -> LiveAgent {
     let source = thread_spawn_source(
         parent.session.thread_id,
         &parent.session_source,
         next_thread_spawn_depth(&parent.session_source),
-        /*agent_role*/ None,
+        agent_role,
         Some(task_name.to_string()),
     )
     .expect("child source");
@@ -770,11 +777,32 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
     let _ = config.features.enable(Feature::Sqlite);
     config.model = Some("gpt-5.6-sol".to_string());
     config.multi_agent_v2.max_concurrent_threads_per_session = 3;
+    if matches!(route, V2ReloadRoute::NestedParentWithRoleProviderUpdate) {
+        config.model_provider.name = "worker runtime provider".to_string();
+        config.model_provider.base_url = Some("https://worker.example/v1".to_string());
+    }
     config.permissions.allow_login_shell = true;
     config
         .permissions
         .set_permission_profile(PermissionProfile::read_only())
         .expect("read-only parent profile");
+    let role_path = matches!(route, V2ReloadRoute::NestedParentWithRoleProviderUpdate).then(|| {
+        let role_path = home.path().join("worker.toml");
+        std::fs::write(
+            &role_path,
+            "developer_instructions = \"initial worker instructions\"\nmodel_reasoning_effort = \"low\"\n",
+        )
+        .expect("write initial worker role");
+        config.agent_roles.insert(
+            "worker".to_string(),
+            AgentRoleConfig {
+                description: None,
+                config_file: Some(role_path.clone()),
+                nickname_candidates: None,
+            },
+        );
+        role_path
+    });
     let harness = AgentControlHarness::new_with_config(home, config).await;
     let client_mcp_extensions =
         ClientMcpExtensions::new([(OPENAI_FORM_EXTENSION_ID.to_string(), serde_json::json!({}))]);
@@ -790,12 +818,13 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
     let control = root.thread.session.services.agent_control.clone();
     let parent_thread = match route {
         V2ReloadRoute::Sender => root.thread,
-        V2ReloadRoute::NestedParent => {
+        V2ReloadRoute::NestedParent | V2ReloadRoute::NestedParentWithRoleProviderUpdate => {
             let parent = spawn_v2_reload_test_child(
                 &control,
                 harness.config.clone(),
                 &root.thread,
                 "parent",
+                /*agent_role*/ None,
             )
             .await;
             harness
@@ -808,8 +837,20 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
     let parent_thread_id = parent_thread.session.thread_id;
     let mut child_config = harness.config.clone();
     child_config.model = Some("gpt-5.6-luna".to_string());
-    let spawned_agent =
-        spawn_v2_reload_test_child(&control, child_config, &parent_thread, "worker").await;
+    let child_agent_role = role_path.as_ref().map(|_| "worker");
+    if let Some(agent_role) = child_agent_role {
+        crate::agent::role::apply_role_to_config(&mut child_config, /*role_name*/ Some(agent_role))
+            .await
+            .expect("apply initial worker role");
+    }
+    let spawned_agent = spawn_v2_reload_test_child(
+        &control,
+        child_config,
+        &parent_thread,
+        "worker",
+        child_agent_role,
+    )
+    .await;
     let agent_path = spawned_agent
         .metadata
         .agent_path
@@ -838,6 +879,14 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
         .await
         .expect("child metadata should be readable");
     assert_eq!(stored_child.history_mode, ThreadHistoryMode::Paginated);
+    if let Some(role_path) = role_path {
+        std::fs::write(
+            role_path,
+            "developer_instructions = \"updated worker instructions\"\n\
+             model_reasoning_effort = \"high\"\n",
+        )
+        .expect("update worker role");
+    }
 
     assert!(
         harness
@@ -868,7 +917,7 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
             .ensure_v2_agent_loaded(sender_config, spawned_agent.thread_id, /*parent*/ None)
             .await
             .expect("known v2 agent should reload"),
-        V2ReloadRoute::NestedParent => {
+        V2ReloadRoute::NestedParent | V2ReloadRoute::NestedParentWithRoleProviderUpdate => {
             let environment = parent_turn
                 .environments
                 .primary()
@@ -905,7 +954,10 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
         .get_thread(spawned_agent.thread_id)
         .await
         .expect("reloaded child thread should exist");
-    if matches!(route, V2ReloadRoute::NestedParent) {
+    if matches!(
+        route,
+        V2ReloadRoute::NestedParent | V2ReloadRoute::NestedParentWithRoleProviderUpdate
+    ) {
         let reloaded_turn = reloaded_child.session.new_default_turn().await;
         assert_eq!(
             (
@@ -923,6 +975,24 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
             &reloaded_child.session.services.exec_policy,
             &parent_thread.session.services.exec_policy,
         ));
+    }
+    if matches!(route, V2ReloadRoute::NestedParentWithRoleProviderUpdate) {
+        let reloaded_turn = reloaded_child.session.new_default_turn().await;
+        assert_eq!(
+            reloaded_turn.developer_instructions.as_deref(),
+            Some("updated worker instructions"),
+            "reload should retain current role instructions while restoring the worker provider",
+        );
+        assert_ne!(
+            harness.config.model_provider,
+            harness
+                .config
+                .model_providers
+                .get(&stored_child.model_provider)
+                .cloned()
+                .expect("stored provider should stay configured"),
+            "the runtime provider must differ from the configured provider with the same ID",
+        );
     }
     assert_eq!(
         reloaded_child.config_snapshot().await.model,

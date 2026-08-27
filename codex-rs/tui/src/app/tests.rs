@@ -2337,6 +2337,7 @@ fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -
                 agent_path: "/root/child-0".to_string(),
                 is_running_hint: true,
             });
+        app.attached_thread_ids.remove(&child_thread_ids[1]);
         app.thread_event_channels.remove(&child_thread_ids[1]);
         let backfill = app.backfill_loaded_subagent_threads(&mut app_server).await;
         assert!(backfill.completed);

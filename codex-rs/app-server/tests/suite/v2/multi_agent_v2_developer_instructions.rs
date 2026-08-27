@@ -738,6 +738,14 @@ async fn cold_resume_preserves_effective_developer_instructions_for_worker(
             })
             .await?;
         assert_eq!(reattached, baseline);
+        assert!(
+            redirect_server
+                .received_requests()
+                .await
+                .expect("redirect mock requests")
+                .is_empty(),
+            "warm child reattach must ignore caller provider overrides"
+        );
         let shutdown = timeout(READ_TIMEOUT, app_server.shutdown_gracefully()).await??;
         assert!(
             shutdown.success(),

@@ -342,6 +342,19 @@ impl AgentControl {
             .await?;
         let stored_model = stored_thread.model.clone();
         let stored_model_provider = stored_thread.model_provider.clone();
+        let stored_model_provider_info = if config.model_provider_id == stored_model_provider {
+            config.model_provider.clone()
+        } else {
+            config
+                .model_providers
+                .get(&stored_model_provider)
+                .cloned()
+                .ok_or_else(|| {
+                    CodexErr::InvalidRequest(format!(
+                        "Model provider `{stored_model_provider}` not found"
+                    ))
+                })?
+        };
         let stored_reasoning_effort = stored_thread.reasoning_effort.clone();
         let stored_source = stored_thread.source.clone();
         let stored_parent_thread_id = stored_thread.parent_thread_id;
@@ -417,18 +430,11 @@ impl AgentControl {
         if let Some(model) = stored_model {
             config.model = Some(model);
         }
-        if config.model_provider_id != stored_model_provider {
-            config.model_provider = config
-                .model_providers
-                .get(&stored_model_provider)
-                .cloned()
-                .ok_or_else(|| {
-                    CodexErr::InvalidRequest(format!(
-                        "Model provider `{stored_model_provider}` not found"
-                    ))
-                })?;
-            config.model_provider_id = stored_model_provider;
-        }
+        config
+            .model_providers
+            .insert(stored_model_provider.clone(), stored_model_provider_info.clone());
+        config.model_provider = stored_model_provider_info;
+        config.model_provider_id = stored_model_provider;
         let parent_thread_id = owner_thread_id
             .or_else(|| initial_history.get_resumed_parent_thread_id())
             .or(stored_parent_thread_id);

@@ -1957,6 +1957,56 @@ async fn code_mode_uses_the_first_normalized_tool_identity() {
 }
 
 #[tokio::test]
+async fn code_mode_augments_the_first_normalized_dynamic_tool_only() {
+    let first = dynamic_tool(None, "foo-bar", /*defer_loading*/ false);
+    let shadow = dynamic_tool(None, "foo_bar", /*defer_loading*/ false);
+    let plan = probe_with(
+        |turn| set_feature(turn, Feature::CodeMode, /*enabled*/ true),
+        ToolPlanInputs {
+            dynamic_tools: vec![first.clone(), shadow.clone()],
+            ..ToolPlanInputs::default()
+        },
+    )
+    .await;
+
+    let DynamicToolSpec::Function(first) = first else {
+        panic!("expected a top-level dynamic function");
+    };
+    let mut expected_first = codex_tools::dynamic_tool_to_responses_api_tool(&first)
+        .expect("dynamic function should convert to a model-visible tool");
+    expected_first.defer_loading = None;
+    expected_first.description = concat!(
+        "foo-bar dynamic tool\n\n",
+        "exec tool declaration:\n",
+        "```ts\n",
+        "declare const tools: { foo_bar(args: {}): Promise<unknown>; };\n",
+        "```"
+    )
+    .to_string();
+    assert_eq!(
+        plan.visible_spec("foo-bar"),
+        &ToolSpec::Function(expected_first)
+    );
+
+    let DynamicToolSpec::Function(shadow) = shadow else {
+        panic!("expected a top-level dynamic function");
+    };
+    let mut expected_shadow = codex_tools::dynamic_tool_to_responses_api_tool(&shadow)
+        .expect("dynamic function should convert to a model-visible tool");
+    expected_shadow.defer_loading = None;
+    assert_eq!(
+        plan.visible_spec("foo_bar"),
+        &ToolSpec::Function(expected_shadow)
+    );
+
+    let ToolSpec::Freeform(exec) = plan.visible_spec(codex_code_mode::PUBLIC_TOOL_NAME) else {
+        panic!("expected code mode exec tool");
+    };
+    assert!(!exec.description.contains("foo-bar dynamic tool"));
+    assert!(!exec.description.contains("foo_bar dynamic tool"));
+}
+
+#[tokio::test]
 async fn deferred_extension_tools_are_discoverable_with_tool_search() {
     let plan = probe_with(
         |turn| {

@@ -84,6 +84,7 @@ async fn hidden_system_thread_does_not_refresh_shared_overview() {
     let parent_thread_id = ThreadId::new();
     app.primary_thread_id = Some(parent_thread_id);
     app.active_thread_id = Some(parent_thread_id);
+    app.attached_thread_ids.insert(parent_thread_id);
     app.ensure_thread_channel(parent_thread_id);
     app.agents_overview
         .dispatched_requests
@@ -128,6 +129,7 @@ async fn hidden_system_thread_does_not_refresh_shared_overview() {
         "Persisted system thread",
         ThreadStatus::Idle,
     );
+    thread.parent_thread_id = Some(parent_thread_id.to_string());
     thread.thread_source = Some(ThreadSource::Feature("system".to_string()));
 
     app.handle_app_server_event(

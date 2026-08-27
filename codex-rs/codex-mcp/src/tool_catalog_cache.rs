@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hash;
 use std::hash::Hasher;
@@ -31,6 +32,13 @@ use crate::server::has_explicit_http_authorization;
 
 const TOOL_CATALOG_CACHE_CAPACITY: usize = 32;
 const TOOL_CATALOG_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
+
+// These values are injected by the host for MCP child-process attribution. They
+// affect where a server process is recorded, not which tools it exposes.
+const RUNTIME_ATTRIBUTION_ENV_VARS: [&str; 2] = [
+    "CODEX_WORKLOAD_THREAD_ID",
+    "CODEX_WORKLOAD_TYPE",
+];
 
 /// Process-scoped cache of recent reusable tool definitions for MCP servers.
 #[derive(Clone)]
@@ -202,6 +210,17 @@ impl PartialEq for ToolCatalogIdentity {
 
 impl Eq for ToolCatalogIdentity {}
 
+fn stdio_cache_identity_environment(
+    env: &HashMap<String, String>,
+) -> Option<BTreeMap<&str, &str>> {
+    let env = env
+        .iter()
+        .filter(|(name, _)| !RUNTIME_ATTRIBUTION_ENV_VARS.contains(&name.as_str()))
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    (!env.is_empty()).then_some(env)
+}
+
 impl Hash for ToolCatalogIdentity {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.server_name.hash(state);
@@ -329,11 +348,9 @@ impl ToolCatalogTransportIdentity {
         }
 
         let mut hasher = Sha1::new();
-        let env = env.as_ref().map(|env| {
-            env.iter()
-                .map(|(key, value)| (key.as_str(), value.as_str()))
-                .collect::<BTreeMap<_, _>>()
-        });
+        let env = env
+            .as_ref()
+            .and_then(stdio_cache_identity_environment);
         hasher.update(
             serde_json::to_vec(&(
                 command,

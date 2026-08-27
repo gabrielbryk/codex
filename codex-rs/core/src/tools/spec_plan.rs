@@ -509,12 +509,13 @@ fn build_model_visible_specs(
     }
     specs.extend(hosted_specs);
 
-    merge_into_namespaces(specs)
+    let specs = merge_into_namespaces(specs)
         .into_iter()
         .filter(|spec| {
             namespace_tools_enabled(turn_context) || !matches!(spec, ToolSpec::Namespace(_))
         })
-        .collect()
+        .collect();
+    augment_normalized_code_mode_winner_descriptions(code_mode_tool_names, specs)
 }
 
 fn spec_for_model_request(
@@ -525,20 +526,119 @@ fn spec_for_model_request(
     spec: ToolSpec,
 ) -> ToolSpec {
     let tool_mode = effective_tool_mode(turn_context);
+    let code_mode_name = codex_tools::code_mode_name_for_tool_name(tool_name);
+    let normalized_code_mode_name = codex_code_mode::normalize_code_mode_identifier(&code_mode_name);
     if matches!(tool_mode, ToolMode::CodeMode | ToolMode::CodeModeOnly)
         && exposure.is_available_in_code_mode()
         && !is_excluded_from_code_mode(turn_context, tool_name)
-        && codex_code_mode::is_code_mode_nested_tool(spec.name())
+        && codex_code_mode::is_code_mode_nested_tool(&code_mode_name)
+        && code_mode_name == normalized_code_mode_name
         && code_mode_tool_names
-            .get(&codex_code_mode::normalize_code_mode_identifier(
-                &codex_tools::code_mode_name_for_tool_name(tool_name),
-            ))
+            .get(&normalized_code_mode_name)
             .is_some_and(|winner| winner == tool_name)
     {
         codex_tools::augment_tool_spec_for_code_mode(spec)
     } else {
         spec
     }
+}
+
+/// Adds declarations for code-mode tools whose wire names require normalization.
+///
+/// This runs after direct tools have been assembled into their final model-visible
+/// form, so it preserves the original wire name while describing the runtime name.
+fn augment_normalized_code_mode_winner_descriptions(
+    code_mode_tool_names: &BTreeMap<String, ToolName>,
+    mut specs: Vec<ToolSpec>,
+) -> Vec<ToolSpec> {
+    let is_normalized_winner = |tool_name: &ToolName| {
+        let code_mode_name = codex_tools::code_mode_name_for_tool_name(tool_name);
+        let normalized_code_mode_name = codex_code_mode::normalize_code_mode_identifier(&code_mode_name);
+        code_mode_name != normalized_code_mode_name
+            && code_mode_tool_names
+                .get(&normalized_code_mode_name)
+                .is_some_and(|winner| winner == tool_name)
+    };
+
+    for spec in &mut specs {
+        match spec {
+            ToolSpec::Function(tool) => {
+                let tool_name = ToolName::plain(tool.name.clone());
+                if is_normalized_winner(&tool_name) {
+                    tool.description = codex_code_mode::augment_tool_definition(
+                        codex_code_mode::ToolDefinition {
+                            name: codex_tools::code_mode_name_for_tool_name(&tool_name),
+                            tool_name: tool_name.clone(),
+                            description: tool.description.clone(),
+                            kind: codex_code_mode::CodeModeToolKind::Function,
+                            input_schema: serde_json::to_value(&tool.parameters).ok(),
+                            output_schema: tool.output_schema.clone(),
+                        },
+                    )
+                    .description;
+                }
+            }
+            ToolSpec::Freeform(tool) => {
+                let tool_name = ToolName::plain(tool.name.clone());
+                if is_normalized_winner(&tool_name) {
+                    tool.description = codex_code_mode::augment_tool_definition(
+                        codex_code_mode::ToolDefinition {
+                            name: codex_tools::code_mode_name_for_tool_name(&tool_name),
+                            tool_name: tool_name.clone(),
+                            description: tool.description.clone(),
+                            kind: codex_code_mode::CodeModeToolKind::Freeform,
+                            input_schema: None,
+                            output_schema: None,
+                        },
+                    )
+                    .description;
+                }
+            }
+            ToolSpec::Namespace(namespace) => {
+                for tool in &mut namespace.tools {
+                    match tool {
+                        ResponsesApiNamespaceTool::Function(tool) => {
+                            let tool_name =
+                                ToolName::namespaced(namespace.name.clone(), tool.name.clone());
+                            if is_normalized_winner(&tool_name) {
+                                tool.description = codex_code_mode::augment_tool_definition(
+                                    codex_code_mode::ToolDefinition {
+                                        name: codex_tools::code_mode_name_for_tool_name(&tool_name),
+                                        tool_name: tool_name.clone(),
+                                        description: tool.description.clone(),
+                                        kind: codex_code_mode::CodeModeToolKind::Function,
+                                        input_schema: serde_json::to_value(&tool.parameters).ok(),
+                                        output_schema: tool.output_schema.clone(),
+                                    },
+                                )
+                                .description;
+                            }
+                        }
+                        ResponsesApiNamespaceTool::Custom(tool) => {
+                            let tool_name =
+                                ToolName::namespaced(namespace.name.clone(), tool.name.clone());
+                            if is_normalized_winner(&tool_name) {
+                                tool.description = codex_code_mode::augment_tool_definition(
+                                    codex_code_mode::ToolDefinition {
+                                        name: codex_tools::code_mode_name_for_tool_name(&tool_name),
+                                        tool_name: tool_name.clone(),
+                                        description: tool.description.clone(),
+                                        kind: codex_code_mode::CodeModeToolKind::Freeform,
+                                        input_schema: None,
+                                        output_schema: None,
+                                    },
+                                )
+                                .description;
+                            }
+                        }
+                    }
+                }
+            }
+            ToolSpec::ToolSearch { .. } | ToolSpec::WebSearch { .. } => {}
+        }
+    }
+
+    specs
 }
 
 #[instrument(level = "trace", skip_all)]

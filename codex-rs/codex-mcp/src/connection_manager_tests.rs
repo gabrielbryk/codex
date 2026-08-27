@@ -2222,6 +2222,47 @@ fn tool_catalog_cache_bypasses_remote_sourced_environment_variables() {
 }
 
 #[test]
+fn tool_catalog_cache_ignores_runtime_attribution() {
+    let cache = McpToolCatalogCache::default();
+    let runtime_context = McpRuntimeContext::new(
+        Arc::new(environment_manager_without_environments()),
+        PathBuf::from("/tmp"),
+    );
+    let config = |thread_id: &str, workload_type: &str, static_value: &str| {
+        serde_json::from_value::<McpServerConfig>(serde_json::json!({
+            "command": "docs-mcp",
+            "env": {
+                "CODEX_WORKLOAD_THREAD_ID": thread_id,
+                "CODEX_WORKLOAD_TYPE": workload_type,
+                "MCP_TEST_STATIC_VALUE": static_value,
+            },
+        }))
+        .expect("MCP config")
+    };
+    let context = |config: &McpServerConfig| {
+        cache
+            .context(
+                "docs",
+                config,
+                &runtime_context,
+                /*resolved_environment*/ None,
+                (
+                    &ElicitationCapability::default(),
+                    &ClientMcpExtensions::default(),
+                ),
+                /*connection_identity*/ None,
+            )
+            .expect("cache context")
+    };
+
+    let first = context(&config("thread-1", "mcp", "static"));
+    first.publish_if_newest(first.begin_fetch(), &[create_test_tool("docs", "search")]);
+
+    assert!(context(&config("thread-2", "different", "static")).has_tools());
+    assert!(!context(&config("thread-2", "different", "changed")).has_tools());
+}
+
+#[test]
 fn tool_catalog_cache_bypasses_http_headers_helpers() {
     let cache = McpToolCatalogCache::default();
     let runtime_context = reusable_server_runtime_context();

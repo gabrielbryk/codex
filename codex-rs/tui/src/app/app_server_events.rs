@@ -435,7 +435,14 @@ impl App {
         }
 
         let thread_id = server_request_thread_id(&request);
-        if thread_id.is_some_and(|thread_id| !self.is_thread_attached(thread_id)) {
+        let is_registered_background_thread = thread_id.is_some_and(|thread_id| {
+            self.agents_overview
+                .dispatched_requests
+                .contains_key(&thread_id)
+        });
+        if thread_id.is_some_and(|thread_id| !self.is_thread_attached(thread_id))
+            && !is_registered_background_thread
+        {
             tracing::warn!(
                 ?thread_id,
                 request_id = ?request.id(),
