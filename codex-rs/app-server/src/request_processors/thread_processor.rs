@@ -3695,10 +3695,14 @@ impl ThreadRequestProcessor {
             matches!(thread.history_mode, ThreadHistoryMode::Paginated).then_some(thread.thread_id)
         });
         let paginated_resume = paginated_thread_id.is_some();
+        let child_session_source = thread_history
+            .get_resumed_session_sources()
+            .map(|(source, _)| source)
+            .or_else(|| resume_source_thread.as_ref().map(|thread| thread.source.clone()));
 
         // Parent-owned V2 children must resume through their owner, not caller configuration.
         if let InitialHistory::Resumed(resumed_history) = &thread_history
-            && let Some((source, _)) = thread_history.get_resumed_session_sources()
+            && let Some(source) = child_session_source
             && !can_accept_direct_input(thread_history.get_multi_agent_version(), &source)
         {
             let child_thread_id = resumed_history.conversation_id;
