@@ -35,10 +35,7 @@ const TOOL_CATALOG_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 
 // These values are injected by the host for MCP child-process attribution. They
 // affect where a server process is recorded, not which tools it exposes.
-const RUNTIME_ATTRIBUTION_ENV_VARS: [&str; 2] = [
-    "CODEX_WORKLOAD_THREAD_ID",
-    "CODEX_WORKLOAD_TYPE",
-];
+const RUNTIME_ATTRIBUTION_ENV_VARS: [&str; 2] = ["CODEX_WORKLOAD_THREAD_ID", "CODEX_WORKLOAD_TYPE"];
 
 /// Process-scoped cache of recent reusable tool definitions for MCP servers.
 #[derive(Clone)]
@@ -210,9 +207,7 @@ impl PartialEq for ToolCatalogIdentity {
 
 impl Eq for ToolCatalogIdentity {}
 
-fn stdio_cache_identity_environment(
-    env: &HashMap<String, String>,
-) -> Option<BTreeMap<&str, &str>> {
+fn stdio_cache_identity_environment(env: &HashMap<String, String>) -> Option<BTreeMap<&str, &str>> {
     let env = env
         .iter()
         .filter(|(name, _)| !RUNTIME_ATTRIBUTION_ENV_VARS.contains(&name.as_str()))
@@ -348,9 +343,7 @@ impl ToolCatalogTransportIdentity {
         }
 
         let mut hasher = Sha1::new();
-        let env = env
-            .as_ref()
-            .and_then(stdio_cache_identity_environment);
+        let env = env.as_ref().and_then(stdio_cache_identity_environment);
         hasher.update(
             serde_json::to_vec(&(
                 command,

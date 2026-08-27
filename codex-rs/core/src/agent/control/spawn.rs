@@ -430,9 +430,10 @@ impl AgentControl {
         if let Some(model) = stored_model {
             config.model = Some(model);
         }
-        config
-            .model_providers
-            .insert(stored_model_provider.clone(), stored_model_provider_info.clone());
+        config.model_providers.insert(
+            stored_model_provider.clone(),
+            stored_model_provider_info.clone(),
+        );
         config.model_provider = stored_model_provider_info;
         config.model_provider_id = stored_model_provider;
         let parent_thread_id = owner_thread_id

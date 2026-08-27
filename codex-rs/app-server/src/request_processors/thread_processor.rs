@@ -3698,7 +3698,11 @@ impl ThreadRequestProcessor {
         let child_session_source = thread_history
             .get_resumed_session_sources()
             .map(|(source, _)| source)
-            .or_else(|| resume_source_thread.as_ref().map(|thread| thread.source.clone()));
+            .or_else(|| {
+                resume_source_thread
+                    .as_ref()
+                    .map(|thread| thread.source.clone())
+            });
 
         // Parent-owned V2 children must resume through their owner, not caller configuration.
         if let InitialHistory::Resumed(resumed_history) = &thread_history

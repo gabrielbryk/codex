@@ -839,9 +839,12 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
     child_config.model = Some("gpt-5.6-luna".to_string());
     let child_agent_role = role_path.as_ref().map(|_| "worker");
     if let Some(agent_role) = child_agent_role {
-        crate::agent::role::apply_role_to_config(&mut child_config, /*role_name*/ Some(agent_role))
-            .await
-            .expect("apply initial worker role");
+        crate::agent::role::apply_role_to_config(
+            &mut child_config,
+            /*role_name*/ Some(agent_role),
+        )
+        .await
+        .expect("apply initial worker role");
     }
     let spawned_agent = spawn_v2_reload_test_child(
         &control,

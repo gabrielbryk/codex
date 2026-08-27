@@ -1054,9 +1054,7 @@ features.shell_tool = false
         .expect("redirect mock requests");
     let redirect_model_requests = redirect_requests
         .into_iter()
-        .filter(|request| {
-            request.method == "POST" && request.url.path().ends_with("/responses")
-        })
+        .filter(|request| request.method == "POST" && request.url.path().ends_with("/responses"))
         .collect::<Vec<_>>();
     assert!(
         redirect_model_requests.is_empty(),
