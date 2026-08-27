@@ -27,6 +27,18 @@ The plan must report the registry's explicit `sourceBaseSha` and bounded `source
 Never replace the declared patch-stack base with a release tag's merge base. Record
 `merge-base-expanded-range` if that merge base would expand the range.
 
+Run the installed repo-owned workflow helper once before expensive planning or validation:
+
+```bash
+codex-upgrade-workflow preflight \
+  --repo /mnt/wd-black/ClonedRepos/codex \
+  --fork-id codex > <run-dir>/preflight.json
+```
+
+Persist this bounded artifact and use it as the coordinator's source for repository/worktree/stash,
+package, runtime, registry, plan, and patch-template evidence. A stale or contradictory preflight is
+a hard stop until refreshed; do not compensate by reconstructing the same inventory manually.
+
 Interpret target intent literally:
 
 - An explicit version or stable-release request wins over registry prerelease selection.
@@ -48,8 +60,16 @@ Similar symbols, nearby refactors, or a clean cherry-pick are not supersession p
 observable behavior, failure handling, configuration/API compatibility, and tests. When only part
 of a patch is superseded, rework the surviving intent rather than dropping the logical patch.
 
+Have Luna populate the helper-generated patch-evidence/template artifact with facts for every patch:
+patch ID and source commit, exact symbols/files/tests, upstream equivalent or absence, behavior and
+failure-handling comparison, expected conflicts, and uncertainty. Luna returns compact evidence and
+bounded artifact links, not a final decision. The primary agent or a stronger reviewer adjudicates
+only ambiguous `apply`/`rework`/`drop` cases, partial supersession, and contradictory evidence.
+Deterministic evidence collection and mechanical template completion stay on the cheap agent path.
+
 Produce a compact decision table before replay: patch ID, decision, upstream evidence, fork intent
-remaining, expected conflicts, and required validation. Every source commit must map exactly once.
+remaining, expected conflicts, required validation, and adjudicator. Every source commit must map
+exactly once. A decision cannot be marked complete merely because the patch applies cleanly.
 
 ## Candidate preparation
 
@@ -66,6 +86,12 @@ forkctl prepare codex \
 Resolve conflicts only in the candidate worktree. Read both sides and the patch metadata. Never use
 wholesale ours/theirs for RMCP, TUI orchestration, app-server daemon, or process-isolation changes.
 Candidate rerere has auto-staging disabled; review and stage every reused resolution.
+
+Use the workflow helper's coordinator-owned heavy-gate lock for every expensive build or test. The
+primary agent schedules and records those gates; delegated agents may analyze bounded results or
+make disjoint mechanical edits, but must not launch competing Cargo, Bazel, Clippy, full-test, or
+package commands. After finalization changes the candidate SHA, invalidate only gates that depend
+on that SHA and regenerate the relevant bounded evidence; do not rerun unrelated gates.
 
 Continue and inspect with:
 

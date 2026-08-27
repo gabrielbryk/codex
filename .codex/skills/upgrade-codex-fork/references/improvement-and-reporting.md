@@ -9,6 +9,30 @@ Reports live under
 `report.md`. Update the same run ID at meaningful/terminal boundaries with exact SHAs, compact gate
 results, and bounded notes.
 
+Persist phase checkpoints through the report helper:
+
+```bash
+codex-upgrade-report <run arguments> \
+  --checkpoint <exact-sha> <phase> <status> <artifact> <bounded-note> <64-hex-input-fingerprint>
+```
+
+The helper adds update/completion timestamps. A resumed session may reuse a completed checkpoint
+only when its SHA, fingerprint, and required artifacts still match; legacy checkpoints without a
+fingerprint are evidence but are never reusable. Otherwise invalidate and rerun only that phase.
+Never repeat a completed gate solely because the session resumed or the report was reopened.
+
+Persist compact delegation records with `--delegation <model> <task> <outcome>`; checkpoints carry
+their evidence paths. Route routine inventory, mechanical edits, lint batches, generated artifacts,
+and bounded evidence collection to the cheap subagent by default. Escalate only for semantic
+ambiguity, cross-cutting conflicts, release classification, or safety/cutover authority, and record
+why in the bounded task/outcome text.
+
+Reports expose machine-readable `engineeringState` and `rolloutState` separately. Engineering may
+be `pending`, `running`, `ready`, `blocked`, `failed`, or `complete`; rollout may be
+`not_requested`, `staged`, `draining`, `current`, `blocked`, or `failed`. Link the bounded preflight
+or rollout checkpoint artifact containing exact current generation, desired SHA, drain/connection
+counts, and pending action. Prose must not imply an engineering ETA while rollout is merely draining.
+
 Allowed friction codes are:
 
 - `merge-base-expanded-range`

@@ -54,6 +54,7 @@ report or model context.
 Use this order and do not reopen an earlier phase without new evidence:
 
 1. Preserve and inventory every checkout, ref, stash, installed package, and active runtime.
+   Use `codex-upgrade-workflow preflight` to capture one bounded artifact.
 2. Resolve and verify the exact requested target; explicit stable requests override prerelease
    registry defaults.
 3. Decide `apply`, `rework`, or `drop` for every logical patch using behavior and test evidence.
@@ -73,6 +74,12 @@ Use this order and do not reopen an earlier phase without new evidence:
 - Reuse persistent Cargo/Bazel/download caches while isolating mutable runtime state.
 - Serialize heavy Rust/Bazel/package builds; parallelize only independent analysis and mechanical
   edits with disjoint ownership.
+- Delegate every safely separable mechanical or evidence task to Luna by default. Use Terra only for
+  bounded semantic uncertainty and Sol/frontier only for high-risk ambiguity or release safety.
+- Run every heavy gate through `codex-upgrade-workflow gate`; compare broad failure membership with
+  `codex-upgrade-workflow compare-failures` before considering a rerun.
+- On resume, reuse a completed checkpoint only when its exact SHA, input fingerprint, and artifact
+  still match. Session restart alone never invalidates a gate.
 - Load only summaries and novel failures into agent context. Do not stream passing-test output.
 - The canonical exact-SHA package build is the release build unless reviewed registry validation
   explicitly requires another build system.

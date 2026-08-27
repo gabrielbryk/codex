@@ -15,6 +15,36 @@ Before a long command:
    names, and a short error excerpt to the terminal/model.
 5. Do not run concurrent Cargo, Bazel, Clippy, or package builds against the same cache or host.
 
+Use the installed repo-owned workflow helper for one bounded preflight JSON written outside the
+managed checkout:
+
+```bash
+codex-upgrade-workflow preflight \
+  --repo /mnt/wd-black/ClonedRepos/codex \
+  --fork-id codex > <run-dir>/preflight.json
+```
+
+The result contains bounded repository/worktree/stash, package, runtime, registry, plan, patch
+template, and stable source-plan/runtime fingerprints. Treat a missing, stale, or contradictory
+result as a preflight failure. Preflight may inspect state, but must not mutate the candidate,
+acquire the heavy lock, or start a gate.
+
+The coordinator owns every heavy gate (Cargo, Bazel, Clippy, full test, package build, or other
+resource-intensive command) through this form:
+
+```bash
+codex-upgrade-workflow gate \
+  --run-dir <run-dir> \
+  --cwd <candidate-worktree> \
+  --timeout <seconds> \
+  -- <executable> <literal-args...>
+```
+
+The helper holds the host-wide lock through completion and result capture, writes a capped private
+redacted log, and emits a compact outcome plus input fingerprint. A delegated agent may prepare the
+command or inspect its bounded artifact, but may not start a competing heavy gate. Independent
+read-only analysis and disjoint mechanical edits may continue while the gate runs.
+
 ## Gate order
 
 1. **Deterministic repository gates**
@@ -41,6 +71,12 @@ Batch every mechanical lint finding from the first complete artifact. When deleg
 give that complete set to one Luna agent with disjoint file ownership; do not discover and repair
 one truncated batch per full lint invocation.
 
+For patch reconciliation, use `patchDecisionEvidence` and `patchDecisionTemplate` from the preflight
+artifact. Have Luna fill observable facts, exact file/symbol/test references, behavior comparisons,
+and uncertainty. The primary agent (or a deliberately stronger reviewer) adjudicates only ambiguous
+`apply`/`rework`/`drop` cases, partial supersession, or conflicting evidence. Do not spend a stronger
+model on mechanically complete evidence or deterministic lint repairs.
+
 ## Failure classification
 
 Classify each failure before changing code:
@@ -55,6 +91,21 @@ Classify each failure before changing code:
 
 For a repeatable suspicious failure, compare the exact narrow test against the target/baseline once.
 Do not run a second complete suite to obtain that comparison.
+
+After a broad canary, compare its bounded failure membership with the prior recorded set:
+
+```bash
+codex-upgrade-workflow compare-failures \
+  --before <previous-failure-set> \
+  --after <current-failure-set> \
+  [--repeat <additional-recorded-set>] > <run-dir>/failure-comparison.json
+```
+
+The comparison must normalize test names and classify added, removed, and unchanged failures. If
+material membership drift is detected, record `validation-environment-failure`, stop broad reruns,
+and continue only with narrow reproductions that can distinguish candidate behavior from host
+instability. The helper must not turn drift into a retry loop or declare a regression without the
+required target/baseline evidence.
 
 ## Hard stop rules
 
