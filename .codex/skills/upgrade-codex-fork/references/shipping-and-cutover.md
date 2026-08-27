@@ -3,6 +3,11 @@
 Use only with explicit `ship` authority and an exact clean candidate that matches its immutable
 plan. Recheck remote state immediately before publication.
 
+Resume shipping from the persisted phase ledger, not from memory. Reuse a completed publish,
+validation, or build checkpoint only when the recorded input fingerprint still matches the exact
+candidate SHA, plan, package markers, and relevant remote/runtime state. Otherwise invalidate that
+checkpoint and rerun only the affected phase; do not repeat valid gates after a session resume.
+
 ## Publish safely
 
 1. Create a dated local safety ref for the old fork tip.
@@ -20,6 +25,11 @@ forkctl validate <candidate-id> --stage release
 
 Do not repeat prior broad suites during shipping unless the candidate SHA changed in a way that
 invalidates them.
+
+Record the model/delegate and bounded evidence for each shipping phase. Cheap subagents may collect
+preflight evidence or perform mechanical, disjoint checks; keep publication, lease interpretation,
+cutover authorization, and ambiguous release decisions with the primary agent or an explicitly
+authorized stronger reviewer.
 
 ## Preflight and build once
 
@@ -65,6 +75,13 @@ and record `router-bootstrap-deferred`; never bypass the guard.
 After the package is valid and the rollout request is durable, engineering is complete. A draining
 generation is passive waiting, not a reason to rebuild, rerun tests, edit code, or quote a bounded
 engineering ETA.
+
+Publish machine-readable status with separate `engineeringState: "complete"` and
+`rolloutState: "draining"` (or the precise allowed state). Link the latest bounded runtime/preflight
+checkpoint containing desired/current SHA, generation identity, connection and loaded-thread counts,
+and pending action.
+Natural drain remains the safe default: do not kill clients, routers, or active turns to accelerate
+rollout, and do not treat deferred handover or draining as a failed engineering phase.
 
 Reconcile and verify with:
 
