@@ -169,7 +169,7 @@ The Fork Fleet plan contains the complete file lists and source-commit mapping.
   output cap/redaction,
   per-command isolation, candidate/target immutability, byte-exact target lock
   normalization acceptance and mutation rejection, locked production command argv,
-  and multi-command continuation tests.
+  real full-offline Cargo metadata restamping, and multi-command continuation tests.
 - Impact/shared: updated Fork Fleet injects immutable target identity; standalone use
   independently derives history and rejects any provided mismatch. Only an unchanged
   exact-target `justfile` failure may be tolerated after all language groups pass.
