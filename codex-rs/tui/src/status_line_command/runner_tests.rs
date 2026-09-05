@@ -84,7 +84,9 @@ fn lifecycle_rejects_stale_completions_and_retains_last_good() {
         ApplyOutcome::Updated
     );
     assert_eq!(
-        lifecycle.last_good().map(|parsed| parsed.lines[0].line.to_string()),
+        lifecycle
+            .last_good()
+            .map(|parsed| parsed.lines[0].line.to_string()),
         Some("ready".to_string())
     );
 }
@@ -112,7 +114,9 @@ fn failed_unchanged_input_retries_after_backoff_then_deduplicates_success() {
     );
     assert_eq!(lifecycle.begin(input, retry_at + RETRY_BACKOFF), None);
     assert_eq!(
-        lifecycle.last_good().map(|parsed| parsed.lines[0].line.to_string()),
+        lifecycle
+            .last_good()
+            .map(|parsed| parsed.lines[0].line.to_string()),
         Some("recovered".to_string())
     );
 }

@@ -1,5 +1,5 @@
-use super::wire::StatusLineCommandInput;
 use super::parser::ParsedStatusLine;
+use super::wire::StatusLineCommandInput;
 use std::time::Duration;
 use std::time::Instant;
 

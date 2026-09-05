@@ -11,8 +11,14 @@ fn formatter_environment_excludes_credentials_and_proxy_configuration() {
     let environment = formatter_environment([
         ("PATH".to_string(), "/bin".to_string()),
         ("HOME".to_string(), "/home/test".to_string()),
-        ("CODEX_HOME".to_string(), "/home/test/.codex-uprising".to_string()),
-        ("CCSTATUSLINE_BIN".to_string(), "/opt/ccstatusline".to_string()),
+        (
+            "CODEX_HOME".to_string(),
+            "/home/test/.codex-uprising".to_string(),
+        ),
+        (
+            "CCSTATUSLINE_BIN".to_string(),
+            "/opt/ccstatusline".to_string(),
+        ),
         ("OPENAI_API_KEY".to_string(), "secret".to_string()),
         ("AWS_SECRET_ACCESS_KEY".to_string(), "secret".to_string()),
         ("HTTPS_PROXY".to_string(), "secret".to_string()),
@@ -98,10 +104,7 @@ async fn command_receives_json_and_returns_one_row() {
     );
     let completion = execute(config, &std::env::current_dir().expect("cwd"), invocation()).await;
     assert_eq!(
-        completion
-            .result
-            .expect("valid output")
-            .lines[0]
+        completion.result.expect("valid output").lines[0]
             .line
             .to_string(),
         "ready"
