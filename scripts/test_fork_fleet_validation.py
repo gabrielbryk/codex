@@ -94,7 +94,7 @@ class UpgradeWorkflowAuditTests(unittest.TestCase):
                 with self.subTest(filename=filename, marker=marker):
                     self.assert_mutation_rejected(filename, marker, "mutated contract")
                     checked += 1
-        self.assertEqual(checked, 57)
+        self.assertEqual(checked, 60)
 
 
 class FormatBaselineTests(unittest.TestCase):
@@ -301,11 +301,14 @@ class DifferentialWorkspaceTests(unittest.TestCase):
         *failed_tests: str,
         parseable: bool = True,
         truncated: bool = False,
+        timed_out_tests: tuple[str, ...] = (),
     ) -> object:
         return VALIDATION.CommandResult(
             returncode=returncode,
             failed_tests=frozenset(failed_tests),
             declared_failed_count=len(failed_tests) if parseable else None,
+            timed_out_tests=frozenset(timed_out_tests),
+            declared_timed_out_count=(len(timed_out_tests) if parseable else None),
             summary_count=1 if parseable else 0,
             excerpt="bounded output",
             parse_error=(
@@ -373,7 +376,14 @@ class DifferentialWorkspaceTests(unittest.TestCase):
 
         self.assertEqual(
             VALIDATION.parse_nextest_output(output),
-            (frozenset({"crate test::terminal_failure"}), 1, 1, None),
+            (
+                frozenset({"crate test::terminal_failure"}),
+                1,
+                frozenset(),
+                0,
+                1,
+                None,
+            ),
         )
 
     def test_parser_rejects_ambiguous_terminal_formats(self) -> None:
@@ -398,28 +408,47 @@ class DifferentialWorkspaceTests(unittest.TestCase):
         for output, expected_error in cases:
             with self.subTest(expected_error=expected_error):
                 self.assertIn(
-                    expected_error, VALIDATION.parse_nextest_output(output)[3]
+                    expected_error, VALIDATION.parse_nextest_output(output)[5]
                 )
 
-    def test_parser_accepts_terminal_fail_and_leak_retry_status(self) -> None:
+    def test_parser_accepts_mixed_fail_and_timeout_terminal_statuses(self) -> None:
         ordinary_failures = "\n".join(
             f"        FAIL [ 0.100s] ({index}/63) crate test::failure_{index}"
             for index in range(1, 63)
         )
         output = f"""\
-     Summary [ 1.000s] 63 tests run: 0 passed, 63 failed
+     Summary [ 1.000s] 64 tests run: 0 passed, 63 failed, 1 timed out
 {ordinary_failures}
  TRY 2 FL+LK [ 0.200s] (63/63) crate test::observed_fail_and_leak
+   TRY 2 TMT [ 60.000s] (64/64) crate test::observed_timeout
 """
 
-        failed_tests, declared_count, summary_count, parse_error = (
-            VALIDATION.parse_nextest_output(output)
-        )
-        self.assertEqual(declared_count, 63)
+        (
+            failed_tests,
+            declared_failed_count,
+            timed_out_tests,
+            declared_timed_out_count,
+            summary_count,
+            parse_error,
+        ) = VALIDATION.parse_nextest_output(output)
+        self.assertEqual(declared_failed_count, 63)
+        self.assertEqual(declared_timed_out_count, 1)
         self.assertEqual(summary_count, 1)
         self.assertEqual(len(failed_tests), 63)
         self.assertIn("crate test::observed_fail_and_leak", failed_tests)
+        self.assertEqual(timed_out_tests, {"crate test::observed_timeout"})
         self.assertIsNone(parse_error)
+
+    def test_parser_rejects_timed_out_count_mismatch(self) -> None:
+        output = """\
+     Summary [ 1.000s] 2 tests run: 0 passed, 2 timed out
+   TRY 2 TMT [ 60.000s] (1/2) crate test::only_timeout
+"""
+
+        self.assertIn(
+            "declared 2 timed out",
+            VALIDATION.parse_nextest_output(output)[5],
+        )
 
     def test_accepts_candidate_failures_that_are_subset_of_target(self) -> None:
         runner = mock.Mock(
@@ -447,6 +476,52 @@ class DifferentialWorkspaceTests(unittest.TestCase):
             self.assertNotEqual(
                 candidate_environment[variable], target_environment[variable]
             )
+
+    def test_accepts_candidate_timeout_subset_of_target_timeouts(self) -> None:
+        runner = mock.Mock(
+            side_effect=[
+                self.result(
+                    100,
+                    timed_out_tests=("crate test::shared_timeout",),
+                ),
+                self.result(
+                    100,
+                    timed_out_tests=(
+                        "crate test::shared_timeout",
+                        "crate test::target_only_timeout",
+                    ),
+                ),
+            ]
+        )
+
+        self.assertEqual(self.execute_gate(runner), 0)
+
+    def test_rejects_candidate_only_timeout(self) -> None:
+        runner = mock.Mock(
+            side_effect=[
+                self.result(
+                    100,
+                    timed_out_tests=("crate test::candidate_timeout",),
+                ),
+                self.result(
+                    100,
+                    timed_out_tests=("crate test::upstream_timeout",),
+                ),
+            ]
+        )
+
+        self.assertEqual(self.execute_gate(runner), 1)
+
+    def test_rejects_timeout_covered_only_by_target_failure(self) -> None:
+        test_name = "crate test::category_mismatch"
+        runner = mock.Mock(
+            side_effect=[
+                self.result(100, timed_out_tests=(test_name,)),
+                self.result(100, test_name),
+            ]
+        )
+
+        self.assertEqual(self.execute_gate(runner), 1)
 
     def test_accepts_only_local_workspace_version_lock_restamps(self) -> None:
         before_lock = """\
@@ -682,6 +757,8 @@ dependencies = ["dep"]
             returncode=-15,
             failed_tests=frozenset(),
             declared_failed_count=None,
+            timed_out_tests=frozenset(),
+            declared_timed_out_count=None,
             summary_count=0,
             excerpt="timed out",
             timed_out=True,

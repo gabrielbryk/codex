@@ -103,6 +103,8 @@ SECTION_CONTRACTS = (
             "exactly one terminal summary",
             "expected nextest test-failure exit code",
             "terminal failure statuses `FAIL` and `FL+LK`",
+            "terminal timeout status `TMT`",
+            "declared timed-out count",
             "fresh clone and mutable",
             "target HEAD, index tree, and untracked state",
             "does not prove semantic equivalence",
@@ -117,6 +119,7 @@ SECTION_CONTRACTS = (
             "Git diagnostics are streamed to disk",
             "redacted bounded delta",
             "candidate-only failed test names",
+            "categories separately",
             "exact-target failures",
             "disposable independent local clone",
             "every workspace-test command",
@@ -135,6 +138,10 @@ NEXTEST_SUMMARY_PATTERN = re.compile(
     r"^\s*Summary\s+\[[^]]+\]\s+\d+ tests? run:(?P<body>.+)$"
 )
 NEXTEST_FAILED_COUNT_PATTERN = re.compile(r"(?:^|, )(?P<count>\d+) failed(?:,|$)")
+NEXTEST_TIMED_OUT_COUNT_PATTERN = re.compile(r"(?:^|, )(?P<count>\d+) timed out(?:,|$)")
+NEXTEST_TIMEOUT_PATTERN = re.compile(
+    r"^\s*(?:TRY\s+\d+\s+)?TMT\s+\[[^]]+\]\s+\([^)]+\)\s+(?P<name>.+?)\s*$"
+)
 UNKNOWN_FAILURE_STATUS_PATTERN = re.compile(r"^\s*(?:TRY\s+\d+\s+)?\S*FAIL\S*\b")
 LOCK_PACKAGE_BLOCK_PATTERN = re.compile(
     r"(?ms)^\[\[package\]\]\n.*?(?=^\[\[package\]\]\n|\Z)"
@@ -166,6 +173,8 @@ class CommandResult:
     returncode: int
     failed_tests: frozenset[str]
     declared_failed_count: int | None
+    timed_out_tests: frozenset[str]
+    declared_timed_out_count: int | None
     summary_count: int
     excerpt: str
     parse_error: str | None = None
@@ -383,9 +392,18 @@ def run_format_validation(
 
 def parse_nextest_lines(
     lines: Iterable[str],
-) -> tuple[frozenset[str], int | None, int, str | None]:
+) -> tuple[
+    frozenset[str],
+    int | None,
+    frozenset[str],
+    int | None,
+    int,
+    str | None,
+]:
     failed_tests = set()
+    timed_out_tests = set()
     declared_failed_count = None
+    declared_timed_out_count = None
     summary_count = 0
     parse_error = None
     for raw_line in lines:
@@ -393,15 +411,24 @@ def parse_nextest_lines(
         if summary_match := NEXTEST_SUMMARY_PATTERN.match(line):
             summary_count += 1
             failed_tests.clear()
+            timed_out_tests.clear()
             body = summary_match.group("body")
             failed_count_match = NEXTEST_FAILED_COUNT_PATTERN.search(body)
             declared_failed_count = (
                 int(failed_count_match.group("count")) if failed_count_match else 0
             )
+            timed_out_count_match = NEXTEST_TIMED_OUT_COUNT_PATTERN.search(body)
+            declared_timed_out_count = (
+                int(timed_out_count_match.group("count"))
+                if timed_out_count_match
+                else 0
+            )
             continue
         if summary_count:
             if match := NEXTEST_FAILURE_PATTERN.match(line):
                 failed_tests.add(" ".join(match.group("name").split()))
+            elif match := NEXTEST_TIMEOUT_PATTERN.match(line):
+                timed_out_tests.add(" ".join(match.group("name").split()))
             elif UNKNOWN_FAILURE_STATUS_PATTERN.match(line):
                 parse_error = f"unknown terminal nextest failure status: {line.strip()}"
     if summary_count != 1:
@@ -411,12 +438,32 @@ def parse_nextest_lines(
             "nextest summary declared "
             f"{declared_failed_count} failures but parsed {len(failed_tests)} unique names"
         )
-    return frozenset(failed_tests), declared_failed_count, summary_count, parse_error
+    elif parse_error is None and declared_timed_out_count != len(timed_out_tests):
+        parse_error = (
+            "nextest summary declared "
+            f"{declared_timed_out_count} timed out but parsed "
+            f"{len(timed_out_tests)} unique names"
+        )
+    return (
+        frozenset(failed_tests),
+        declared_failed_count,
+        frozenset(timed_out_tests),
+        declared_timed_out_count,
+        summary_count,
+        parse_error,
+    )
 
 
 def parse_nextest_output(
     output: str,
-) -> tuple[frozenset[str], int | None, int, str | None]:
+) -> tuple[
+    frozenset[str],
+    int | None,
+    frozenset[str],
+    int | None,
+    int,
+    str | None,
+]:
     return parse_nextest_lines(output.splitlines())
 
 
@@ -567,6 +614,8 @@ def run_bounded_command(
     (
         failed_tests,
         declared_failed_count,
+        timed_out_tests,
+        declared_timed_out_count,
         summary_count,
         parse_error,
     ) = parse_nextest_lines(captured.stdout.splitlines())
@@ -580,6 +629,8 @@ def run_bounded_command(
         returncode=captured.returncode,
         failed_tests=failed_tests,
         declared_failed_count=declared_failed_count,
+        timed_out_tests=timed_out_tests,
+        declared_timed_out_count=declared_timed_out_count,
         summary_count=summary_count,
         excerpt=redact_output(excerpt, environment),
         parse_error=parse_error,
@@ -860,11 +911,16 @@ def print_command_result(
     rendered_command = redact_output(" ".join(command.argv), environment)
     print(
         f"workspace differential {label}: returncode={result.returncode} "
-        f"failed={len(result.failed_tests)} command={rendered_command}"
+        f"failed={len(result.failed_tests)} timed_out={len(result.timed_out_tests)} "
+        f"command={rendered_command}"
     )
     if result.failed_tests:
         print(f"workspace differential {label} failures:")
         for test_name in sorted(result.failed_tests):
+            print(f"- {redact_output(test_name, environment)}")
+    if result.timed_out_tests:
+        print(f"workspace differential {label} timed-out tests:")
+        for test_name in sorted(result.timed_out_tests):
             print(f"- {redact_output(test_name, environment)}")
     if result.returncode:
         print(f"--- {label} bounded excerpt ---", file=sys.stderr)
@@ -879,11 +935,13 @@ def nextest_result_error(result: CommandResult) -> str | None:
         return "command output exceeded the hard cap"
     if result.parse_error:
         return result.parse_error
-    if result.returncode == 0 and result.declared_failed_count != 0:
-        return "successful nextest command declared failures"
+    if result.returncode == 0 and (
+        result.declared_failed_count != 0 or result.declared_timed_out_count != 0
+    ):
+        return "successful nextest command declared terminal test issues"
     if result.returncode == NEXTEST_TEST_FAILURE_EXIT_CODE:
-        if not result.declared_failed_count:
-            return "nextest test-failure exit did not declare failed tests"
+        if not result.declared_failed_count and not result.declared_timed_out_count:
+            return "nextest test-failure exit did not declare terminal test issues"
         return None
     if result.returncode != 0:
         return (
@@ -975,12 +1033,10 @@ def run_differential_workspace_tests(
                 )
                 failed = True
                 continue
-            if target_result.returncode == 0:
-                candidate_only = candidate_result.failed_tests
-            else:
-                candidate_only = (
-                    candidate_result.failed_tests - target_result.failed_tests
-                )
+            candidate_only = candidate_result.failed_tests - target_result.failed_tests
+            candidate_only_timeouts = (
+                candidate_result.timed_out_tests - target_result.timed_out_tests
+            )
 
             if candidate_only:
                 print(
@@ -989,10 +1045,19 @@ def run_differential_workspace_tests(
                     file=sys.stderr,
                 )
                 failed = True
-            else:
+            if candidate_only_timeouts:
                 print(
-                    "workspace differential accepted candidate failures as a "
-                    "subset of exact-target failures"
+                    "candidate-only timed-out test names: "
+                    + redact_output(
+                        ", ".join(sorted(candidate_only_timeouts)), environment
+                    ),
+                    file=sys.stderr,
+                )
+                failed = True
+            if not candidate_only and not candidate_only_timeouts:
+                print(
+                    "workspace differential accepted candidate terminal issues as "
+                    "category-preserving subsets of exact-target terminal issues"
                 )
     finally:
         after = candidate_snapshot()
