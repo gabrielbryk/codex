@@ -203,9 +203,7 @@ class FormatBaselineTests(unittest.TestCase):
 
     def test_format_validation_propagates_formatter_return_code(self) -> None:
         target_sha = "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a"
-        completed = mock.Mock(
-            returncode=23, stdout="Formatting failed: Just, Rust\n"
-        )
+        completed = mock.Mock(returncode=23, stdout="Formatting failed: Just, Rust\n")
 
         with (
             mock.patch.object(VALIDATION, "REPO_ROOT", self.root),
