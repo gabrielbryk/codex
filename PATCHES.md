@@ -7,9 +7,9 @@ machine-readable contract; this file is the human blast-radius ledger.
 - Target: `rust-v0.153.4` (`3d2ee51ca2d5db578f328aa75e20aa22c0197c9a`)
 - Source head: `1798ad4dd7028dc37fb264b648a084420a0251bf`
 - Source base: `rust-v0.150.1` (`90854393966b21e9ebfd21b122334eb09a20c93d`)
-- Immutable plan: `9a41cb2a-68c6-4599-b8c6-0e01cd0dc64f`
-- Candidate: `d3938c53-4f89-4e41-80db-519f216f5c87`
-- Model: 40 leaves — 17 rework, 23 drop/upstream/quarantine
+- Immutable plan: `e91b6556-83fe-43fc-87ea-15e010ad7468`
+- Candidate: `9aa92e39-1e47-4b28-9d40-8713bbeb8add`
+- Model: 41 leaves — 18 rework, 23 drop/upstream/quarantine
 
 Each retained leaf below names one failure boundary, its production owner,
 focused proof, compatibility/shared impact, and exact retirement condition.
@@ -195,6 +195,23 @@ The Fork Fleet plan contains the complete file lists and source-commit mapping.
 - Proof: focused permission-profile intersection tests in the isolated validator.
 - Impact/shared: test-only; no product, public, config, or wire change.
 - Retire: when the upstream fixture passes unchanged in the isolated environment.
+
+### `maintenance-upstream-test-stabilization` — rework
+
+- Owner: only the matching-turn analytics wait in
+  `app-server/tests/suite/v2/guardian_v2.rs`, the MCP refresh gate held by
+  `core/src/session/turn_input_tests.rs`, and the grandchild completion event wait
+  in `core/tests/suite/subagent_notifications.rs`.
+- Upstream: the Guardian synchronization is the exact test hunk from upstream
+  `ddf04ad26789d040f9ef6a96736f76602e35a6cc`; the other two fixture barriers use
+  existing local synchronization primitives without changing product behavior.
+- Proof: focused Guardian v2 scoped-approval, accepted thread-settings input, and
+  grandchild full-fork context tests, followed by repository formatting.
+- Impact/shared: test-only ordering stabilization; assertions and production logic
+  are unchanged, and no broad-test failure is allowlisted or weakened.
+- Retire: drop the Guardian hunk when the target contains upstream `ddf04ad26789`;
+  drop each remaining barrier when its fixture is upstream-owned with equivalent
+  event/gate synchronization rather than transient state polling.
 
 ### `maintenance-generated-release-tail` — rework, final
 
