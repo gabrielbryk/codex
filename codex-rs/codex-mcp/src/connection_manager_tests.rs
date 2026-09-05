@@ -4866,7 +4866,7 @@ while IFS= read -r _request; do :; done
     let environment_manager = Arc::new(EnvironmentManager::default_for_tests());
 
     let first = workload_attributed_stdio_manager(
-        None,
+        /*previous*/ None,
         configured.clone(),
         "thread-1",
         temp.path().to_path_buf(),
