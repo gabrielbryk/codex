@@ -30,6 +30,7 @@ use codex_protocol::openai_models::ReasoningEffortPreset;
 use codex_protocol::openai_models::TruncationPolicyConfig;
 use codex_protocol::openai_models::default_input_modalities;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ThreadSettingsOverrides;
@@ -58,6 +59,7 @@ use core_test_support::wait_for_event_match;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::collections::HashMap;
+use std::time::Duration;
 use test_case::test_case;
 use wiremock::MockServer;
 
@@ -79,6 +81,40 @@ fn read_only_user_turn(test: &TestCodex, items: Vec<UserInput>, model: String) -
         }),
         ..Default::default()
     })
+}
+
+enum RollbackAttempt {
+    Complete,
+    Busy,
+    Failed(String),
+}
+
+async fn rollback_when_idle(codex: &CodexThread, num_turns: u32) -> Result<()> {
+    for _ in 0..50 {
+        codex.submit(Op::ThreadRollback { num_turns }).await?;
+        match wait_for_event_match(codex, |event| match event {
+            EventMsg::ThreadRolledBack(_) => Some(RollbackAttempt::Complete),
+            EventMsg::Error(error)
+                if error.codex_error_info == Some(CodexErrorInfo::ThreadRollbackFailed) =>
+            {
+                if error.message == "Cannot rollback while a turn is in progress." {
+                    Some(RollbackAttempt::Busy)
+                } else {
+                    Some(RollbackAttempt::Failed(error.message.clone()))
+                }
+            }
+            _ => None,
+        })
+        .await
+        {
+            RollbackAttempt::Complete => return Ok(()),
+            RollbackAttempt::Busy => tokio::time::sleep(Duration::from_millis(10)).await,
+            RollbackAttempt::Failed(message) => {
+                anyhow::bail!("thread rollback failed: {message}")
+            }
+        }
+    }
+    anyhow::bail!("timed out waiting for the completed turn to become idle")
 }
 
 async fn submit_model_turn(
@@ -318,13 +354,7 @@ async fn rollback_first_turn_model_change_removes_its_instructions(
     )
     .await?;
 
-    test.codex
-        .submit(Op::ThreadRollback { num_turns: 1 })
-        .await?;
-    wait_for_event(&test.codex, |ev| {
-        matches!(ev, EventMsg::ThreadRolledBack(_))
-    })
-    .await;
+    rollback_when_idle(&test.codex, /*num_turns*/ 1).await?;
 
     let test = match followup {
         RollbackFollowup::ColdResume => {
@@ -1288,13 +1318,7 @@ async fn thread_rollback_after_generated_image_drops_entire_image_turn_history()
         .await?;
     wait_for_event(&test.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
-    test.codex
-        .submit(Op::ThreadRollback { num_turns: 1 })
-        .await?;
-    wait_for_event(&test.codex, |ev| {
-        matches!(ev, EventMsg::ThreadRolledBack(_))
-    })
-    .await;
+    rollback_when_idle(&test.codex, /*num_turns*/ 1).await?;
 
     test.codex
         .start_or_steer_turn(read_only_user_turn(
