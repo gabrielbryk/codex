@@ -1962,12 +1962,6 @@ impl BottomPane {
         }
     }
 
-    pub(crate) fn set_status_lines(&mut self, status_lines: Vec<Line<'static>>) {
-        if self.composer.set_status_lines(status_lines) {
-            self.request_redraw();
-        }
-    }
-
     pub(crate) fn set_status_hyperlink_lines(
         &mut self,
         status_lines: Vec<crate::terminal_hyperlinks::HyperlinkLine>,
