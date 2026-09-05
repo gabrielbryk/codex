@@ -154,7 +154,8 @@ The Fork Fleet plan contains the complete file lists and source-commit mapping.
 - Proof: malformed sections, extra/missing references, spoofed markers, dependency
   order, source accounting, retained-evidence rejection, target derivation,
   subprocess propagation, exact Just-only formatter adjudication, and the
-  fail-closed differential-workspace contract markers and unit cases.
+  fail-closed differential-workspace contract markers and unit cases, including
+  isolated registered-stage tool discovery and process-start cleanup.
 - Impact/shared: shares the two validation scripts only with target-format policy.
 - Retire: when Fork Fleet natively provides this Codex workflow/leaf audit.
 
