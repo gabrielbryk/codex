@@ -93,21 +93,24 @@ fn lifecycle_rejects_stale_completions_and_retains_last_good() {
 fn failed_unchanged_input_retries_after_backoff_then_deduplicates_success() {
     let mut lifecycle = Lifecycle::new(7);
     let now = Instant::now();
-    let failed = lifecycle.begin(input(), now).expect("initial invocation");
+    let input = input();
+    let failed = lifecycle
+        .begin(input.clone(), now)
+        .expect("initial invocation");
     assert_eq!(
         lifecycle.apply(completion(failed.token, Err("transient")), now),
         ApplyOutcome::RetryAt(now + RETRY_BACKOFF)
     );
-    assert_eq!(lifecycle.begin(input(), now), None);
+    assert_eq!(lifecycle.begin(input.clone(), now), None);
     let retry_at = now + RETRY_BACKOFF;
     let recovered = lifecycle
-        .begin(input(), retry_at)
+        .begin(input.clone(), retry_at)
         .expect("retry after backoff");
     assert_eq!(
         lifecycle.apply(completion(recovered.token, Ok("recovered")), retry_at),
         ApplyOutcome::Updated
     );
-    assert_eq!(lifecycle.begin(input(), retry_at + RETRY_BACKOFF), None);
+    assert_eq!(lifecycle.begin(input, retry_at + RETRY_BACKOFF), None);
     assert_eq!(
         lifecycle.last_good().map(|parsed| parsed.lines[0].line.to_string()),
         Some("recovered".to_string())

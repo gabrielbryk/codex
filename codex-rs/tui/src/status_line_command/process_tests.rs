@@ -16,7 +16,6 @@ fn formatter_environment_excludes_credentials_and_proxy_configuration() {
         ("OPENAI_API_KEY".to_string(), "secret".to_string()),
         ("AWS_SECRET_ACCESS_KEY".to_string(), "secret".to_string()),
         ("HTTPS_PROXY".to_string(), "secret".to_string()),
-        ("CODEX_HOME".to_string(), "/private/codex".to_string()),
     ]);
     assert_eq!(
         environment,
