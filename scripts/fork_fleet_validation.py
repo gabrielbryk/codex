@@ -1215,6 +1215,45 @@ def registered_test_environment(real_home: Path) -> dict[str, str]:
     }
 
 
+def run_canonical_package_validation(
+    real_home: Path,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> int:
+    helper = real_home / ".local/bin/codex-use-local-build"
+    if not helper.is_file() or not os.access(helper, os.X_OK):
+        raise SystemExit(f"Codex package helper is missing or not executable: {helper}")
+
+    before = candidate_snapshot()
+    if before[2]:
+        raise SystemExit("canonical package validation requires a clean candidate")
+    environment = registered_test_environment(real_home)
+    environment.update(
+        {
+            "CODEX_PACKAGE_CACHE_ROOT": str(real_home / ".cache/codex-package"),
+            "CODEX_STANDALONE_RELEASES": str(
+                real_home / ".codex/packages/standalone/releases"
+            ),
+        }
+    )
+    completed = runner(
+        [
+            str(helper),
+            "--repo",
+            str(REPO_ROOT),
+            "--sha",
+            before[0],
+            "--target",
+            "x86_64-unknown-linux-gnu",
+        ],
+        cwd=REPO_ROOT,
+        env=environment,
+        check=False,
+    )
+    if candidate_snapshot() != before:
+        raise SystemExit("candidate changed during canonical package validation")
+    return completed.returncode
+
+
 def main() -> None:
     real_home = Path.home()
     fork_fleet_just = (
@@ -1267,7 +1306,7 @@ def main() -> None:
         "argument-comment-lint": [
             (REPO_ROOT, [str(fork_fleet_just), "argument-comment-lint"])
         ],
-        "release-build": [(REPO_ROOT, [str(fork_fleet_just), "build-for-release"])],
+        "release-build": [],
     }
     if len(sys.argv) != 2 or sys.argv[1] not in actions:
         choices = ", ".join(sorted(actions))
@@ -1291,6 +1330,8 @@ def main() -> None:
                 check=False,
             ).returncode
         )
+    if sys.argv[1] == "release-build":
+        raise SystemExit(run_canonical_package_validation(real_home))
     if not fork_fleet_just.is_file():
         raise SystemExit(f"Fork Fleet just executable is missing: {fork_fleet_just}")
 

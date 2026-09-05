@@ -274,6 +274,95 @@ class FormatBaselineTests(unittest.TestCase):
             )
 
 
+class CanonicalPackageValidationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary_directory.cleanup)
+        self.root = Path(self.temporary_directory.name)
+        self.real_home = self.root / "home"
+        self.helper = self.real_home / ".local/bin/codex-use-local-build"
+        self.helper.parent.mkdir(parents=True)
+        self.helper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        self.helper.chmod(0o700)
+        self.snapshot = ("a" * 40, "candidate-tree", "")
+
+    def test_invokes_exact_linux_package_without_cutover_authority(self) -> None:
+        runner = mock.Mock(return_value=subprocess.CompletedProcess([], 0))
+        with (
+            mock.patch.object(VALIDATION, "REPO_ROOT", self.root),
+            mock.patch.object(
+                VALIDATION,
+                "candidate_snapshot",
+                side_effect=[self.snapshot, self.snapshot],
+            ),
+        ):
+            result = VALIDATION.run_canonical_package_validation(
+                self.real_home, runner=runner
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            runner.call_args.args[0],
+            [
+                str(self.helper),
+                "--repo",
+                str(self.root),
+                "--sha",
+                "a" * 40,
+                "--target",
+                "x86_64-unknown-linux-gnu",
+            ],
+        )
+        self.assertNotIn("--activate", runner.call_args.args[0])
+        self.assertNotIn("--rollout", runner.call_args.args[0])
+        environment = runner.call_args.kwargs["env"]
+        self.assertEqual(environment["HOME"], str(self.real_home))
+        self.assertEqual(
+            environment["CODEX_PACKAGE_CACHE_ROOT"],
+            str(self.real_home / ".cache/codex-package"),
+        )
+        self.assertEqual(
+            environment["CODEX_STANDALONE_RELEASES"],
+            str(self.real_home / ".codex/packages/standalone/releases"),
+        )
+
+    def test_rejects_missing_or_non_executable_helper(self) -> None:
+        self.helper.chmod(0o600)
+        runner = mock.Mock()
+
+        with self.assertRaisesRegex(SystemExit, "missing or not executable"):
+            VALIDATION.run_canonical_package_validation(self.real_home, runner=runner)
+
+        runner.assert_not_called()
+
+    def test_rejects_dirty_candidate_before_build(self) -> None:
+        runner = mock.Mock()
+        with (
+            mock.patch.object(
+                VALIDATION,
+                "candidate_snapshot",
+                return_value=("a" * 40, "candidate-tree", " M tracked\n"),
+            ),
+            self.assertRaisesRegex(SystemExit, "requires a clean candidate"),
+        ):
+            VALIDATION.run_canonical_package_validation(self.real_home, runner=runner)
+
+        runner.assert_not_called()
+
+    def test_rejects_candidate_change_during_build(self) -> None:
+        runner = mock.Mock(return_value=subprocess.CompletedProcess([], 0))
+        with (
+            mock.patch.object(VALIDATION, "REPO_ROOT", self.root),
+            mock.patch.object(
+                VALIDATION,
+                "candidate_snapshot",
+                side_effect=[self.snapshot, ("b" * 40, "changed-tree", "")],
+            ),
+            self.assertRaisesRegex(SystemExit, "candidate changed"),
+        ):
+            VALIDATION.run_canonical_package_validation(self.real_home, runner=runner)
+
+
 class DifferentialWorkspaceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
