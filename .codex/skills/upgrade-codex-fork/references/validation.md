@@ -145,6 +145,46 @@ Batch the first complete lint artifact once; do not repair truncated batches acr
 Use preflight `patchDecisionEvidence` and `patchDecisionTemplate` for facts, symbols, tests,
 comparisons, and uncertainty. Reserve stronger review for ambiguous decisions or conflicts.
 
+## Exact-target differential workspace gate
+
+The registered `workspace-tests` action is differential. It runs every workspace-test command on
+the candidate and accepts a successful command immediately without spending a second target run.
+When a command fails, it binds the baseline through the manifest, candidate history, and
+`FORK_FLEET_TARGET_SHA`, materializes that exact target in a disposable independent local clone,
+then runs the identical command under the same environment policy there. It never adds a worktree
+to the managed checkout or mutates shared Git worktree metadata. Use a fresh clone and mutable
+state for each failed command; a setup failure blocks that comparison but does not prevent later
+candidate commands from running.
+
+Both sides run with `INSTA_UPDATE=no`, but use private per-side `HOME`, `TMPDIR`,
+`CARGO_TARGET_DIR`, `CODEX_HOME`, and XDG cache paths so candidate artifacts cannot make the target
+pass or fail. The validator parses normalized nextest failure names from the complete command
+output while emitting only explicit summaries, complete failure membership, and bounded useful
+excerpts. Large command logs, Cargo outputs, and the target clone use disk-backed private validation
+storage rather than RAM-backed temporary filesystems. A hard output cap terminates the process
+group and fails closed, and every emitted excerpt is redacted. Redaction must cover Authorization
+and Cookie headers through the end of their line, quoted JSON credentials, sensitive assignments,
+and sensitive values supplied through the environment.
+
+Require exactly one terminal summary, the expected nextest test-failure exit code for a failing
+run, and exact equality between the summary's declared failure count and the unique parsed terminal
+failure names. Reject multiple summaries, count mismatches, unknown terminal failure statuses, and
+format drift rather than guessing at membership.
+
+Candidate failures are accepted only when they are a subset of exact-target failures for that same
+command. Any candidate-only failed test names block release. A target setup error, timeout,
+truncation, or unparseable nonzero result also blocks; it is not evidence that the candidate is
+equivalent. Apply this comparison independently to every workspace-test command, including the
+separate V8 sandbox command, and always remove the temporary clone.
+
+Record candidate HEAD, index tree, and untracked state before the gate and compare all three after
+cleanup. Record the target HEAD, index tree, and untracked state before and after each comparison
+too. Any drift invalidates the result even when every differential comparison would otherwise pass.
+This name-set comparison does not prove semantic equivalence: the same test name can fail for a new
+reason. Retained-leaf and changed-path targeted tests remain mandatory. The differential gate only
+classifies broad exact-target failure membership; it does not waive a target failure that violates
+a required retained-fork behavior.
+
 ## Failure classification
 
 Classify each failure before changing code:
