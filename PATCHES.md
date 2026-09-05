@@ -115,7 +115,7 @@ The Fork Fleet plan contains the complete file lists and source-commit mapping.
 - Owner: private process and runner modules plus the TUI crate dependency.
 - Proof: exact nonsecret environment allowlist, credential/proxy rejection,
   output/timeout failure, Unix descendant termination, 300 ms coalescing,
-  last-good ownership, and bounded retry tests.
+  last-good ownership, bounded retry tests, and the repository argument-comment lint.
 - Impact/shared: preserves `PATH`, `CODEX_HOME`, XDG, and documented statusline
   controls required by the installed formatter; Windows containment is best-effort.
 - Retire: when upstream owns equivalent environment compatibility, containment,
