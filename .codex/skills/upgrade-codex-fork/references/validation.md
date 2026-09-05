@@ -39,7 +39,9 @@ immutable-plan-aware `forkctl candidate finalize`; reviewers adjudicate semantic
 
 Both `upgrade-workflow-audit` and `upgrade-workflow-tests` are registered release evidence. The
 first checks document shape; the second runs every contract-marker mutation test. Neither proves
-that manual evidence or reviewer judgments are adequate.
+that manual evidence or reviewer judgments are adequate. The registered test stage
+uses an explicit tool path. It contains the pinned user Cargo location and system tool directories
+and does not inherit an arbitrary `PATH` from the validator launcher.
 
 Require preflight to prove operator/runtime registry freshness as described in the planning
 playbook: a fresh `forkctl plan` must reload the canonical registry or fail closed, and its target
