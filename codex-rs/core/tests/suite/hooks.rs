@@ -7,6 +7,8 @@ use anyhow::Result;
 use codex_config::HookStateToml;
 use codex_config::McpServerConfig;
 use codex_config::test_support::CloudConfigBundleFixture;
+use codex_core::NotSubmittedReason;
+use codex_core::StartIfIdleSubmission;
 use codex_core::StartThreadOptions;
 use codex_core::TurnInput;
 use codex_core::TurnInputRequest;
@@ -1774,12 +1776,10 @@ async fn async_hook_finishing_while_idle_waits_for_the_next_turn(
         .await
         .context("timed out waiting for the async hook to start")?;
 
-    fs::write(
-        test.codex_home_path()
-            .join("async_user_prompt_submit_release"),
-        "ready",
-    )
-    .context("release gated async hook")?;
+    let release_path = test
+        .codex_home_path()
+        .join("async_user_prompt_submit_release");
+    fs::write(&release_path, "ready").context("release gated async hook")?;
 
     let finished_path = test
         .codex_home_path()
@@ -1787,6 +1787,7 @@ async fn async_hook_finishing_while_idle_waits_for_the_next_turn(
     fs_wait::wait_for_path_exists(finished_path, Duration::from_secs(5))
         .await
         .context("timed out waiting for the async hook to finish")?;
+    fs::remove_file(&release_path).context("re-arm the async hook gate for the next turn")?;
 
     assert!(
         timeout(Duration::from_millis(150), test.codex.next_event())
@@ -1817,7 +1818,21 @@ async fn async_hook_finishing_while_idle_waits_for_the_next_turn(
             text_elements: Vec::new(),
         }])
     };
-    test.codex.start_turn_if_idle(next_turn).await?;
+    timeout(Duration::from_secs(5), async {
+        loop {
+            match test.codex.start_turn_if_idle(next_turn.clone()).await? {
+                StartIfIdleSubmission::Started { .. } => return Ok::<_, anyhow::Error>(()),
+                StartIfIdleSubmission::NotSubmitted {
+                    reason: NotSubmittedReason::NotIdle,
+                } => tokio::task::yield_now().await,
+                StartIfIdleSubmission::NotSubmitted { reason } => {
+                    anyhow::bail!("next turn was not submitted: {reason:?}")
+                }
+            }
+        }
+    })
+    .await
+    .context("timed out waiting for the previous turn to become idle")??;
 
     let mut warning_event = None;
     timeout(Duration::from_secs(5), async {
