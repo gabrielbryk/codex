@@ -1172,6 +1172,11 @@ fn sanitize_project_config(
             ignored_keys.push((*key).to_string());
         }
     }
+    if let Some(tui) = table.get_mut("tui").and_then(TomlValue::as_table_mut)
+        && tui.remove("status_line_command").is_some()
+    {
+        ignored_keys.push("tui.status_line_command".to_string());
+    }
     if let Some(features) = table.get_mut("features").and_then(TomlValue::as_table_mut) {
         if credential_broker == CredentialBrokerProjectState::Enabled
             && features.remove("shell_snapshot").is_some()
