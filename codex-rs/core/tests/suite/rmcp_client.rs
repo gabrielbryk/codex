@@ -1059,6 +1059,57 @@ async fn stdio_server_round_trip(server_name: &'static str, namespace: &str) -> 
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn stdio_server_receives_authoritative_thread_attribution() -> anyhow::Result<()> {
+    // TODO(anp): Remove after packaging a Windows stdio test server for Wine exec.
+    skip_if_wine_exec!(
+        Ok(()),
+        "requires a Windows test_stdio_server in the Wine-exec environment"
+    );
+    skip_if_no_network!(Ok(()));
+
+    let responses_server = responses::start_mock_server().await;
+    let rmcp_test_server_bin = remote_aware_stdio_server_bin()?;
+    let server_name = "rmcp_workload_attribution";
+    let fixture = test_codex()
+        .with_config(move |config| {
+            insert_mcp_server(
+                config,
+                server_name,
+                stdio_transport(rmcp_test_server_bin, /*env*/ None, Vec::new()),
+                TestMcpServerOptions {
+                    environment_id: remote_aware_environment_id(),
+                    ..Default::default()
+                },
+            );
+        })
+        .build_with_auto_env(&responses_server)
+        .await?;
+    wait_for_mcp_server(&fixture.codex, server_name).await?;
+
+    let result = fixture
+        .codex
+        .call_mcp_tool(
+            server_name,
+            "echo",
+            Some(json!({
+                "message": "thread attribution",
+                "env_var": "CODEX_WORKLOAD_THREAD_ID",
+            })),
+            /*meta*/ None,
+        )
+        .await?;
+
+    assert_eq!(
+        result
+            .structured_content
+            .as_ref()
+            .and_then(|content| content.get("env")),
+        Some(&json!(fixture.session_configured.thread_id.to_string()))
+    );
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stdio_mcp_tool_names_respect_selected_servers() -> anyhow::Result<()> {
     skip_if_wine_exec!(
