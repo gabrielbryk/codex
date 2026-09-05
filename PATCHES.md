@@ -7,8 +7,8 @@ machine-readable contract; this file is the human blast-radius ledger.
 - Target: `rust-v0.153.4` (`3d2ee51ca2d5db578f328aa75e20aa22c0197c9a`)
 - Source head: `1798ad4dd7028dc37fb264b648a084420a0251bf`
 - Source base: `rust-v0.150.1` (`90854393966b21e9ebfd21b122334eb09a20c93d`)
-- Immutable plan: `e91b6556-83fe-43fc-87ea-15e010ad7468`
-- Candidate: `9aa92e39-1e47-4b28-9d40-8713bbeb8add`
+- Immutable plan: `7ac49981-b347-420f-8939-807f42d2a17e`
+- Candidate: `ed586ea9-cc23-4899-9316-6acfcb94fa42`
 - Model: 41 leaves — 18 rework, 23 drop/upstream/quarantine
 
 Each retained leaf below names one failure boundary, its production owner,
@@ -201,18 +201,20 @@ The Fork Fleet plan contains the complete file lists and source-commit mapping.
 
 - Owner: only the matching-turn analytics wait in
   `app-server/tests/suite/v2/guardian_v2.rs`, the MCP refresh gate held by
-  `core/src/session/turn_input_tests.rs`, and the grandchild completion event wait
-  in `core/tests/suite/subagent_notifications.rs`.
+  `core/src/session/turn_input_tests.rs`, the idle-turn and reusable-hook gate in
+  `core/tests/suite/hooks.rs`, and the grandchild completion event wait in
+  `core/tests/suite/subagent_notifications.rs`.
 - Upstream: the Guardian synchronization is the exact test hunk from upstream
-  `ddf04ad26789d040f9ef6a96736f76602e35a6cc`; the other two fixture barriers use
+  `ddf04ad26789d040f9ef6a96736f76602e35a6cc`; the other three fixture barriers use
   existing local synchronization primitives without changing product behavior.
 - Proof: focused Guardian v2 scoped-approval, accepted thread-settings input, and
-  grandchild full-fork context tests, followed by repository formatting.
+  grandchild full-fork context tests plus both idle async-hook handoff variants,
+  followed by repository formatting.
 - Impact/shared: test-only ordering stabilization; assertions and production logic
   are unchanged, and no broad-test failure is allowlisted or weakened.
 - Retire: drop the Guardian hunk when the target contains upstream `ddf04ad26789`;
   drop each remaining barrier when its fixture is upstream-owned with equivalent
-  event/gate synchronization rather than transient state polling.
+  event/gate synchronization rather than transient state polling or reusable gates.
 
 ### `maintenance-generated-release-tail` — rework, final
 
