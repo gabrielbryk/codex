@@ -337,6 +337,45 @@ where
     matcher(&ev).expect("EventMsg should match matcher predicate")
 }
 
+pub async fn rollback_when_idle(codex: &CodexThread, num_turns: u32) -> anyhow::Result<()> {
+    use codex_protocol::protocol::CodexErrorInfo;
+    use codex_protocol::protocol::EventMsg;
+    use codex_protocol::protocol::Op;
+    use tokio::time::Duration;
+
+    enum RollbackAttempt {
+        Complete,
+        Busy,
+        Failed(String),
+    }
+
+    for _ in 0..50 {
+        codex.submit(Op::ThreadRollback { num_turns }).await?;
+        match wait_for_event_match(codex, |event| match event {
+            EventMsg::ThreadRolledBack(_) => Some(RollbackAttempt::Complete),
+            EventMsg::Error(error)
+                if error.codex_error_info == Some(CodexErrorInfo::ThreadRollbackFailed) =>
+            {
+                if error.message == "Cannot rollback while a turn is in progress." {
+                    Some(RollbackAttempt::Busy)
+                } else {
+                    Some(RollbackAttempt::Failed(error.message.clone()))
+                }
+            }
+            _ => None,
+        })
+        .await
+        {
+            RollbackAttempt::Complete => return Ok(()),
+            RollbackAttempt::Busy => tokio::time::sleep(Duration::from_millis(10)).await,
+            RollbackAttempt::Failed(message) => {
+                anyhow::bail!("thread rollback failed: {message}")
+            }
+        }
+    }
+    anyhow::bail!("timed out waiting for the completed turn to become idle")
+}
+
 pub async fn wait_for_event_with_timeout<F>(
     codex: &CodexThread,
     mut predicate: F,
