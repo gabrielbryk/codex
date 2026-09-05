@@ -101,7 +101,7 @@ async fn external_command_updates_the_existing_single_line_footer() {
         ],
         timeout_ms: 1_000,
     });
-    chat.status_line_command = Some(StatusLineCommandRuntime::new());
+    chat.status_line_command = Some(StatusLineCommandRuntime::new(std::env::current_dir().ok()));
 
     chat.refresh_status_line();
     let completion = next_completion(&mut events).await;
@@ -109,6 +109,46 @@ async fn external_command_updates_the_existing_single_line_footer() {
     assert_chatwidget_snapshot!(
         "external_status_line_layout",
         render_bottom_popup(&chat, /*width*/ 80)
+    );
+}
+
+#[tokio::test]
+async fn command_input_uses_latest_context_usage_instead_of_session_total() {
+    let (mut chat, _events, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.status_line_command = Some(StatusLineCommandRuntime::new(std::env::current_dir().ok()));
+    handle_token_count(
+        &mut chat,
+        Some(TokenUsageInfo {
+            total_token_usage: TokenUsage {
+                input_tokens: 900_000,
+                output_tokens: 80_000,
+                total_tokens: 980_000,
+                ..TokenUsage::default()
+            },
+            last_token_usage: TokenUsage {
+                input_tokens: 175_000,
+                cached_input_tokens: 120_000,
+                cache_write_input_tokens: 4_000,
+                output_tokens: 12_000,
+                total_tokens: 187_000,
+                ..TokenUsage::default()
+            },
+            model_context_window: Some(272_000),
+        }),
+    );
+
+    let input = chat.status_line_command_input().expect("command input");
+    assert!(!input.exceeds_200k_tokens);
+    assert_eq!(
+        input.context_window.current_usage,
+        Some(
+            crate::status_line_command::wire::StatusLineCommandCurrentUsage {
+                input_tokens: 175_000,
+                output_tokens: 12_000,
+                cache_creation_input_tokens: 4_000,
+                cache_read_input_tokens: 120_000,
+            }
+        )
     );
 }
 
@@ -152,7 +192,7 @@ async fn unchanged_failure_automatically_retries_after_backoff() {
         ],
         timeout_ms: 1_000,
     });
-    chat.status_line_command = Some(StatusLineCommandRuntime::new());
+    chat.status_line_command = Some(StatusLineCommandRuntime::new(std::env::current_dir().ok()));
 
     chat.refresh_status_line();
     assert!(!chat.apply_status_line_command_completion(next_completion(&mut events).await));
@@ -186,7 +226,7 @@ async fn stale_input_and_widget_retry_timers_are_suppressed() {
         ],
         timeout_ms: 1_000,
     });
-    chat.status_line_command = Some(StatusLineCommandRuntime::new());
+    chat.status_line_command = Some(StatusLineCommandRuntime::new(std::env::current_dir().ok()));
 
     chat.refresh_status_line();
     assert!(!chat.apply_status_line_command_completion(next_completion(&mut events).await));
@@ -207,8 +247,9 @@ async fn stale_input_and_widget_retry_timers_are_suppressed() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn settings_and_thread_switch_run_formatter_in_current_session_cwd() {
+async fn settings_and_thread_switch_keep_formatter_in_local_process_cwd() {
     let (mut chat, mut events, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    let local_cwd = std::env::current_dir().expect("local cwd");
     let tmp = tempfile::tempdir().expect("tempdir");
     let settings_cwd = tmp.path().join("settings-cwd");
     let switched_cwd = tmp.path().join("switched-cwd");
@@ -218,7 +259,7 @@ async fn settings_and_thread_switch_run_formatter_in_current_session_cwd() {
         command: vec!["/bin/sh".to_string(), "-c".to_string(), "pwd".to_string()],
         timeout_ms: 1_000,
     });
-    chat.status_line_command = Some(StatusLineCommandRuntime::new());
+    chat.status_line_command = Some(StatusLineCommandRuntime::new(std::env::current_dir().ok()));
 
     let thread_id = ThreadId::new();
     chat.thread_id = Some(thread_id);
@@ -230,7 +271,7 @@ async fn settings_and_thread_switch_run_formatter_in_current_session_cwd() {
     assert!(chat.apply_status_line_command_completion(next_completion(&mut events).await));
     assert_eq!(
         chat.status_line_text().as_deref(),
-        Some(settings_cwd.to_string_lossy().as_ref())
+        Some(local_cwd.to_string_lossy().as_ref())
     );
 
     chat.handle_thread_session(thread_session_for_status_command(
@@ -240,6 +281,6 @@ async fn settings_and_thread_switch_run_formatter_in_current_session_cwd() {
     assert!(chat.apply_status_line_command_completion(next_completion(&mut events).await));
     assert_eq!(
         chat.status_line_text().as_deref(),
-        Some(switched_cwd.to_string_lossy().as_ref())
+        Some(local_cwd.to_string_lossy().as_ref())
     );
 }

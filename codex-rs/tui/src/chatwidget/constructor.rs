@@ -66,7 +66,9 @@ impl ChatWidget {
         let status_line_command = config
             .tui_status_line_command
             .as_ref()
-            .map(|_| super::status_line_command::StatusLineCommandRuntime::new());
+            .map(|_| {
+                super::status_line_command::StatusLineCommandRuntime::new(std::env::current_dir().ok())
+            });
         let effective_service_tier = crate::service_tier_resolution::effective_service_tier(
             &config,
             &header_model,

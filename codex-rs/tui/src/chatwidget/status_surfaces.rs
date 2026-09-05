@@ -1053,7 +1053,7 @@ impl ChatWidget {
     }
 }
 
-fn five_hour_status_window(
+pub(super) fn five_hour_status_window(
     snapshot: &RateLimitSnapshotDisplay,
 ) -> Option<(&RateLimitWindowDisplay, bool)> {
     find_primary_codex_window(snapshot, "5h")
@@ -1062,7 +1062,7 @@ fn five_hour_status_window(
         .or_else(|| non_weekly_secondary_window_when_primary_is_weekly(snapshot))
 }
 
-fn weekly_status_window(
+pub(super) fn weekly_status_window(
     snapshot: &RateLimitSnapshotDisplay,
 ) -> Option<(&RateLimitWindowDisplay, bool)> {
     find_codex_window(snapshot, "weekly")
@@ -1149,7 +1149,7 @@ fn matches_window_label(window: &RateLimitWindowDisplay, label: &str) -> bool {
         == Some(label)
 }
 
-fn permissions_display(config: &Config) -> String {
+pub(super) fn permissions_display(config: &Config) -> String {
     let active_permission_profile = config.permissions.active_permission_profile();
     if let Some(active_permission_profile) = active_permission_profile.as_ref()
         && !active_permission_profile.id.starts_with(':')
@@ -1178,7 +1178,7 @@ fn permissions_display(config: &Config) -> String {
     "Custom permissions".to_string()
 }
 
-fn approval_mode_display(config: &Config) -> String {
+pub(super) fn approval_mode_display(config: &Config) -> String {
     let approval_policy = AskForApproval::from(config.permissions.approval_policy.value());
     if approval_policy == AskForApproval::OnRequest {
         return match config.approvals_reviewer {
