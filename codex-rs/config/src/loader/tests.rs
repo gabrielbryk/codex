@@ -291,11 +291,9 @@ fn alternate_codex_home_skips_default_user_config_as_project_layer() {
 
     assert!(should_skip_project_config_folder(
         &default_codex_home,
-        default_codex_home.as_path(),
         &alternate_codex_home,
-        alternate_codex_home.as_path(),
         &default_codex_home,
-        default_codex_home.as_path(),
+        &AbsolutePathBuf::resolve_path_against_base("/home/test/work/project", "/"),
     ));
 }
 
@@ -305,11 +303,9 @@ fn primary_codex_home_still_skips_its_user_config_as_project_layer() {
 
     assert!(should_skip_project_config_folder(
         &default_codex_home,
-        default_codex_home.as_path(),
         &default_codex_home,
-        default_codex_home.as_path(),
         &default_codex_home,
-        default_codex_home.as_path(),
+        &AbsolutePathBuf::resolve_path_against_base("/home/test/work/project", "/"),
     ));
 }
 
@@ -323,11 +319,61 @@ fn alternate_codex_home_preserves_repo_local_project_config() {
 
     assert!(!should_skip_project_config_folder(
         &project_dot_codex,
-        project_dot_codex.as_path(),
         &alternate_codex_home,
-        alternate_codex_home.as_path(),
         &default_codex_home,
-        default_codex_home.as_path(),
+        &AbsolutePathBuf::resolve_path_against_base("/home/test/work/project", "/"),
+    ));
+}
+
+#[test]
+fn alternate_codex_home_preserves_default_home_inside_project_root() {
+    let project_root = AbsolutePathBuf::resolve_path_against_base("/home/test", "/");
+    let default_codex_home = project_root.join(".codex");
+    let alternate_codex_home = project_root.join(".codex-work");
+
+    assert!(!should_skip_project_config_folder(
+        &default_codex_home,
+        &alternate_codex_home,
+        &default_codex_home,
+        &project_root,
+    ));
+}
+
+#[test]
+fn alternate_codex_home_skips_default_home_with_sibling_project_prefix() {
+    let project_root = AbsolutePathBuf::resolve_path_against_base("/home/test/project", "/");
+    let default_codex_home =
+        AbsolutePathBuf::resolve_path_against_base("/home/test/project-other/.codex", "/");
+    let alternate_codex_home = project_root.join(".codex-work");
+
+    assert!(should_skip_project_config_folder(
+        &default_codex_home,
+        &alternate_codex_home,
+        &default_codex_home,
+        &project_root,
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn alternate_codex_home_preserves_symlinked_project_local_default_home() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempdir().expect("tempdir");
+    let real_project_root = tmp.path().join("real-project");
+    let linked_project_root = tmp.path().join("linked-project");
+    let default_codex_home = real_project_root.join(".codex");
+    let alternate_codex_home = real_project_root.join(".codex-work");
+    std::fs::create_dir_all(&default_codex_home).expect("create default Codex home");
+    std::fs::create_dir_all(&alternate_codex_home).expect("create alternate Codex home");
+    symlink(&real_project_root, &linked_project_root).expect("symlink project root");
+
+    assert!(!should_skip_project_config_folder(
+        &AbsolutePathBuf::from_absolute_path(&default_codex_home).expect("absolute default home"),
+        &AbsolutePathBuf::from_absolute_path(&alternate_codex_home)
+            .expect("absolute alternate home"),
+        &AbsolutePathBuf::from_absolute_path(&default_codex_home).expect("absolute default home"),
+        &AbsolutePathBuf::from_absolute_path(&linked_project_root).expect("absolute project root"),
     ));
 }
 

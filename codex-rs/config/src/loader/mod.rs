@@ -1707,11 +1707,7 @@ async fn discover_project_layers(
     strict_config: bool,
 ) -> io::Result<DiscoveredProjectLayers> {
     let codex_home_abs = AbsolutePathBuf::from_absolute_path(codex_home)?;
-    let codex_home_normalized =
-        normalize_path(codex_home_abs.as_path()).unwrap_or_else(|_| codex_home_abs.to_path_buf());
     let default_codex_home_abs = AbsolutePathBuf::resolve_path_against_base("~/.codex", cwd);
-    let default_codex_home_normalized = normalize_path(default_codex_home_abs.as_path())
-        .unwrap_or_else(|_| default_codex_home_abs.to_path_buf());
     let mut dirs = cwd
         .ancestors()
         .scan(false, |done, a| {
@@ -1744,15 +1740,11 @@ async fn discover_project_layers(
         let decision = trust_context.decision_for_dir(&dir);
         let disabled_reason = trust_context.disabled_reason_for_decision(&decision);
         let hooks_config_folder_override = trust_context.root_checkout_hooks_folder_for_dir(&dir);
-        let dot_codex_normalized =
-            normalize_path(dot_codex_abs.as_path()).unwrap_or_else(|_| dot_codex_abs.to_path_buf());
         if should_skip_project_config_folder(
             &dot_codex_abs,
-            &dot_codex_normalized,
             &codex_home_abs,
-            &codex_home_normalized,
             &default_codex_home_abs,
-            &default_codex_home_normalized,
+            project_root,
         ) {
             continue;
         }
@@ -1844,19 +1836,31 @@ async fn discover_project_layers(
 
 fn should_skip_project_config_folder(
     dot_codex: &AbsolutePathBuf,
-    dot_codex_normalized: &Path,
     codex_home: &AbsolutePathBuf,
-    codex_home_normalized: &Path,
     default_codex_home: &AbsolutePathBuf,
-    default_codex_home_normalized: &Path,
+    project_root: &AbsolutePathBuf,
 ) -> bool {
+    let normalize = |path: &AbsolutePathBuf| {
+        normalize_path(path.as_path()).unwrap_or_else(|_| path.to_path_buf())
+    };
+    let dot_codex_normalized = normalize(dot_codex);
+    let codex_home_normalized = normalize(codex_home);
+    let default_codex_home_normalized = normalize(default_codex_home);
+    let project_root_normalized = normalize(project_root);
     let is_selected_user_config =
         dot_codex == codex_home || dot_codex_normalized == codex_home_normalized;
     let uses_alternate_codex_home =
         codex_home != default_codex_home && codex_home_normalized != default_codex_home_normalized;
     let is_default_user_config =
         dot_codex == default_codex_home || dot_codex_normalized == default_codex_home_normalized;
-    is_selected_user_config || uses_alternate_codex_home && is_default_user_config
+    let default_codex_home_is_project_local =
+        default_codex_home.as_path().starts_with(project_root)
+            || default_codex_home_normalized.starts_with(project_root_normalized);
+    // Preserve the default home when it also represents a project-local layer.
+    is_selected_user_config
+        || uses_alternate_codex_home
+            && is_default_user_config
+            && !default_codex_home_is_project_local
 }
 
 /// For linked worktrees, preserve ordinary worktree-local project config while
