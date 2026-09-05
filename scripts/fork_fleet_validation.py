@@ -77,6 +77,9 @@ SECTION_CONTRACTS = (
         ),
     ),
 )
+TARGET_SHA_PATTERN = re.compile(r"(?m)^- Target: `[^`]+` \(`(?P<sha>[0-9a-f]{40})`\)$")
+FORMAT_FAILURE_PATTERN = re.compile(r"(?m)^Formatting failed: (?P<groups>.+)$")
+REWORK_TRAILER_PATTERN = re.compile(r"(?m)^Fork-Fleet-Rework: \S+\s*$")
 
 
 def markdown_section(text: str, heading: str) -> str:
@@ -161,6 +164,100 @@ def audit_upgrade_workflow(
     )
 
 
+def manifest_target_sha(manifest_text: str) -> str:
+    match = TARGET_SHA_PATTERN.search(manifest_text)
+    if match is None:
+        raise SystemExit("PATCHES.md is missing the exact target SHA")
+    return match.group("sha")
+
+
+def candidate_target_sha() -> str:
+    commits = subprocess.check_output(
+        ["git", "rev-list", "--first-parent", "HEAD"],
+        cwd=REPO_ROOT,
+        text=True,
+    ).splitlines()
+    for commit in commits:
+        metadata = subprocess.check_output(
+            ["git", "show", "-s", "--format=%ce%n%B", commit],
+            cwd=REPO_ROOT,
+            text=True,
+        )
+        committer_email, _, message = metadata.partition("\n")
+        if committer_email == "fork-fleet@localhost":
+            continue
+        if REWORK_TRAILER_PATTERN.search(message):
+            continue
+        return commit
+    raise SystemExit("could not derive the upstream target from candidate history")
+
+
+def bound_manifest_target(
+    manifest_text: str,
+    derived_target_sha: str,
+    injected_target_sha: str | None,
+) -> str:
+    target_sha = manifest_target_sha(manifest_text)
+    if injected_target_sha is not None and injected_target_sha != derived_target_sha:
+        raise SystemExit(
+            "Fork Fleet target SHA does not match the candidate history boundary: "
+            f"{injected_target_sha} != {derived_target_sha}"
+        )
+    if target_sha != derived_target_sha:
+        raise SystemExit(
+            "PATCHES.md target SHA does not match the candidate history boundary: "
+            f"{target_sha} != {derived_target_sha}"
+        )
+    return target_sha
+
+
+def formatter_failures(output: str) -> frozenset[str]:
+    matches = list(FORMAT_FAILURE_PATTERN.finditer(output))
+    if len(matches) != 1:
+        return frozenset()
+    return frozenset(group.strip() for group in matches[0].group("groups").split(","))
+
+
+def run_format_validation(
+    just: Path,
+    environment: dict[str, str],
+    injected_target_sha: str | None,
+) -> int:
+    target_sha = bound_manifest_target(
+        (REPO_ROOT / "PATCHES.md").read_text(encoding="utf-8"),
+        candidate_target_sha(),
+        injected_target_sha,
+    )
+    completed = subprocess.run(
+        [str(just), "fmt-check"],
+        cwd=REPO_ROOT,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+    )
+    if completed.returncode == 0:
+        return 0
+
+    justfile_changed = subprocess.run(
+        ["git", "diff", "--quiet", target_sha, "--", "justfile"],
+        cwd=REPO_ROOT,
+        env=environment,
+        check=False,
+    ).returncode
+    failures = formatter_failures(completed.stdout)
+    if justfile_changed == 0 and failures == {"Just"}:
+        print(
+            "format validation accepted the exact upstream justfile baseline; "
+            "all changed-language formatter groups passed"
+        )
+        return 0
+
+    print(completed.stdout, end="", file=sys.stderr)
+    return completed.returncode
+
+
 def rusty_v8_environment(real_home: Path) -> dict[str, str]:
     with (CODEX_RS / "Cargo.lock").open("rb") as lock_file:
         packages = tomllib.load(lock_file)["package"]
@@ -190,7 +287,7 @@ def main() -> None:
     actions = {
         "upgrade-workflow-audit": [],
         "upgrade-workflow-tests": [],
-        "format": [(REPO_ROOT, [str(fork_fleet_just), "fmt-check"])],
+        "format": [],
         "locked-metadata": [
             (
                 CODEX_RS,
@@ -344,6 +441,14 @@ def main() -> None:
             "FORK_FLEET_NETWORK": os.environ.get("FORK_FLEET_NETWORK", "denied"),
             **rusty_v8_environment(real_home),
         }
+        if sys.argv[1] == "format":
+            raise SystemExit(
+                run_format_validation(
+                    fork_fleet_just,
+                    environment,
+                    os.environ.get("FORK_FLEET_TARGET_SHA"),
+                )
+            )
         for cwd, command in commands:
             completed = subprocess.run(command, cwd=cwd, env=environment, check=False)
             if completed.returncode:

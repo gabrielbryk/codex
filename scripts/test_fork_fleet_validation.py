@@ -93,5 +93,50 @@ class UpgradeWorkflowAuditTests(unittest.TestCase):
         self.assertEqual(checked, 26)
 
 
+class FormatBaselineTests(unittest.TestCase):
+    def test_reads_exact_target_sha_from_manifest(self) -> None:
+        sha = "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a"
+        manifest = f"# Fork patch manifest\n\n- Target: `rust-v0.153.4` (`{sha}`)\n"
+
+        self.assertEqual(VALIDATION.manifest_target_sha(manifest), sha)
+
+    def test_rejects_manifest_without_exact_target_sha(self) -> None:
+        with self.assertRaisesRegex(SystemExit, "exact target SHA"):
+            VALIDATION.manifest_target_sha("- Target: `rust-v0.153.4`\n")
+
+    def test_rejects_manifest_target_that_differs_from_history(self) -> None:
+        manifest_sha = "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a"
+        history_sha = "90854393966b21e9ebfd21b122334eb09a20c93d"
+        manifest = (
+            f"# Fork patch manifest\n\n- Target: `rust-v0.153.4` (`{manifest_sha}`)\n"
+        )
+
+        with self.assertRaisesRegex(SystemExit, "history boundary"):
+            VALIDATION.bound_manifest_target(manifest, history_sha, history_sha)
+
+    def test_rejects_injected_target_that_differs_from_history(self) -> None:
+        history_sha = "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a"
+        injected_sha = "90854393966b21e9ebfd21b122334eb09a20c93d"
+        manifest = (
+            f"# Fork patch manifest\n\n- Target: `rust-v0.153.4` (`{history_sha}`)\n"
+        )
+
+        with self.assertRaisesRegex(SystemExit, "Fork Fleet target SHA"):
+            VALIDATION.bound_manifest_target(manifest, history_sha, injected_sha)
+
+    def test_identifies_only_just_formatter_failure(self) -> None:
+        output = "==> Just formatter failed\nFormatting failed: Just\n"
+
+        self.assertEqual(VALIDATION.formatter_failures(output), {"Just"})
+
+    def test_preserves_multiple_formatter_failures(self) -> None:
+        output = "Formatting failed: Just, Rust, Python scripts\n"
+
+        self.assertEqual(
+            VALIDATION.formatter_failures(output),
+            {"Just", "Rust", "Python scripts"},
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
