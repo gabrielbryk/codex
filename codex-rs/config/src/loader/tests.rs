@@ -347,8 +347,7 @@ fn alternate_codex_home_isolates_default_user_config_during_layer_composition() 
     ] {
         std::fs::create_dir_all(dir).expect("create fixture directory");
     }
-    std::fs::write(project.join(".git/HEAD"), "ref: refs/heads/main\n")
-        .expect("write git head");
+    std::fs::write(project.join(".git/HEAD"), "ref: refs/heads/main\n").expect("write git head");
     std::fs::write(
         default_codex_home.join(CONFIG_TOML_FILE),
         "default_home_only = true\nshared = \"default-home\"\n",
@@ -377,10 +376,7 @@ fn alternate_codex_home_isolates_default_user_config_during_layer_composition() 
             .block_on(load_config_layers_state(
                 &TestFileSystem,
                 &alternate_codex_home,
-                Some(
-                    AbsolutePathBuf::from_absolute_path(&project)
-                        .expect("absolute project path"),
-                ),
+                Some(AbsolutePathBuf::from_absolute_path(&project).expect("absolute project path")),
                 &[],
                 LoaderOverrides::without_managed_config_for_tests(),
                 &crate::NoopThreadConfigLoader,
