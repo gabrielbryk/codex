@@ -157,7 +157,9 @@ state for each failed command; a setup failure blocks that comparison but does n
 candidate commands from running.
 
 Before freezing the target's pre-test snapshot, run offline Cargo lock normalization in that fresh
-clone. First prove HEAD, index, and worktree are pristine at the exact target. Then accept only local
+clone using full offline Cargo metadata; do not use a dependency-eliding metadata mode that leaves
+the stale lock untouched. First prove HEAD, index, and worktree are pristine at the exact target.
+Then accept only local
 source-less workspace packages restamped from `0.0.0` to the target's `workspace.package` version.
 Compute that exact expected textual transformation from the original lock and require the result to
 match byte-for-byte; comments, whitespace, or key order changes are not normalization. Retain the
