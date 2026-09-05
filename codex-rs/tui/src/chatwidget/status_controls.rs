@@ -73,10 +73,6 @@ impl ChatWidget {
         self.bottom_pane.set_status_line(status_line);
     }
 
-    pub(crate) fn set_status_lines(&mut self, status_lines: Vec<Line<'static>>) {
-        self.bottom_pane.set_status_lines(status_lines);
-    }
-
     pub(crate) fn set_status_hyperlink_lines(
         &mut self,
         status_lines: Vec<crate::terminal_hyperlinks::HyperlinkLine>,
