@@ -164,8 +164,9 @@ The Fork Fleet plan contains the complete file lists and source-commit mapping.
 - Proof: missing/mismatched manifest target, injected-target mismatch, history target,
   Just-only baseline, multiple-formatter failure tests, and workspace pass-fast,
   subset acceptance, candidate-only rejection, target setup/timeout/parse failure,
-  terminal-summary count and format rejection, explicit `FAIL`/`FL+LK` terminal
-  membership parsing, streaming output cap/redaction,
+  terminal-summary count and format rejection, explicit `FAIL`/`FL+LK` failure and
+  `TMT` timeout membership parsing, category-preserving subset comparison, streaming
+  output cap/redaction,
   per-command isolation, candidate/target immutability, byte-exact target lock
   normalization acceptance and mutation rejection, locked production command argv,
   and multi-command continuation tests.
