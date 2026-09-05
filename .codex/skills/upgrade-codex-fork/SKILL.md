@@ -1,105 +1,71 @@
 ---
 name: upgrade-codex-fork
-description: Safely check, prepare, ship, or improve Gabe's local OpenAI Codex fork upgrade workflow with Fork Fleet. Use for syncing /mnt/wd-black/ClonedRepos/codex to upstream/main or a rust-v release, validating the logical patch stack, preparing an isolated candidate, building an exact-SHA canonical package, performing an explicitly authorized runtime cutover, or improving this process from recorded friction.
+description: Safely check, prepare, ship, or improve Gabe's OpenAI Codex fork with Fork Fleet. Use for syncing to upstream or a rust-v release, validating the patch stack, preparing a candidate, building an exact-SHA package, authorized runtime cutover, or workflow improvement.
 ---
 
 # Upgrade Codex Fork
 
-Use Fork Fleet as the authority for patch intent and isolated candidates. Never rebase the active
-Codex checkout in place, infer the stack from a target-dependent merge base, or edit installed skill
-caches. This repo-local directory is the durable skill source. Fork Fleet owns the external
-installer, package helper, and report writer under `libs/fork-fleet` in the Worklens repository.
+Fork Fleet owns patch intent and candidates. Never rebase the active checkout, infer its stack from
+a target-dependent merge base, or edit installed caches. This directory owns the skill; Worklens
+`libs/fork-fleet` owns helpers.
 
-## Select One Mode
+## Choose One Mode
 
-Announce the mode and why before commands:
+Announce the mode before commands:
 
-- `check`: read-only preservation, target, patch, and release-distance evidence.
-- `prepare`: `check` plus one isolated reviewed candidate and required validation. This is the
-  default when an upgrade request does not authorize publication or cutover.
-- `ship`: only after explicit publish, install, activate, deploy, or cutover authority.
-- `improve`: post-run, evidence-gated changes to source-owned workflow or documentation.
+- `check`: read-only preservation, target, patch, and distance evidence.
+- `prepare`: an isolated, reviewed, validated candidate; the upgrade default.
+- `ship`: requires explicit authority to publish, install, activate, deploy, or cut over.
+- `improve`: evidence-gated workflow changes; it grants no history or runtime authority.
 
-“Update” or “upgrade” alone does not authorize `ship`. Improving the workflow does not authorize
-changing Codex history or runtime state.
+“Update” or “upgrade” alone never authorizes `ship`.
 
-## Read the Relevant Playbooks
+## Read Before Acting
 
-Read each selected reference completely before acting:
+Read each selected playbook completely. Read the candidate's root and applicable nested `AGENTS.md`
+before mutation, delegation, validation, or build.
 
-- Every `check`, `prepare`, or `ship`: [planning and reconciliation](references/planning-and-reconciliation.md)
-- Every validation or build: [validation funnel](references/validation.md)
+- Every run: [planning and reconciliation](references/planning-and-reconciliation.md)
+- Validation/build: [validation](references/validation.md)
 - Every `ship`: [shipping and cutover](references/shipping-and-cutover.md)
-- When delegation is authorized or work is long-running: [coordination and status](references/coordination-and-status.md)
-- Every run report and every `improve`: [improvement and reporting](references/improvement-and-reporting.md)
+- Delegation/long work: [coordination and status](references/coordination-and-status.md)
+- Reports/`improve`: [improvement and reporting](references/improvement-and-reporting.md)
 
-Repository `AGENTS.md` remains authoritative for Codex code style and test ordering. Before any
-mutation, delegation, validation, or build, read the complete root `AGENTS.md` from the candidate
-worktree plus any more-specific `AGENTS.md` governing touched paths. Do not assume a delegated
-agent inherits that policy; put the requirement and exact candidate path in every editing or testing
-prompt.
+Before mutation, start and retain one `codex-upgrade-report --mode <mode> --status running` run.
 
-## Start a Durable Run
+## Mandatory Gates
 
-Before mutation, create one report and retain its run ID:
+Follow this order; reopen phases only for new evidence.
 
-```bash
-codex-upgrade-report \
-  --mode <check|prepare|ship|improve> \
-  --status running \
-  --repo /mnt/wd-black/ClonedRepos/codex
-```
+1. **Preservation:** inventory every checkout, ref, stash, package, and runtime in a bounded
+   `codex-upgrade-workflow preflight` artifact. Never discard or overwrite unrelated work.
+2. **Target:** resolve the request to an immutable SHA. Stable requests override prerelease
+   defaults. Reject plans or leaf decisions adjudicated against another SHA.
+3. **Leaves:** audit every logical leaf's ownership, upstream replacement, supersession, shared
+   surfaces, dependencies, tests, and retirement trigger. Record `apply`, `rework`, or `drop`; do not
+   preserve upstream-fixed behavior or combine unrelated boundaries.
+4. **Candidate:** mutate only the Fork Fleet candidate worktree. Join all writers, review/stage the
+   intended tree, record HEAD plus index tree, then freeze it before a read-only heavy gate.
+5. **Validation:** run deterministic checks, candidate-coherence compile, and each retained leaf's
+   tests. Serialize heavy commands through `codex-upgrade-workflow gate`; reject results if
+   HEAD/index changed. The complete Rust suite requires repository-mandated user approval.
+6. **Final tail:** after semantic leaves and fix/fmt, generate and commit release metadata as the
+   last isolated leaf with exact allowed paths. Revalidate target, diff, trailer, generated outputs,
+   and final SHA; never hide semantic edits in this tail.
+7. **Authorization:** `prepare` stops before publication. Only `ship` may move safety refs, publish,
+   build the exact SHA, install, or request managed drain. Each destructive/runtime step needs
+   explicit authority; verify the live generation after drain.
 
-Update that same report at terminal boundaries. Keep raw logs in bounded artifacts, not in the
-report or model context.
+## Operating Rules
 
-## Execution Contract
-
-Use this order and do not reopen an earlier phase without new evidence:
-
-1. Preserve and inventory every checkout, ref, stash, installed package, and active runtime.
-   Use `codex-upgrade-workflow preflight` to capture one bounded artifact.
-2. Resolve and verify the exact requested target; explicit stable requests override prerelease
-   registry defaults. Reject leaf decisions adjudicated against any other target SHA.
-3. Adjudicate exact target ownership and audit leaf-v1 source, replacement, supersession, shared
-   surface, and dependency contracts before deciding `apply`, `rework`, or `drop`.
-4. Prepare and resolve conflicts only in the Fork Fleet candidate worktree, then freeze it for the
-   mandatory candidate-coherence review in the planning playbook.
-5. Run deterministic gates, the candidate coherence compile, and the tests recorded in each
-   retained leaf's implementation/test ledger, then at most one broad canary and final fix/fmt.
-6. In `ship`, publish with safety refs and exact leases, build the exact SHA once, and request the
-   managed natural-drain rollout.
-7. Separate “engineering complete” from passive drain waiting; verify the live generation after
-   the controller finishes.
-
-## Non-Negotiable Efficiency Rules
-
-- Do not run the complete Rust suite without the repository-required user approval.
-- Never repeat a broad suite merely because its failure set changed. Follow the validation
-  classification and stop rules in the linked playbook.
-- Capture complete lint output once, batch all mechanical repairs, then rerun the lint once.
-- Reuse persistent Cargo/Bazel/download caches while isolating mutable runtime state.
-- Serialize heavy Rust/Bazel/package builds; parallelize only independent analysis and mechanical
-  edits with disjoint ownership between gates.
-- Join every writer lane, review and stage its intended changes, and freeze the candidate before a
-  read-only heavy gate. No candidate edits, even to disjoint files, may overlap that gate. A
-  formatter, fixer, or generator that writes the candidate must be the only writer.
-- Delegate every safely separable mechanical or evidence task to Luna by default. Use Terra only for
-  bounded semantic uncertainty and Sol/frontier only for high-risk ambiguity or release safety.
-- Run every heavy gate through `codex-upgrade-workflow gate`; compare broad failure membership with
-  `codex-upgrade-workflow compare-failures` before considering a rerun.
-- Treat the gate helper's `inputFingerprint` as an invocation fingerprint, not a source snapshot.
-  Record and compare the candidate HEAD/index tree before and after every gate; invalidate results
-  whose candidate input changed while the command ran.
-- On resume, reuse a completed checkpoint only when its exact SHA, input fingerprint, and artifact
-  still match. Session restart alone never invalidates a gate.
-- Load only summaries and novel failures into agent context. Do not stream passing-test output.
-- The canonical exact-SHA package build is the release build unless reviewed registry validation
-  explicitly requires another build system.
-- Never rebuild or retest while a valid package is merely waiting for natural drain.
+- Keep bounded logs; load only summaries and novel failures into context.
+- Follow validation stop rules; capture lint once, batch fixes, and rerun once.
+- Isolate runtime state. Never overlap writers with a gate; mutators run alone.
+- Resume checkpoints only when SHA, invocation fingerprint, and artifacts match.
+- Build from the final SHA; do not rebuild while draining.
 
 ## Finish
 
-Report mode/run path, source/base/target/candidate SHAs, patch decisions, compact gate outcomes,
-safety refs, package/source markers, live generation state, preserved dirty worktrees, and only real
-remaining blockers. For a waiting rollout, report the exact drain state and no engineering ETA.
+Update the same report with all SHAs, leaf decisions/supersession, gates, safety refs,
+package/source markers, live generation, preserved work, and blockers. Report engineering
+separately from passive rollout drain.
