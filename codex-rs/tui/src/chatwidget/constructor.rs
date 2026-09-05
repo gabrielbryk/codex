@@ -63,12 +63,9 @@ impl ChatWidget {
         let active_cell = Some(Self::placeholder_session_header_cell(&config));
 
         let current_cwd = Some(config.cwd.to_path_buf());
-        let status_line_command = config
-            .tui_status_line_command
-            .as_ref()
-            .map(|_| {
-                super::status_line_command::StatusLineCommandRuntime::new(std::env::current_dir().ok())
-            });
+        let status_line_command = config.tui_status_line_command.as_ref().map(|_| {
+            super::status_line_command::StatusLineCommandRuntime::new(std::env::current_dir().ok())
+        });
         let effective_service_tier = crate::service_tier_resolution::effective_service_tier(
             &config,
             &header_model,

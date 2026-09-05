@@ -1,6 +1,6 @@
+use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
-use std::path::PathBuf;
 use std::time::Instant;
 
 use tokio::task::AbortHandle;
@@ -136,7 +136,12 @@ impl ChatWidget {
             };
             let outcome = runtime.lifecycle.apply(completion, Instant::now());
             let lines = (outcome == ApplyOutcome::Updated)
-                .then(|| runtime.lifecycle.last_good().map(|parsed| parsed.lines.clone()))
+                .then(|| {
+                    runtime
+                        .lifecycle
+                        .last_good()
+                        .map(|parsed| parsed.lines.clone())
+                })
                 .flatten();
             if let ApplyOutcome::RetryAt(retry_at) = outcome {
                 let Some((in_flight_token, input)) = runtime.in_flight.as_ref().cloned() else {
