@@ -54,7 +54,9 @@ pub(super) async fn reconnect(
     // Connecting already has transport deadlines. Give healthy history/inventory hydration one
     // shared budget instead of repeatedly discarding its progress on a short per-attempt timer.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(/*secs*/ 120);
-    for delay in [0, 1, 2, 4, 8] {
+    // A replacement can accept connections before the previous process releases its writer
+    // locks. Keep trying for the whole recovery budget, including after the initial backoff.
+    for delay in [0, 1, 2, 4].into_iter().chain(std::iter::repeat(8)) {
         let attempt = async {
             tokio::time::sleep(Duration::from_secs(delay)).await;
             let client = crate::connect_remote_app_server(endpoint.clone()).await?;
@@ -77,6 +79,11 @@ pub(super) async fn reconnect(
                         if matches!(
                             error.downcast_ref::<TypedRequestError>(),
                             Some(TypedRequestError::Transport { .. })
+                        ) || matches!(
+                            error.downcast_ref::<TypedRequestError>(),
+                            Some(TypedRequestError::Server { source, .. })
+                                if source.code == -32600
+                                    && source.message == format!("thread {thread_id} already has an active writer")
                         ) =>
                     {
                         return Err(error);

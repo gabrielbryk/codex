@@ -17,6 +17,20 @@ The Fork Fleet plan contains the complete file lists and source-commit mapping.
 
 ## Retained-leaf blast radius
 
+### Post-upgrade correction: reconnect writer handoff
+
+- Owner: `tui/src/app/reconnect.rs` and active reconnect tests.
+- A replacement daemon may be ready before the old writer releases a thread.
+  Retry that specific `thread/resume` conflict throughout the existing 120-second
+  recovery budget instead of marking the conversation unavailable. Continue the
+  capped backoff beyond five attempts; terminal failure remains offline and
+  retains the existing explicit retry UI.
+- Proof: repeated writer conflicts followed by successful attachment in both
+  conversation and overview modes, retained draft, no turn submission replay,
+  deadline exhaustion, and existing unavailable-thread/hydration coverage.
+- Impact: TUI only, no wire or authorization changes, no automatic user-input replay.
+- Retire when upstream covers delayed writer release with equivalent bounded recovery.
+
 ### `runtime-alternate-home-isolation` — rework
 
 - Owner: `codex-rs/config/src/loader/mod.rs`; alternate-home load decision only.

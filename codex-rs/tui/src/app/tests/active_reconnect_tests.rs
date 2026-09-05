@@ -324,7 +324,7 @@ async fn reconnect_exhaustion_and_unknown_initial_thread_stay_offline() -> Resul
             .is_err()
         );
     }
-    assert!((15..=65).contains(&start.elapsed().as_secs()));
+    assert_eq!(start.elapsed(), Duration::from_secs(/*secs*/ 120));
     app.begin_reconnect();
     app.chat_widget.reconnect_failed();
     assert_snapshot!(
@@ -332,6 +332,86 @@ async fn reconnect_exhaustion_and_unknown_initial_thread_stay_offline() -> Resul
         render_bottom_popup(&app.chat_widget, /*width*/ 80)
     );
     tokio::time::resume();
+    Ok(())
+}
+
+#[tokio::test]
+async fn reconnect_waits_for_writer_release_without_resubmitting_input() -> Result<()> {
+    for presentation in [
+        ReconnectPresentation::Conversation,
+        ReconnectPresentation::Overview,
+    ] {
+        let (mut app, mut events, _) = make_test_app_with_channels().await;
+        app.config.model = Some("gpt-test".into());
+        let id = ThreadId::new();
+        app.active_thread_id = Some(id);
+        app.primary_thread_id = Some(id);
+        let cached = test_thread_session(id, app.config.cwd.to_path_buf());
+        app.ensure_thread_channel(id)
+            .store
+            .lock()
+            .await
+            .set_session(cached.clone(), Vec::new());
+        app.chat_widget.handle_thread_session(cached);
+        app.chat_widget
+            .restore_user_message_to_composer("kept draft".into());
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let endpoint = crate::resolve_remote_addr(&format!("ws://{}", listener.local_addr()?))?;
+        app.app_server_target = AppServerTarget::Remote { endpoint };
+        let cwd = app.config.cwd.clone();
+        let thread = json!({
+            "id": id, "sessionId": id, "preview": "", "ephemeral": false,
+            "modelProvider": "test-provider", "createdAt": 1, "updatedAt": 2,
+            "status": {"type": "idle"}, "cwd": cwd, "cliVersion": "0.0.0", "source": "cli", "turns": []
+        });
+        let server = tokio::spawn(async move {
+            let mut methods = Vec::new();
+            // Six conflicts span 23 seconds, beyond both the old three-attempt window
+            // and the newer five-attempt backoff. The seventh attempt must reattach.
+            for attempt in 0..7 {
+                let (stream, _) = listener.accept().await?;
+                methods.extend(serve_reconnect_requests(tokio_tungstenite::accept_async(stream).await?, |request| std::future::ready(match request.method.as_str() {
+                    "thread/resume" if attempt < 6 => Some(json!({"error": {"code": -32600, "message": format!("thread {id} already has an active writer")}})),
+                    "thread/resume" => Some(json!({"result": {"thread": thread, "model": "gpt-test", "modelProvider": "test-provider", "cwd": cwd,
+                        "approvalPolicy": "never", "approvalsReviewer": "user", "sandbox": {"type": "dangerFullAccess"}, "reasoningEffort": null}})),
+                    "thread/read" => Some(json!({"result": {"thread": thread}})),
+                    method => panic!("unexpected recovery request: {method}"),
+                })).await?);
+            }
+            Ok::<_, color_eyre::Report>(methods)
+        });
+        app.begin_reconnect();
+        let connected = reconnect(
+            app.app_server_target.clone(),
+            app.config.clone(),
+            Some(id),
+            /*remote_cwd*/ None,
+            crate::dynamic_tools_mcp::ThreadToolTransport::Dynamic,
+            presentation,
+        )
+        .await?;
+        let mut session = crate::start_embedded_app_server_for_picker(&app.config).await?;
+        let mut tui = crate::tui::test_support::make_test_tui()?;
+        app.finish_reconnect(&mut tui, &mut session, &mut events, connected)
+            .await?;
+        assert!(!app.reconnect.offline);
+        assert!(!app.thread_unavailable(id));
+        assert_eq!(app.chat_widget.composer_text_with_pending(), "kept draft");
+        session.shutdown().await?;
+        let methods = server.await??;
+        assert_eq!(
+            methods
+                .iter()
+                .filter(|method| *method == "thread/resume")
+                .count(),
+            7
+        );
+        assert!(
+            !methods
+                .iter()
+                .any(|method| method == "turn/start" || method == "turn/steer")
+        );
+    }
     Ok(())
 }
 
