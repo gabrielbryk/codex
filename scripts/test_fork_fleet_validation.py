@@ -94,7 +94,7 @@ class UpgradeWorkflowAuditTests(unittest.TestCase):
                 with self.subTest(filename=filename, marker=marker):
                     self.assert_mutation_rejected(filename, marker, "mutated contract")
                     checked += 1
-        self.assertEqual(checked, 56)
+        self.assertEqual(checked, 57)
 
 
 class FormatBaselineTests(unittest.TestCase):
@@ -400,6 +400,26 @@ class DifferentialWorkspaceTests(unittest.TestCase):
                 self.assertIn(
                     expected_error, VALIDATION.parse_nextest_output(output)[3]
                 )
+
+    def test_parser_accepts_terminal_fail_and_leak_retry_status(self) -> None:
+        ordinary_failures = "\n".join(
+            f"        FAIL [ 0.100s] ({index}/63) crate test::failure_{index}"
+            for index in range(1, 63)
+        )
+        output = f"""\
+     Summary [ 1.000s] 63 tests run: 0 passed, 63 failed
+{ordinary_failures}
+ TRY 2 FL+LK [ 0.200s] (63/63) crate test::observed_fail_and_leak
+"""
+
+        failed_tests, declared_count, summary_count, parse_error = (
+            VALIDATION.parse_nextest_output(output)
+        )
+        self.assertEqual(declared_count, 63)
+        self.assertEqual(summary_count, 1)
+        self.assertEqual(len(failed_tests), 63)
+        self.assertIn("crate test::observed_fail_and_leak", failed_tests)
+        self.assertIsNone(parse_error)
 
     def test_accepts_candidate_failures_that_are_subset_of_target(self) -> None:
         runner = mock.Mock(

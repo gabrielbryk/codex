@@ -102,6 +102,7 @@ SECTION_CONTRACTS = (
             "quoted JSON credentials",
             "exactly one terminal summary",
             "expected nextest test-failure exit code",
+            "terminal failure statuses `FAIL` and `FL+LK`",
             "fresh clone and mutable",
             "target HEAD, index tree, and untracked state",
             "does not prove semantic equivalence",
@@ -127,7 +128,8 @@ FORMAT_FAILURE_PATTERN = re.compile(r"(?m)^Formatting failed: (?P<groups>.+)$")
 REWORK_TRAILER_PATTERN = re.compile(r"(?m)^Fork-Fleet-Rework: \S+\s*$")
 ANSI_ESCAPE_PATTERN = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 NEXTEST_FAILURE_PATTERN = re.compile(
-    r"^\s*(?:TRY\s+\d+\s+)?FAIL\s+\[[^]]+\]\s+\([^)]+\)\s+(?P<name>.+?)\s*$"
+    r"^\s*(?:TRY\s+\d+\s+)?(?:FAIL|FL\+LK)\s+\[[^]]+\]\s+\([^)]+\)\s+"
+    r"(?P<name>.+?)\s*$"
 )
 NEXTEST_SUMMARY_PATTERN = re.compile(
     r"^\s*Summary\s+\[[^]]+\]\s+\d+ tests? run:(?P<body>.+)$"
