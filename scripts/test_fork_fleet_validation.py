@@ -94,7 +94,7 @@ class UpgradeWorkflowAuditTests(unittest.TestCase):
                 with self.subTest(filename=filename, marker=marker):
                     self.assert_mutation_rejected(filename, marker, "mutated contract")
                     checked += 1
-        self.assertEqual(checked, 46)
+        self.assertEqual(checked, 56)
 
 
 class FormatBaselineTests(unittest.TestCase):
@@ -283,11 +283,12 @@ class DifferentialWorkspaceTests(unittest.TestCase):
         self.target.mkdir()
         self.command = VALIDATION.WorkspaceCommand(
             cwd=self.root / "codex-rs",
-            argv=("just", "test", "--workspace"),
+            argv=("just", "test", "--workspace", "--locked"),
         )
         self.snapshot = ("candidate-head", "candidate-tree", "")
         self.target_snapshot = ("a" * 40, "target-tree", "")
         self.target_factory_calls: list[str] = []
+        self.target_preparer = mock.Mock(return_value=self.target_snapshot)
 
     @contextmanager
     def target_factory(self, target_sha: str):
@@ -335,6 +336,9 @@ class DifferentialWorkspaceTests(unittest.TestCase):
                 side_effect=target_snapshots,
                 return_value=self.target_snapshot,
             ),
+            mock.patch.object(
+                VALIDATION, "bounded_target_delta", return_value="bounded delta"
+            ),
         ):
             return VALIDATION.run_differential_workspace_tests(
                 commands,
@@ -342,6 +346,7 @@ class DifferentialWorkspaceTests(unittest.TestCase):
                 "a" * 40,
                 runner=runner,
                 target_factory=target_factory or self.target_factory,
+                target_preparer=self.target_preparer,
             )
 
     def execute_gate(self, runner: mock.Mock) -> int:
@@ -412,12 +417,114 @@ class DifferentialWorkspaceTests(unittest.TestCase):
 
         self.assertEqual(self.target_factory_calls, ["a" * 40])
         self.assertEqual(runner.call_args_list[1].args[0].cwd, self.target / "codex-rs")
+        self.assertEqual(
+            runner.call_args_list[0].args[0].argv,
+            runner.call_args_list[1].args[0].argv,
+        )
         candidate_environment = runner.call_args_list[0].args[1]
         target_environment = runner.call_args_list[1].args[1]
         for variable in ("HOME", "TMPDIR", "CARGO_TARGET_DIR"):
             self.assertNotEqual(
                 candidate_environment[variable], target_environment[variable]
             )
+
+    def test_accepts_only_local_workspace_version_lock_restamps(self) -> None:
+        before_lock = """\
+version = 4
+
+[[package]]
+name = "local-package"
+version = "0.0.0"
+dependencies = ["dep"]
+"""
+        after_lock = before_lock.replace('version = "0.0.0"', 'version = "0.153.4"')
+        initial = ("a" * 40, "tree", "")
+        prepared = ("a" * 40, "tree", " M codex-rs/Cargo.lock\n")
+
+        self.assertEqual(
+            VALIDATION.validate_target_lock_normalization(
+                initial,
+                prepared,
+                before_lock,
+                after_lock,
+                "0.153.4",
+                frozenset({"local-package"}),
+            ),
+            1,
+        )
+
+    def test_rejects_unexpected_lock_or_file_normalization(self) -> None:
+        before_lock = """\
+version = 4
+
+[[package]]
+name = "local-package"
+version = "0.0.0"
+dependencies = ["dep"]
+"""
+        restamped = before_lock.replace('version = "0.0.0"', 'version = "0.153.4"')
+        initial = ("a" * 40, "tree", "")
+        cases = (
+            (
+                ("a" * 40, "tree", " M codex-rs/Cargo.lock\n"),
+                restamped.replace('dependencies = ["dep"]', 'dependencies = ["other"]'),
+                frozenset({"local-package"}),
+            ),
+            (
+                ("a" * 40, "tree", " M README.md\n"),
+                restamped,
+                frozenset({"local-package"}),
+            ),
+            (
+                ("a" * 40, "tree", " M codex-rs/Cargo.lock\n"),
+                restamped,
+                frozenset(),
+            ),
+        )
+        for prepared, after_lock, workspace_packages in cases:
+            with self.subTest(status=prepared[2]):
+                with self.assertRaises(RuntimeError):
+                    VALIDATION.validate_target_lock_normalization(
+                        initial,
+                        prepared,
+                        before_lock,
+                        after_lock,
+                        "0.153.4",
+                        workspace_packages,
+                    )
+
+    def test_rejects_non_version_textual_lock_changes(self) -> None:
+        before_lock = """\
+version = 4
+
+[[package]]
+name = "local-package"
+version = "0.0.0"
+dependencies = ["dep"]
+"""
+        restamped = before_lock.replace('version = "0.0.0"', 'version = "0.153.4"')
+        initial = ("a" * 40, "tree", "")
+        prepared = ("a" * 40, "tree", " M codex-rs/Cargo.lock\n")
+        cases = (
+            restamped + "# unexpected comment\n",
+            restamped.replace(
+                'name = "local-package"\nversion = "0.153.4"',
+                'version = "0.153.4"\nname = "local-package"',
+            ),
+            restamped.replace('dependencies = ["dep"]', 'dependencies  = ["dep"]'),
+        )
+
+        for after_lock in cases:
+            with self.subTest(after_lock=after_lock):
+                with self.assertRaisesRegex(RuntimeError, "exact expected textual"):
+                    VALIDATION.validate_target_lock_normalization(
+                        initial,
+                        prepared,
+                        before_lock,
+                        after_lock,
+                        "0.153.4",
+                        frozenset({"local-package"}),
+                    )
 
     def test_rejects_candidate_only_failure(self) -> None:
         runner = mock.Mock(
@@ -495,6 +602,60 @@ class DifferentialWorkspaceTests(unittest.TestCase):
 
         self.assertTrue(result.truncated)
         self.assertLessEqual(len(result.excerpt.encode()), 64)
+
+    def test_capped_capture_limits_combined_stdout_and_stderr(self) -> None:
+        with mock.patch.object(
+            VALIDATION, "validation_temp_parent", return_value=self.root
+        ):
+            result = VALIDATION.run_capped_process(
+                (
+                    sys.executable,
+                    "-c",
+                    "import sys; print('x' * 4096); print('y' * 4096, file=sys.stderr)",
+                ),
+                self.root,
+                dict(os.environ),
+                timeout_seconds=30,
+                max_output_bytes=64,
+            )
+
+        self.assertTrue(result.truncated)
+        self.assertLessEqual(len((result.stdout + result.stderr).encode()), 64)
+
+    def test_capped_capture_terminates_on_timeout(self) -> None:
+        with mock.patch.object(
+            VALIDATION, "validation_temp_parent", return_value=self.root
+        ):
+            result = VALIDATION.run_capped_process(
+                (sys.executable, "-c", "import time; time.sleep(60)"),
+                self.root,
+                dict(os.environ),
+                timeout_seconds=0.01,
+            )
+
+        self.assertTrue(result.timed_out)
+
+    def test_production_workspace_commands_are_locked(self) -> None:
+        with (
+            mock.patch.object(VALIDATION, "REPO_ROOT", self.root),
+            mock.patch.object(VALIDATION, "CODEX_RS", self.root / "codex-rs"),
+        ):
+            commands = VALIDATION.workspace_test_commands(Path("/toolchain/just"))
+
+        self.assertEqual(len(commands), 2)
+        self.assertTrue(all("--locked" in command.argv for command in commands))
+        failure = self.result(100, "crate test::shared_failure")
+        runner = mock.Mock(side_effect=[failure, failure, failure, failure])
+
+        self.assertEqual(self.execute_commands(commands, runner), 0)
+        for candidate_call, target_call in (
+            (runner.call_args_list[0], runner.call_args_list[1]),
+            (runner.call_args_list[2], runner.call_args_list[3]),
+        ):
+            self.assertEqual(
+                candidate_call.args[0].argv,
+                target_call.args[0].argv,
+            )
 
     def test_rejects_target_timeout(self) -> None:
         target_timeout = VALIDATION.CommandResult(
@@ -581,7 +742,7 @@ class DifferentialWorkspaceTests(unittest.TestCase):
         result = self.execute_commands(
             (self.command,),
             runner,
-            target_snapshots=[self.target_snapshot, changed_target],
+            target_snapshots=[changed_target],
         )
 
         self.assertEqual(result, 1)
@@ -614,6 +775,7 @@ class DifferentialWorkspaceTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertEqual(self.target_factory_calls, ["a" * 40, "a" * 40])
+        self.assertEqual(self.target_preparer.call_count, 2)
 
 
 if __name__ == "__main__":

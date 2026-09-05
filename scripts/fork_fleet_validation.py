@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run registered Fork Fleet validation with a bounded local toolchain environment."""
 
+import json
 import os
 import platform
 import re
@@ -104,6 +105,16 @@ SECTION_CONTRACTS = (
             "fresh clone and mutable",
             "target HEAD, index tree, and untracked state",
             "does not prove semantic equivalence",
+            "offline Cargo lock normalization",
+            "source-less workspace packages",
+            "`workspace.package` version",
+            "byte-for-byte",
+            "comments, whitespace, or key order",
+            "dependency, source, checksum",
+            "`--locked`",
+            "prepared target snapshot",
+            "Git diagnostics are streamed to disk",
+            "redacted bounded delta",
             "candidate-only failed test names",
             "exact-target failures",
             "disposable independent local clone",
@@ -123,6 +134,9 @@ NEXTEST_SUMMARY_PATTERN = re.compile(
 )
 NEXTEST_FAILED_COUNT_PATTERN = re.compile(r"(?:^|, )(?P<count>\d+) failed(?:,|$)")
 UNKNOWN_FAILURE_STATUS_PATTERN = re.compile(r"^\s*(?:TRY\s+\d+\s+)?\S*FAIL\S*\b")
+LOCK_PACKAGE_BLOCK_PATTERN = re.compile(
+    r"(?ms)^\[\[package\]\]\n.*?(?=^\[\[package\]\]\n|\Z)"
+)
 SENSITIVE_ASSIGNMENT_PATTERN = re.compile(
     r"(?i)\b(token|secret|password|api[_-]?key|authorization|cookie)"
     r"(\s*[:=]\s*)([^\s,;]+)"
@@ -163,8 +177,19 @@ class WorkspaceCommand:
     argv: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class CapturedProcess:
+    returncode: int
+    stdout: str
+    stderr: str
+    timed_out: bool = False
+    truncated: bool = False
+
+
 CommandRunner = Callable[[WorkspaceCommand, dict[str, str]], CommandResult]
 TargetFactory = Callable[[str], ContextManager[Path]]
+RepositorySnapshot = tuple[str, str, str]
+TargetPreparer = Callable[[Path, dict[str, str], str], RepositorySnapshot]
 
 
 def validation_temp_parent() -> Path:
@@ -423,6 +448,93 @@ def terminate_process_group(process: subprocess.Popen[bytes]) -> None:
         process.wait()
 
 
+def run_capped_process(
+    argv: tuple[str, ...],
+    cwd: Path,
+    environment: dict[str, str],
+    *,
+    timeout_seconds: float,
+    max_output_bytes: int | None = None,
+    merge_stderr: bool = False,
+) -> CapturedProcess:
+    if max_output_bytes is None:
+        max_output_bytes = MAX_COMMAND_OUTPUT_BYTES
+    with tempfile.TemporaryDirectory(
+        prefix="ffv-capture-", dir=validation_temp_parent()
+    ) as temporary_root:
+        output_paths = [Path(temporary_root) / "stdout.log"]
+        if not merge_stderr:
+            output_paths.append(Path(temporary_root) / "stderr.log")
+        output_files = [path.open("wb") for path in output_paths]
+        process = subprocess.Popen(
+            argv,
+            cwd=cwd,
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT if merge_stderr else subprocess.PIPE,
+            start_new_session=True,
+        )
+        selector = selectors.DefaultSelector()
+        assert process.stdout is not None
+        selector.register(process.stdout, selectors.EVENT_READ, output_files[0])
+        if not merge_stderr:
+            assert process.stderr is not None
+            selector.register(process.stderr, selectors.EVENT_READ, output_files[1])
+        deadline = time.monotonic() + timeout_seconds
+        timed_out = False
+        truncated = False
+        written = 0
+        try:
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    terminate_process_group(process)
+                    break
+                for key, _mask in selector.select(timeout=min(remaining, 0.25)):
+                    chunk = os.read(key.fd, 64 * 1_024)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    available = max_output_bytes - written
+                    key.data.write(chunk[:available])
+                    written += min(len(chunk), available)
+                    if len(chunk) > available:
+                        truncated = True
+                        terminate_process_group(process)
+                        break
+                if truncated:
+                    break
+        finally:
+            selector.close()
+            process.stdout.close()
+            if process.stderr is not None:
+                process.stderr.close()
+            if process.poll() is None:
+                if timed_out or truncated:
+                    terminate_process_group(process)
+                else:
+                    remaining = max(0.0, deadline - time.monotonic())
+                    try:
+                        process.wait(timeout=remaining)
+                    except subprocess.TimeoutExpired:
+                        timed_out = True
+                        terminate_process_group(process)
+            for output_file in output_files:
+                output_file.close()
+
+        outputs = [
+            path.read_text(encoding="utf-8", errors="replace") for path in output_paths
+        ]
+        return CapturedProcess(
+            returncode=process.returncode,
+            stdout=outputs[0],
+            stderr="" if merge_stderr else outputs[1],
+            timed_out=timed_out,
+            truncated=truncated,
+        )
+
+
 def redact_output(output: str, environment: dict[str, str]) -> str:
     redacted = output
     for name, value in environment.items():
@@ -443,86 +555,38 @@ def run_bounded_command(
     command: WorkspaceCommand,
     environment: dict[str, str],
 ) -> CommandResult:
+    captured = run_capped_process(
+        command.argv,
+        command.cwd,
+        environment,
+        timeout_seconds=COMMAND_TIMEOUT_SECONDS,
+        merge_stderr=True,
+    )
+    (
+        failed_tests,
+        declared_failed_count,
+        summary_count,
+        parse_error,
+    ) = parse_nextest_lines(captured.stdout.splitlines())
     with tempfile.TemporaryDirectory(
-        prefix="ffv-command-", dir=validation_temp_parent()
+        prefix="ffv-excerpt-", dir=validation_temp_parent()
     ) as temporary_root:
         output_path = Path(temporary_root) / "output.log"
-        with output_path.open("wb") as output:
-            process = subprocess.Popen(
-                command.argv,
-                cwd=command.cwd,
-                env=environment,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
-            assert process.stdout is not None
-            selector = selectors.DefaultSelector()
-            selector.register(process.stdout, selectors.EVENT_READ)
-            deadline = time.monotonic() + COMMAND_TIMEOUT_SECONDS
-            timed_out = False
-            truncated = False
-            written = 0
-            try:
-                while selector.get_map():
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        timed_out = True
-                        terminate_process_group(process)
-                        break
-                    events = selector.select(timeout=min(remaining, 0.25))
-                    for key, _mask in events:
-                        chunk = os.read(key.fd, 64 * 1_024)
-                        if not chunk:
-                            selector.unregister(key.fileobj)
-                            continue
-                        available = MAX_COMMAND_OUTPUT_BYTES - written
-                        if len(chunk) > available:
-                            output.write(chunk[:available])
-                            written += available
-                            truncated = True
-                            terminate_process_group(process)
-                            selector.unregister(key.fileobj)
-                            break
-                        output.write(chunk)
-                        written += len(chunk)
-                    if truncated:
-                        break
-            finally:
-                selector.close()
-                process.stdout.close()
-                if process.poll() is None:
-                    if timed_out or truncated:
-                        terminate_process_group(process)
-                    else:
-                        remaining = max(0.0, deadline - time.monotonic())
-                        try:
-                            process.wait(timeout=remaining)
-                        except subprocess.TimeoutExpired:
-                            timed_out = True
-                            terminate_process_group(process)
-
-        with output_path.open(encoding="utf-8", errors="replace") as output:
-            (
-                failed_tests,
-                declared_failed_count,
-                summary_count,
-                parse_error,
-            ) = parse_nextest_lines(output)
+        output_path.write_text(captured.stdout, encoding="utf-8")
         excerpt, _ = bounded_excerpt(output_path)
-        return CommandResult(
-            returncode=process.returncode,
-            failed_tests=failed_tests,
-            declared_failed_count=declared_failed_count,
-            summary_count=summary_count,
-            excerpt=redact_output(excerpt, environment),
-            parse_error=parse_error,
-            timed_out=timed_out,
-            truncated=truncated,
-        )
+    return CommandResult(
+        returncode=captured.returncode,
+        failed_tests=failed_tests,
+        declared_failed_count=declared_failed_count,
+        summary_count=summary_count,
+        excerpt=redact_output(excerpt, environment),
+        parse_error=parse_error,
+        timed_out=captured.timed_out,
+        truncated=captured.truncated,
+    )
 
 
-def repository_snapshot(root: Path) -> tuple[str, str, str]:
+def repository_snapshot(root: Path) -> RepositorySnapshot:
     head = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=root, text=True
     ).strip()
@@ -535,8 +599,180 @@ def repository_snapshot(root: Path) -> tuple[str, str, str]:
     return head, index_tree, status
 
 
-def candidate_snapshot() -> tuple[str, str, str]:
+def candidate_snapshot() -> RepositorySnapshot:
     return repository_snapshot(REPO_ROOT)
+
+
+def validate_target_lock_normalization(
+    initial: RepositorySnapshot,
+    prepared: RepositorySnapshot,
+    before_lock: str,
+    after_lock: str,
+    workspace_version: str,
+    workspace_package_names: frozenset[str],
+) -> int:
+    if initial[2]:
+        raise RuntimeError("exact-target clone was dirty before lock normalization")
+    if prepared[:2] != initial[:2]:
+        raise RuntimeError("lock normalization changed exact-target HEAD or index")
+    if prepared[2] not in ("", " M codex-rs/Cargo.lock\n"):
+        raise RuntimeError(
+            "lock normalization changed files outside the expected Cargo.lock restamp"
+        )
+
+    before = tomllib.loads(before_lock)
+    after = tomllib.loads(after_lock)
+    if {key: value for key, value in before.items() if key != "package"} != {
+        key: value for key, value in after.items() if key != "package"
+    }:
+        raise RuntimeError("lock normalization changed non-package lock metadata")
+    before_packages = before.get("package", [])
+    after_packages = after.get("package", [])
+    if len(before_packages) != len(after_packages):
+        raise RuntimeError("lock normalization changed the package set")
+
+    textual_restamps = 0
+
+    def restamp_workspace_package(match: re.Match[str]) -> str:
+        nonlocal textual_restamps
+        block = match.group(0)
+        parsed = tomllib.loads(block)["package"][0]
+        if (
+            parsed.get("name") not in workspace_package_names
+            or "source" in parsed
+            or "checksum" in parsed
+        ):
+            return block
+        replacement, count = re.subn(
+            r'(?m)^version = "0\.0\.0"$',
+            f'version = "{workspace_version}"',
+            block,
+        )
+        textual_restamps += count
+        return replacement
+
+    expected_after_lock = LOCK_PACKAGE_BLOCK_PATTERN.sub(
+        restamp_workspace_package, before_lock
+    )
+    if after_lock != expected_after_lock:
+        raise RuntimeError(
+            "lock normalization was not the exact expected textual version restamp"
+        )
+
+    restamped = 0
+    for before_package, after_package in zip(before_packages, after_packages):
+        if before_package == after_package:
+            continue
+        changed_keys = {
+            key
+            for key in before_package.keys() | after_package.keys()
+            if before_package.get(key) != after_package.get(key)
+        }
+        local_package = all(
+            field not in before_package and field not in after_package
+            for field in ("source", "checksum")
+        )
+        expected_versions = (
+            before_package.get("version") == "0.0.0"
+            and after_package.get("version") == workspace_version
+        )
+        name = before_package.get("name", "<unknown>")
+        if (
+            changed_keys != {"version"}
+            or not local_package
+            or not expected_versions
+            or name not in workspace_package_names
+        ):
+            raise RuntimeError(f"unexpected lock normalization for package {name}")
+        restamped += 1
+    if restamped != textual_restamps:
+        raise RuntimeError("textual and structural lock restamp counts differ")
+    if prepared[2] and restamped == 0:
+        raise RuntimeError(
+            "Cargo.lock changed without an expected local package restamp"
+        )
+    return restamped
+
+
+def bounded_target_delta(root: Path, environment: dict[str, str]) -> str:
+    diagnostics = []
+    for command in (
+        ("git", "status", "--short", "-uall"),
+        ("git", "diff", "--stat"),
+    ):
+        captured = run_capped_process(
+            command,
+            root,
+            environment,
+            timeout_seconds=30,
+            max_output_bytes=4_096,
+            merge_stderr=True,
+        )
+        diagnostics.append(captured.stdout)
+        if captured.timed_out:
+            diagnostics.append("\n[diagnostic command timed out]\n")
+        if captured.truncated:
+            diagnostics.append("\n[diagnostic command exceeded output cap]\n")
+    return redact_output("".join(diagnostics)[-8_192:], environment)
+
+
+def prepare_target_clone(
+    target_root: Path,
+    environment: dict[str, str],
+    target_sha: str,
+) -> RepositorySnapshot:
+    initial = repository_snapshot(target_root)
+    if initial[0] != target_sha:
+        raise RuntimeError(
+            "exact-target clone HEAD does not match the bound target SHA"
+        )
+    lock_path = target_root / "codex-rs/Cargo.lock"
+    before_lock = lock_path.read_text(encoding="utf-8")
+    completed = run_capped_process(
+        ("cargo", "metadata", "--offline", "--format-version", "1", "--no-deps"),
+        target_root / "codex-rs",
+        environment,
+        timeout_seconds=300,
+    )
+    if completed.timed_out:
+        raise RuntimeError("offline Cargo lock normalization timed out")
+    if completed.truncated:
+        raise RuntimeError("offline Cargo metadata exceeded the hard output cap")
+    if completed.returncode:
+        excerpt = redact_output(completed.stderr[-4_096:], environment)
+        raise RuntimeError(f"offline Cargo lock normalization failed:\n{excerpt}")
+    prepared = repository_snapshot(target_root)
+    workspace_manifest = tomllib.loads(
+        (target_root / "codex-rs/Cargo.toml").read_text(encoding="utf-8")
+    )
+    workspace_version = workspace_manifest["workspace"]["package"]["version"]
+    try:
+        metadata = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("offline Cargo metadata was not valid JSON") from error
+    workspace_member_ids = frozenset(metadata["workspace_members"])
+    workspace_package_names = frozenset(
+        package["name"]
+        for package in metadata["packages"]
+        if package["id"] in workspace_member_ids and package.get("source") is None
+    )
+    try:
+        restamped = validate_target_lock_normalization(
+            initial,
+            prepared,
+            before_lock,
+            lock_path.read_text(encoding="utf-8"),
+            workspace_version,
+            workspace_package_names,
+        )
+    except RuntimeError as error:
+        delta = bounded_target_delta(target_root, environment)
+        raise RuntimeError(f"{error}; bounded Cargo.lock delta:\n{delta}") from error
+    print(
+        "exact-target lock normalization prepared "
+        f"{restamped} local workspace package restamps at {workspace_version}"
+    )
+    return prepared
 
 
 @contextmanager
@@ -662,6 +898,7 @@ def run_differential_workspace_tests(
     *,
     runner: CommandRunner = run_bounded_command,
     target_factory: TargetFactory = materialize_target_clone,
+    target_preparer: TargetPreparer = prepare_target_clone,
 ) -> int:
     before = candidate_snapshot()
     if before[2]:
@@ -699,28 +936,26 @@ def run_differential_workspace_tests(
                 continue
             try:
                 with target_factory(target_sha) as target_root:
-                    target_before = repository_snapshot(target_root)
-                    if target_before[0] != target_sha:
-                        raise RuntimeError(
-                            "exact-target clone HEAD does not match the bound target SHA"
-                        )
-                    if target_before[2]:
-                        raise RuntimeError(
-                            "exact-target clone was dirty before testing"
-                        )
-                    target_command = WorkspaceCommand(
-                        cwd=target_root / relative_cwd,
-                        argv=command.argv,
-                    )
                     with isolated_command_environment(
                         environment, "target"
                     ) as target_environment:
-                        target_result = runner(target_command, target_environment)
-                    target_after = repository_snapshot(target_root)
-                    if target_after != target_before:
-                        raise RuntimeError(
-                            "exact-target HEAD, index, or worktree changed during testing"
+                        target_before = target_preparer(
+                            target_root, target_environment, target_sha
                         )
+                        target_command = WorkspaceCommand(
+                            cwd=target_root / relative_cwd,
+                            argv=command.argv,
+                        )
+                        target_result = runner(target_command, target_environment)
+                        target_after = repository_snapshot(target_root)
+                        if target_after != target_before:
+                            delta = bounded_target_delta(
+                                target_root, target_environment
+                            )
+                            raise RuntimeError(
+                                "exact-target HEAD, index, or worktree changed during "
+                                f"testing; bounded Cargo.lock delta:\n{delta}"
+                            )
             except (OSError, RuntimeError, subprocess.SubprocessError) as error:
                 print(
                     f"exact-target setup or execution failed: {error}", file=sys.stderr
@@ -787,6 +1022,34 @@ def rusty_v8_environment(real_home: Path) -> dict[str, str]:
         "RUSTY_V8_ARCHIVE": str(archive),
         "RUSTY_V8_SRC_BINDING_PATH": str(binding),
     }
+
+
+def workspace_test_commands(just: Path) -> tuple[WorkspaceCommand, ...]:
+    return (
+        WorkspaceCommand(
+            cwd=REPO_ROOT,
+            argv=(
+                str(just),
+                "test",
+                "--workspace",
+                "--exclude",
+                "codex-v8-poc",
+                "--locked",
+            ),
+        ),
+        WorkspaceCommand(
+            cwd=CODEX_RS,
+            argv=(
+                str(just),
+                "test",
+                "-p",
+                "codex-v8-poc",
+                "--features",
+                "sandbox",
+                "--locked",
+            ),
+        ),
+    )
 
 
 def main() -> None:
@@ -943,32 +1206,9 @@ def main() -> None:
                 candidate_target_sha(),
                 os.environ.get("FORK_FLEET_TARGET_SHA"),
             )
-            workspace_commands = (
-                WorkspaceCommand(
-                    cwd=REPO_ROOT,
-                    argv=(
-                        str(fork_fleet_just),
-                        "test",
-                        "--workspace",
-                        "--exclude",
-                        "codex-v8-poc",
-                    ),
-                ),
-                WorkspaceCommand(
-                    cwd=CODEX_RS,
-                    argv=(
-                        str(fork_fleet_just),
-                        "test",
-                        "-p",
-                        "codex-v8-poc",
-                        "--features",
-                        "sandbox",
-                    ),
-                ),
-            )
             raise SystemExit(
                 run_differential_workspace_tests(
-                    workspace_commands,
+                    workspace_test_commands(fork_fleet_just),
                     environment,
                     target_sha,
                 )
