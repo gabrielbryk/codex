@@ -3552,8 +3552,7 @@ async fn unified_exec_runs_under_sandbox() -> Result<()> {
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn scoped_command_wraps_the_prepared_sandbox_command_and_uses_session_home(
-) -> Result<()> {
+async fn scoped_command_wraps_the_prepared_sandbox_command_and_uses_session_home() -> Result<()> {
     skip_if_sandbox!(Ok(()));
 
     if std::env::var_os(SCOPED_COMMAND_TEST_SUBPROCESS_ENV).is_none() {
