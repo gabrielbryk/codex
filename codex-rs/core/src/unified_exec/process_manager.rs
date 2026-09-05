@@ -1184,6 +1184,7 @@ impl UnifiedExecProcessManager {
         environment_id: Option<&str>,
         exec_server_env_config: Option<ExecServerEnvConfig>,
         shell_snapshot: Option<codex_exec_server::ShellSnapshotRequest>,
+        outer_argv_prefix: Vec<String>,
         windows_sandbox_proxy_settings_mode: codex_sandboxing::WindowsSandboxProxySettingsMode,
         tty: bool,
         spawn_lifecycle: SpawnLifecycleHandle,
@@ -1204,7 +1205,15 @@ impl UnifiedExecProcessManager {
         }
         request.exec_server_network_proxy = network_proxy_launch;
         request.exec_server_env_config = exec_server_env_config;
-        request.exec_server_shell_snapshot = shell_snapshot;
+        request.exec_server_shell_snapshot = shell_snapshot.map(|mut snapshot| {
+            if !outer_argv_prefix.is_empty() {
+                snapshot.outer_argv_prefix = Some(outer_argv_prefix.clone());
+            }
+            snapshot
+        });
+        if request.exec_server_shell_snapshot.is_none() {
+            super::prepend_outer_argv_prefix(&mut request.command, &outer_argv_prefix);
+        }
         self.open_session_with_prepared_exec_env(
             process_id,
             &request,
@@ -1407,6 +1416,7 @@ impl UnifiedExecProcessManager {
             .await;
         let req = UnifiedExecToolRequest {
             command: request.command.clone(),
+            execution_prefix: request.execution_prefix.clone(),
             shell_type: request.shell_type,
             hook_command: request.hook_command.clone(),
             process_id: request.process_id,

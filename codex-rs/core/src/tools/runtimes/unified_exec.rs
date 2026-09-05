@@ -65,6 +65,7 @@ const REMOTE_NETWORK_POLICY_DECISION_MARGIN: Duration = Duration::from_secs(10);
 #[derive(Clone, Debug)]
 pub struct UnifiedExecRequest {
     pub command: Vec<String>,
+    pub execution_prefix: Vec<String>,
     pub shell_type: ShellType,
     pub hook_command: String,
     pub process_id: i32,
@@ -471,11 +472,16 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
                                 .to_string(),
                         ));
                     }
+                    let mut exec_request = prepared.exec_request;
+                    crate::unified_exec::prepend_outer_argv_prefix(
+                        &mut exec_request.command,
+                        &req.execution_prefix,
+                    );
                     let process = self
                         .manager
                         .open_session_with_prepared_exec_env(
                             req.process_id,
-                            &prepared.exec_request,
+                            &exec_request,
                             windows_sandbox_proxy_settings_mode,
                             /*network_policy_decider*/ None,
                             req.tty,
@@ -531,6 +537,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
                 /*environment_id*/ Some(&req.turn_environment.selection.environment_id),
                 req.exec_server_env_config.clone(),
                 req.shell_snapshot.clone(),
+                req.execution_prefix.clone(),
                 windows_sandbox_proxy_settings_mode,
                 req.tty,
                 Box::new(NoopSpawnLifecycle),
@@ -654,6 +661,7 @@ mod tests {
         let runtime = UnifiedExecRuntime::new(&manager, UnifiedExecShellMode::Direct);
         let request = UnifiedExecRequest {
             command: vec!["pwd".to_string()],
+            execution_prefix: Vec::new(),
             shell_type: ShellType::Sh,
             hook_command: "pwd".to_string(),
             process_id: 1000,
@@ -757,6 +765,7 @@ mod tests {
             .expect("current dir is absolute");
         UnifiedExecRequest {
             command: vec!["zsh".to_string(), "-c".to_string(), "echo hi".to_string()],
+            execution_prefix: Vec::new(),
             shell_type: ShellType::Zsh,
             hook_command: "echo hi".to_string(),
             process_id: 1000,

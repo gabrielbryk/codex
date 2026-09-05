@@ -308,6 +308,9 @@ pub struct ShellSnapshotRequest {
     pub scope_id: String,
     /// Executor-native shell used to capture and restore the snapshot.
     pub shell: ShellInfo,
+    /// Optional launcher argv applied after shell-state restoration rewrites the original argv.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outer_argv_prefix: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

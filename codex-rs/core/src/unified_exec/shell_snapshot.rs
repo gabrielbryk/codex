@@ -147,6 +147,7 @@ impl Session {
                             name: shell.name().to_string(),
                             path: shell.shell_path.to_string_lossy().into_owned(),
                         },
+                        outer_argv_prefix: None,
                     }),
                     env,
                     tty: false,
@@ -199,5 +200,6 @@ pub(super) fn shell_snapshot_request(
             name: request.shell_type.name().to_string(),
             path: request.command.first()?.clone(),
         },
+        outer_argv_prefix: None,
     })
 }

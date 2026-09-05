@@ -213,8 +213,15 @@ async fn shell_snapshot_v2_filters_profile_exports_and_stays_in_memory(
     } else {
         ("profile_helper; ", "helper")
     };
+    let test_outer_argv_prefix =
+        !use_remote && !tty && !use_sandbox && !automatic_startup && shell_name == "bash";
+    let scope_output = if test_outer_argv_prefix {
+        "; printf '|%s' \"$SCOPE_WRAPPER_THREAD\""
+    } else {
+        ""
+    };
     let command = format!(
-        "export PATH='{}':\"$PATH\"; {command_prefix}printf '|%s|%s|%s|%s|%s|%s' \"$PROFILE_ALLOWED\" \"${{PROFILE_SECRET-missing}}\" \"${{PROFILE_DENIED-missing}}\" \"$PATH\" \"${{__CODEX_SHELL_SNAPSHOT_STATE_0-missing}}\" \"${{__CODEX_SHELL_SNAPSHOT_STATE_1-missing}}\"",
+        "export PATH='{}':\"$PATH\"; {command_prefix}printf '|%s|%s|%s|%s|%s|%s' \"$PROFILE_ALLOWED\" \"${{PROFILE_SECRET-missing}}\" \"${{PROFILE_DENIED-missing}}\" \"$PATH\" \"${{__CODEX_SHELL_SNAPSHOT_STATE_0-missing}}\" \"${{__CODEX_SHELL_SNAPSHOT_STATE_1-missing}}\"{scope_output}",
         runtime_path_entry.display(),
     );
     let expected_stdout = format!(
@@ -224,6 +231,11 @@ async fn shell_snapshot_v2_filters_profile_exports_and_stays_in_memory(
     );
 
     for attempt in 0..2 {
+        let scope_marker = format!("thread-{attempt}");
+        let outer_argv_prefix = vec![
+            "/usr/bin/env".to_string(),
+            format!("SCOPE_WRAPPER_THREAD={scope_marker}"),
+        ];
         let started = context
             .backend
             .start(ExecParams {
@@ -237,6 +249,7 @@ async fn shell_snapshot_v2_filters_profile_exports_and_stays_in_memory(
                         name: shell_name.to_string(),
                         path: shell_path.to_string(),
                     },
+                    outer_argv_prefix: test_outer_argv_prefix.then(|| outer_argv_prefix.clone()),
                 }),
                 env: HashMap::new(),
                 tty,
@@ -257,7 +270,19 @@ async fn shell_snapshot_v2_filters_profile_exports_and_stays_in_memory(
             collect_process_output_from_events(started.process).await?;
         assert_eq!(
             (stdout, stderr, status, closed),
-            (expected_stdout.clone(), String::new(), Some(0), true,)
+            (
+                format!(
+                    "{expected_stdout}{}",
+                    if test_outer_argv_prefix {
+                        format!("|{scope_marker}")
+                    } else {
+                        String::new()
+                    }
+                ),
+                String::new(),
+                Some(0),
+                true,
+            )
         );
     }
 
@@ -307,7 +332,7 @@ async fn shell_snapshot_v2_remote_managed_proxy_uses_prepared_execution_context(
                 argv: vec![
                     "/bin/bash".to_string(),
                     "-lc".to_string(),
-                    "profile_helper; printf '|%s|%s|%s' \"$PROFILE_ALLOWED\" \"$CODEX_NETWORK_PROXY_ACTIVE\" \"$HTTP_PROXY\"".to_string(),
+                    "profile_helper; printf '|%s|%s|%s|%s' \"$PROFILE_ALLOWED\" \"$CODEX_NETWORK_PROXY_ACTIVE\" \"$HTTP_PROXY\" \"$OUTER_LAUNCH\"".to_string(),
                 ],
                 cwd: cwd.clone(),
                 env_policy: Some(policy.clone()),
@@ -317,6 +342,10 @@ async fn shell_snapshot_v2_remote_managed_proxy_uses_prepared_execution_context(
                         name: "bash".to_string(),
                         path: "/bin/bash".to_string(),
                     },
+                    outer_argv_prefix: Some(vec![
+                        "/usr/bin/env".to_string(),
+                        format!("OUTER_LAUNCH={attempt}"),
+                    ]),
                 }),
                 env: HashMap::new(),
                 tty: false,
@@ -335,10 +364,12 @@ async fn shell_snapshot_v2_remote_managed_proxy_uses_prepared_execution_context(
             .await?;
         let (stdout, stderr, status, closed) =
             collect_process_output_from_events(started.process).await?;
-        let proxy_address = stdout
+        let (proxy_address, outer_launch) = stdout
             .strip_prefix("helper|profile|1|")
+            .and_then(|output| output.rsplit_once('|'))
             .context("snapshot should restore profile functions and live proxy state")?;
         assert!(proxy_address.starts_with("http://127.0.0.1:"));
+        assert_eq!(outer_launch, attempt.to_string());
         assert_eq!((stderr, status, closed), (String::new(), Some(0), true));
         proxy_addresses.push(proxy_address.to_string());
     }
@@ -411,6 +442,7 @@ async fn shell_snapshot_v2_capture_failure_falls_back_and_retries(
                 name: shell_name.to_string(),
                 path: shell_path.to_string(),
             },
+            outer_argv_prefix: None,
         }),
         env: HashMap::new(),
         tty,

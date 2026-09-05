@@ -247,6 +247,7 @@ fn exec_server_params_use_path_uri_and_env_policy_overlay_contract() {
             name: "bash".to_string(),
             path: "/bin/bash".to_string(),
         },
+        outer_argv_prefix: None,
     });
     let mut snapshot_env = params.env;
     snapshot_env.remove("PATH");
@@ -424,6 +425,10 @@ async fn failed_initial_end_for_unstored_process_uses_fallback_output() {
             "-lc".to_string(),
             "echo before".to_string(),
         ],
+        execution_prefix: vec![
+            "/internal/codex-command-scope-exec".to_string(),
+            "--".to_string(),
+        ],
         shell_type: crate::shell::ShellType::Sh,
         hook_command: "echo before".to_string(),
         process_id: 123,
@@ -482,6 +487,20 @@ async fn failed_initial_end_for_unstored_process_uses_fallback_output() {
     );
     assert_eq!(item.exit_code, Some(-1));
     assert_eq!(item.process_id.as_deref(), Some("123"));
+    assert_eq!(
+        item.command,
+        vec![
+            "sh".to_string(),
+            "-lc".to_string(),
+            "echo before".to_string(),
+        ]
+    );
+    assert_eq!(
+        item.parsed_cmd,
+        vec![codex_protocol::parse_command::ParsedCommand::Unknown {
+            cmd: "echo before".to_string(),
+        }]
+    );
     assert_eq!(
         item.aggregated_output.as_deref(),
         Some("PRE_DENIAL_MARKER\nNetwork access denied")

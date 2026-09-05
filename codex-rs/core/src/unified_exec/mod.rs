@@ -106,7 +106,10 @@ impl UnifiedExecContext {
 
 #[derive(Debug)]
 pub(crate) struct ExecCommandRequest {
+    /// The model-selected command used for approvals, attribution, and presentation.
     pub command: Vec<String>,
+    /// Host-local argv prepended only after shell and package-path transformations.
+    pub execution_prefix: Vec<String>,
     pub shell_type: ShellType,
     pub hook_command: String,
     pub process_id: i32,
@@ -123,6 +126,20 @@ pub(crate) struct ExecCommandRequest {
     pub additional_permissions_preapproved: bool,
     pub justification: Option<String>,
     pub prefix_rule: Option<Vec<String>>,
+}
+
+/// Prepends the trusted host launcher after policy-selected sandbox and network wrappers.
+///
+/// The launcher is intentionally outside those wrappers: it attributes the whole workload, then
+/// `exec`s the already-prepared command. The model-selected argv remains authoritative for policy,
+/// approval, network attribution, caching, and user-visible events.
+pub(crate) fn prepend_outer_argv_prefix(command: &mut Vec<String>, prefix: &[String]) {
+    if prefix.is_empty() {
+        return;
+    }
+    let prepared = std::mem::take(command);
+    command.extend_from_slice(prefix);
+    command.extend(prepared);
 }
 
 #[derive(Debug)]

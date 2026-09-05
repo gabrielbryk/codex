@@ -51,6 +51,8 @@ use super::ExecCommandArgs;
 use super::ExecCommandEnvironmentArgs;
 use super::get_command;
 use super::post_unified_exec_tool_use_payload;
+use super::scoped_command::CommandScopeIdentity;
+use super::scoped_command::local_command_scope_prefix;
 use super::shell_mode_for_environment;
 
 // A byte limit is a conservative hard token bound even for byte-fallback tokenizers.
@@ -280,6 +282,17 @@ impl ExecCommandHandler {
         .map_err(FunctionCallError::RespondToModel)?;
         let command = resolved_command.command;
         let shell_type = resolved_command.shell_type;
+        let execution_prefix = if environment.is_remote() {
+            Vec::new()
+        } else {
+            let codex_home = session.codex_home().await;
+            local_command_scope_prefix(CommandScopeIdentity {
+                thread_id: session.thread_id.to_string(),
+                turn_id: turn.sub_id.clone(),
+                call_id: context.call_id.clone(),
+                profile: codex_home.as_path().to_string_lossy().into_owned(),
+            })
+        };
         let ExecCommandArgs {
             mut tty,
             yield_time_ms,
@@ -404,6 +417,7 @@ impl ExecCommandHandler {
         emit_unified_exec_tty_metric(&turn.session_telemetry, tty);
         let request = ExecCommandRequest {
             command,
+            execution_prefix,
             shell_type,
             hook_command: hook_command.clone(),
             process_id,

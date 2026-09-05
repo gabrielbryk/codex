@@ -9,7 +9,11 @@ use codex_protocol::protocol::SandboxPolicy;
 use core_test_support::test_codex::local_selections;
 use std::collections::HashMap;
 use std::ffi::OsStr;
+#[cfg(unix)]
+use std::ffi::OsString;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::sync::OnceLock;
 
 use anyhow::Context;
@@ -65,9 +69,37 @@ use pretty_assertions::assert_eq;
 use regex_lite::Regex;
 use serde_json::Value;
 use serde_json::json;
+#[cfg(unix)]
+use serial_test::serial;
 use tokio::time::Duration;
 
 const UNIFIED_EXEC_LAGGED_OUTPUT_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[cfg(unix)]
+struct ScopedCommandEnvGuard {
+    original: Option<OsString>,
+}
+
+#[cfg(unix)]
+impl ScopedCommandEnvGuard {
+    fn set(wrapper: &OsStr) -> Self {
+        let original = std::env::var_os("CODEX_COMMAND_SCOPE_EXEC");
+        unsafe { std::env::set_var("CODEX_COMMAND_SCOPE_EXEC", wrapper) };
+        Self { original }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ScopedCommandEnvGuard {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.original {
+                Some(value) => std::env::set_var("CODEX_COMMAND_SCOPE_EXEC", value),
+                None => std::env::remove_var("CODEX_COMMAND_SCOPE_EXEC"),
+            }
+        }
+    }
+}
 
 fn extract_output_text(item: &Value) -> Option<&str> {
     item.get("output").and_then(|value| match value {
@@ -3530,6 +3562,154 @@ async fn unified_exec_runs_under_sandbox() -> Result<()> {
 
     assert_regex_match("hello[\r\n]+", &output.output);
 
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test_case::test_case(false; "without_shell_snapshot_v2")]
+#[test_case::test_case(true; "with_shell_snapshot_v2")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(scoped_command_env)]
+async fn scoped_command_wraps_the_prepared_sandbox_command_and_uses_session_home(
+    shell_snapshot_v2: bool,
+) -> Result<()> {
+    skip_if_sandbox!(Ok(()));
+
+    let server = start_mock_server().await;
+    let mut builder = test_codex()
+        .with_model("gpt-5.4")
+        .with_config(move |config| {
+            if shell_snapshot_v2 {
+                config
+                    .features
+                    .enable(Feature::ShellSnapshotV2)
+                    .expect("enable shell snapshot v2");
+            } else {
+                config
+                    .features
+                    .disable(Feature::ShellSnapshotV2)
+                    .expect("disable shell snapshot v2");
+            }
+        });
+    let TestCodex {
+        codex,
+        session_configured,
+        config,
+        ..
+    } = builder.build_with_auto_env(&server).await?;
+    fs::create_dir_all(&config.cwd)?;
+    let wrapper = config.cwd.join("scope-wrapper");
+    fs::write(
+        &wrapper,
+        r#"#!/bin/sh
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --thread-id) scope_thread=$2; shift 2 ;;
+        --turn-id) scope_turn=$2; shift 2 ;;
+        --call-id) scope_call=$2; shift 2 ;;
+        --profile) scope_profile=$2; shift 2 ;;
+        --) shift; break ;;
+        *) exit 64 ;;
+    esac
+done
+export SCOPE_THREAD="$scope_thread"
+export SCOPE_TURN="$scope_turn"
+export SCOPE_CALL="$scope_call"
+export SCOPE_PROFILE="$scope_profile"
+exec "$@"
+"#,
+    )?;
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700))?;
+    let _env = ScopedCommandEnvGuard::set(wrapper.as_os_str());
+    let call_id = if shell_snapshot_v2 {
+        "scoped-snapshot"
+    } else {
+        "scoped-direct"
+    };
+    let command =
+        "printf '%s|%s|%s|%s' \"$SCOPE_THREAD\" \"$SCOPE_TURN\" \"$SCOPE_CALL\" \"$SCOPE_PROFILE\"";
+    let args = json!({
+        "cmd": command,
+        "shell": "/bin/bash",
+        "yield_time_ms": 5_000,
+    });
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                ev_function_call(call_id, "exec_command", &serde_json::to_string(&args)?),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_assistant_message("msg-1", "done"),
+                ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+    let turn_cwd = config.cwd.clone();
+    let (sandbox_policy, permission_profile) =
+        turn_permission_fields(PermissionProfile::read_only(), turn_cwd.as_path());
+    codex
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(vec![UserInput::Text {
+                text: "run the scoped command".to_string(),
+                text_elements: Vec::new(),
+            }])
+            .with_thread_settings(ThreadSettingsOverrides {
+                environments: Some(local_selections(turn_cwd)),
+                approval_policy: Some(AskForApproval::Never),
+                sandbox_policy: Some(sandbox_policy),
+                permission_profile,
+                collaboration_mode: Some(CollaborationMode {
+                    mode: ModeKind::Default,
+                    settings: Settings {
+                        model: session_configured.model,
+                        reasoning_effort: None,
+                        developer_instructions: None,
+                    },
+                }),
+                ..Default::default()
+            }),
+        )
+        .await?;
+    let mut begin_command = None;
+    wait_for_event(&codex, |event| match event {
+        EventMsg::ExecCommandBegin(event) if event.call_id == call_id => {
+            begin_command = Some(event.command.clone());
+            false
+        }
+        EventMsg::TurnComplete(_) => true,
+        _ => false,
+    })
+    .await;
+
+    let requests = responses.requests();
+    let output = collect_tool_outputs(
+        &requests
+            .iter()
+            .map(core_test_support::responses::ResponsesRequest::body_json)
+            .collect::<Vec<_>>(),
+    )?
+    .remove(call_id)
+    .expect("scoped command output");
+    let fields = output.output.trim().split('|').collect::<Vec<_>>();
+    assert_eq!(fields.len(), 4);
+    assert!(!fields[0].is_empty(), "thread id should be attributed");
+    assert!(!fields[1].is_empty(), "turn id should be attributed");
+    assert_eq!(fields[2], call_id);
+    assert_eq!(fields[3], config.codex_home.as_path().to_string_lossy());
+    assert_eq!(output.exit_code, Some(0));
+    let begin_command = begin_command.expect("original command begin event");
+    assert_eq!(begin_command.last().map(String::as_str), Some(command));
+    let wrapper_display = wrapper.to_string_lossy();
+    assert!(
+        begin_command
+            .iter()
+            .all(|arg| arg.as_str() != wrapper_display.as_ref()),
+        "trusted launcher must stay out of policy and event argv"
+    );
     Ok(())
 }
 

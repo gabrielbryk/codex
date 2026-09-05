@@ -61,6 +61,7 @@ async fn snapshot_failure_retries_are_bounded_and_single_flight(
                 name: "bash".to_string(),
                 path: "/bin/bash".to_string(),
             },
+            outer_argv_prefix: None,
         }),
         tty: false,
         pipe_stdin: false,

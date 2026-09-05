@@ -23,7 +23,6 @@ use crate::local_process::shell_environment_policy;
 use crate::process_sandbox::PreparedExecRequest;
 use crate::protocol::ExecEnvPolicy;
 use crate::protocol::ExecParams;
-use crate::protocol::ShellSnapshotRequest;
 use crate::rpc::internal_error;
 use crate::rpc::invalid_params;
 use crate::telemetry::ExecServerTelemetry;
@@ -42,13 +41,19 @@ pub(crate) struct ShellSnapshotCache {
 }
 
 struct CachedShellSnapshot {
-    request: ShellSnapshotRequest,
-    cwd: PathUri,
-    env_policy: Option<ExecEnvPolicy>,
-    sandbox: Option<FileSystemSandboxContext>,
+    key: ShellSnapshotCacheKey,
     attempts: usize,
     // Failed captures store the earliest time another attempt may start.
     snapshot: Arc<OnceCell<Result<ShellSnapshot, Instant>>>,
+}
+
+#[derive(PartialEq, Eq)]
+struct ShellSnapshotCacheKey {
+    scope_id: String,
+    shell: crate::protocol::ShellInfo,
+    cwd: PathUri,
+    env_policy: Option<ExecEnvPolicy>,
+    sandbox: Option<FileSystemSandboxContext>,
 }
 
 struct ShellSnapshot {
@@ -64,6 +69,32 @@ pub(crate) enum CapturePurpose {
 
 impl ShellSnapshotCache {
     pub(crate) async fn prepare(
+        &self,
+        params: &ExecParams,
+        prepared: &mut PreparedExecRequest,
+        telemetry: &ExecServerTelemetry,
+        purpose: CapturePurpose,
+    ) -> Result<(), JSONRPCErrorError> {
+        let apply_outer_argv_prefix = matches!(&purpose, &CapturePurpose::Execution);
+        let result = self
+            .prepare_snapshot(params, prepared, telemetry, purpose)
+            .await;
+        if result.is_ok()
+            && apply_outer_argv_prefix
+            && let Some(prefix) = params
+                .shell_snapshot
+                .as_ref()
+                .and_then(|request| request.outer_argv_prefix.as_ref())
+            && !prefix.is_empty()
+        {
+            let command = std::mem::take(&mut prepared.command);
+            prepared.command = prefix.clone();
+            prepared.command.extend(command);
+        }
+        result
+    }
+
+    async fn prepare_snapshot(
         &self,
         params: &ExecParams,
         prepared: &mut PreparedExecRequest,
@@ -98,14 +129,18 @@ impl ShellSnapshotCache {
             }
         };
 
+        // Runtime launch attribution is deliberately absent from this key. Every execution applies
+        // its own outer prefix after cache reuse and snapshot transformation have completed.
+        let cache_key = ShellSnapshotCacheKey {
+            scope_id: request.scope_id.clone(),
+            shell: request.shell.clone(),
+            cwd: params.cwd.clone(),
+            env_policy: params.env_policy.clone(),
+            sandbox: params.sandbox.clone(),
+        };
         let snapshot = {
             let mut entries = self.entries.lock().await;
-            let position = entries.iter().position(|entry| {
-                &entry.request == request
-                    && entry.cwd == params.cwd
-                    && entry.env_policy == params.env_policy
-                    && entry.sandbox == params.sandbox
-            });
+            let position = entries.iter().position(|entry| entry.key == cache_key);
             let cached = position.and_then(|position| {
                 let mut entry = entries.remove(position)?;
                 // Share each failed attempt during backoff. After the retry
@@ -127,10 +162,7 @@ impl ShellSnapshotCache {
             } else {
                 let snapshot = Arc::new(OnceCell::new());
                 let entry = CachedShellSnapshot {
-                    request: request.clone(),
-                    cwd: params.cwd.clone(),
-                    env_policy: params.env_policy.clone(),
-                    sandbox: params.sandbox.clone(),
+                    key: cache_key,
                     attempts: 1,
                     snapshot: Arc::clone(&snapshot),
                 };
