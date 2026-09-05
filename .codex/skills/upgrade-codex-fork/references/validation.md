@@ -180,8 +180,10 @@ and sensitive values supplied through the environment.
 
 Require exactly one terminal summary, the expected nextest test-failure exit code for a failing
 run, and exact equality between the summary's declared failure count and the unique parsed terminal
-failure names. Reject multiple summaries, count mismatches, unknown terminal failure statuses, and
-format drift rather than guessing at membership.
+failure names. Recognize the explicit nextest terminal failure statuses `FAIL` and `FL+LK`; the
+latter is a failed retry that also leaked. Reject multiple summaries, count mismatches, unknown
+terminal failure statuses, and format drift rather than guessing at membership. A validator process
+timeout remains separate fail-closed evidence and never becomes a parsed test name.
 
 Candidate failures are accepted only when they are a subset of exact-target failures for that same
 command. Any candidate-only failed test names block release. A target setup error, timeout,
