@@ -42,7 +42,8 @@ $HOME/.codex/packages/standalone/current/codex app-server daemon bootstrap --rem
 
 `bootstrap` requires the standalone managed install. It records the daemon
 settings under `CODEX_HOME/app-server-daemon/`, starts app-server as a
-pidfile-backed detached process, and launches a detached updater loop.
+pidfile-backed detached process, and reports `autoUpdateEnabled: false` because
+binary updates are managed externally.
 
 ## Installation and update cases
 
@@ -52,8 +53,8 @@ the standalone managed binary under `CODEX_HOME`.
 | Situation | What starts | Does this daemon fetch new binaries? | Does a running app-server eventually move to a newer binary on its own? |
 | --- | --- | --- | --- |
 | `install.sh` has run, but only `start` is used | `start` uses `CODEX_HOME/packages/standalone/current/codex` | No | No. The managed path is used when starting or restarting, but no updater is installed. |
-| `install.sh` has run, then `bootstrap` is used | The pidfile backend uses `CODEX_HOME/packages/standalone/current/codex` | Yes. Bootstrap launches a detached updater loop that runs `install.sh` hourly. | Yes, while that updater process is alive and app-server is already running. After a successful fetch, the updater restarts app-server with the refreshed binary and only then replaces its own process image. |
-| Some other tool updates the managed binary path | The next fresh start or restart uses the updated file at that path | Only if `bootstrap` is active, because the updater still runs `install.sh` on its normal cadence. | Without `bootstrap`, no. With `bootstrap`, the next successful updater pass compares the managed binary contents after `install.sh` runs; if app-server is running and they differ from the updater's current image, it refreshes app-server first and then itself. |
+| `install.sh` has run, then `bootstrap` is used | The pidfile backend uses `CODEX_HOME/packages/standalone/current/codex` | No. Bootstrap does not launch the legacy updater loop. | No. An external manager must update the binary and explicitly restart or bootstrap the daemon. |
+| Some other tool updates the managed binary path | The next fresh start or restart uses the updated file at that path | No | No. A currently running app-server keeps its existing executable image until an explicit lifecycle operation replaces it. |
 
 ### Standalone installs
 
@@ -61,25 +62,23 @@ For installs created by `install.sh`:
 
 - lifecycle commands always use the standalone managed binary path
 - `bootstrap` is supported
-- `bootstrap` starts a detached pid-backed updater loop that fetches via
-  `install.sh`
-- after a successful refresh, if app-server is running and the managed binary
-  contents changed, the updater restarts app-server with that binary first and
-  only then replaces its own process image
-- the updater loop is not reboot-persistent; it must be started again by
-  rerunning `bootstrap` after a reboot
+- `bootstrap` does not fetch or install updates and reports
+  `autoUpdateEnabled: false`
+- an external manager owns binary updates and the lifecycle operation that
+  starts the refreshed binary
+- a legacy updater process left by an older release must be drained and stopped
+  before `bootstrap` or remote-control ensure can complete
 
 ### Out-of-band updates
 
 This daemon does not watch arbitrary executable files for replacement. If some
 other tool updates the managed binary path:
 
-- without `bootstrap`, a currently running app-server remains on the old
-  executable image until an explicit `restart`
-- with `bootstrap`, the detached updater loop notices the changed managed
-  binary on its next successful scheduled pass after running `install.sh`; if
-  app-server is running, it refreshes app-server first and then refreshes itself
-  once that replacement starts successfully
+- a currently running app-server remains on the old executable image until an
+  explicit `restart` or `bootstrap`
+- `bootstrap` replaces a daemon whose executable does not match the managed
+  binary and leaves a matching ready daemon running
+- neither operation starts an updater loop
 
 ## Lifecycle semantics
 
@@ -92,9 +91,10 @@ JSON-RPC initialize handshake on the Unix control socket.
 for future starts. If a managed app-server is already running, they restart it
 so the new setting takes effect immediately.
 
-Top-level `codex remote-control` bootstraps with `--remote-control` when the
-updater loop is not running. Otherwise it enables remote control and starts the
-daemon normally.
+Top-level `codex remote-control` ensures that the externally managed app-server
+daemon is ready with remote control enabled. If a legacy updater is still
+active, the ensure operation fails without stopping it; drain and stop that
+updater before completing the cutover.
 
 `stop` sends a graceful termination request first, then sends a second
 termination signal after the grace window if the process is still alive.
@@ -109,5 +109,6 @@ The daemon stores its local state under `CODEX_HOME/app-server-daemon/`:
 
 - `settings.json` for persisted launch settings
 - `app-server.pid` for the app-server process record
-- `app-server-updater.pid` for the pid-backed standalone updater loop
+- `app-server-updater.pid` for detecting a legacy pid-backed updater that must
+  be stopped before the externally managed updater cutover
 - `daemon.lock` for daemon-wide lifecycle serialization
