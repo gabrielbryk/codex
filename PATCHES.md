@@ -66,7 +66,8 @@ The Fork Fleet plan contains the complete file lists and source-commit mapping.
 - Owner: `codex-mcp` server/connection manager and
   `core/src/session/mcp_runtime.rs` reserved-key injection.
 - Proof: reserved spoof override, HTTP exclusion, stdio connection-reuse tests,
-  and a real core session observing its authoritative thread ID in the child.
+  a real core session observing its authoritative thread ID in the child, and
+  the repository argument-comment lint.
 - Impact/shared: configured connection identity and non-reserved environment remain
   unchanged; reserved workload keys are authoritative after reuse decisions. This
   adds the public cross-crate Rust method `EffectiveMcpServer::with_stdio_workload_attribution`.
