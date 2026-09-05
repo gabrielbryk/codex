@@ -69,6 +69,8 @@ pub(crate) const RATE_LIMIT_STALE_THRESHOLD_MINUTES: i64 = 15;
 pub(crate) struct RateLimitWindowDisplay {
     /// Percent used for the window.
     pub used_percent: f64,
+    /// Raw Unix epoch seconds retained for machine-readable status integrations.
+    pub resets_at_epoch_seconds: Option<i64>,
     /// Human-readable local reset time.
     pub resets_at: Option<String>,
     /// Window length in minutes when provided by the server.
@@ -85,6 +87,7 @@ impl RateLimitWindowDisplay {
 
         Self {
             used_percent: f64::from(window.used_percent),
+            resets_at_epoch_seconds: window.resets_at,
             resets_at,
             window_minutes: window.window_duration_mins,
         }

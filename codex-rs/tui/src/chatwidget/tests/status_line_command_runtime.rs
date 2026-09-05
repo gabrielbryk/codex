@@ -128,7 +128,6 @@ async fn command_input_uses_latest_context_usage_instead_of_session_total() {
             last_token_usage: TokenUsage {
                 input_tokens: 175_000,
                 cached_input_tokens: 120_000,
-                cache_write_input_tokens: 4_000,
                 output_tokens: 12_000,
                 total_tokens: 187_000,
                 ..TokenUsage::default()
