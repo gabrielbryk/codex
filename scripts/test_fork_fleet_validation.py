@@ -3,6 +3,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPT = Path(__file__).with_name("fork_fleet_validation.py")
@@ -94,6 +95,17 @@ class UpgradeWorkflowAuditTests(unittest.TestCase):
 
 
 class FormatBaselineTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary_directory.cleanup)
+        self.root = Path(self.temporary_directory.name)
+        (self.root / "PATCHES.md").write_text(
+            "# Fork patch manifest\n\n"
+            "- Target: `rust-v0.153.4` "
+            "(`3d2ee51ca2d5db578f328aa75e20aa22c0197c9a`)\n",
+            encoding="utf-8",
+        )
+
     def test_reads_exact_target_sha_from_manifest(self) -> None:
         sha = "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a"
         manifest = f"# Fork patch manifest\n\n- Target: `rust-v0.153.4` (`{sha}`)\n"
@@ -136,6 +148,128 @@ class FormatBaselineTests(unittest.TestCase):
             VALIDATION.formatter_failures(output),
             {"Just", "Rust", "Python scripts"},
         )
+
+    def test_derives_target_from_first_non_fleet_non_rework_commit(self) -> None:
+        fleet_commit = "1" * 40
+        rework_commit = "2" * 40
+        target_commit = "3" * 40
+        check_output = mock.Mock(
+            side_effect=[
+                f"{fleet_commit}\n{rework_commit}\n{target_commit}\n",
+                "fork-fleet@localhost\nprepare candidate\n",
+                "gabe@example.com\nfeature\n\n"
+                "Fork-Fleet-Rework: maintenance-target-bound-format-validation\n",
+                "upstream@example.com\nupstream target\n",
+            ]
+        )
+
+        with mock.patch.object(VALIDATION.subprocess, "check_output", check_output):
+            self.assertEqual(VALIDATION.candidate_target_sha(), target_commit)
+
+        self.assertEqual(check_output.call_count, 4)
+
+    def test_format_validation_diffs_justfile_against_exact_target(self) -> None:
+        target_sha = "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a"
+        completed = mock.Mock(returncode=7, stdout="Formatting failed: Rust\n")
+        justfile_diff = mock.Mock(returncode=1)
+
+        with (
+            mock.patch.object(VALIDATION, "REPO_ROOT", self.root),
+            mock.patch.object(
+                VALIDATION, "candidate_target_sha", return_value=target_sha
+            ),
+            mock.patch.object(
+                VALIDATION.subprocess,
+                "run",
+                side_effect=[completed, justfile_diff],
+            ) as run,
+        ):
+            self.assertEqual(
+                VALIDATION.run_format_validation(
+                    Path("/toolchain/just"), {"PATH": "/bin"}, target_sha
+                ),
+                7,
+            )
+
+        self.assertEqual(
+            run.call_args_list[1],
+            mock.call(
+                ["git", "diff", "--quiet", target_sha, "--", "justfile"],
+                cwd=self.root,
+                env={"PATH": "/bin"},
+                check=False,
+            ),
+        )
+
+    def test_format_validation_propagates_formatter_return_code(self) -> None:
+        target_sha = "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a"
+        completed = mock.Mock(
+            returncode=23, stdout="Formatting failed: Just, Rust\n"
+        )
+
+        with (
+            mock.patch.object(VALIDATION, "REPO_ROOT", self.root),
+            mock.patch.object(
+                VALIDATION, "candidate_target_sha", return_value=target_sha
+            ),
+            mock.patch.object(
+                VALIDATION.subprocess,
+                "run",
+                side_effect=[completed, mock.Mock(returncode=0)],
+            ),
+        ):
+            self.assertEqual(
+                VALIDATION.run_format_validation(
+                    Path("/toolchain/just"), {}, target_sha
+                ),
+                23,
+            )
+
+    def test_format_validation_accepts_only_just_on_exact_target_baseline(self) -> None:
+        target_sha = "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a"
+        completed = mock.Mock(returncode=1, stdout="Formatting failed: Just\n")
+
+        with (
+            mock.patch.object(VALIDATION, "REPO_ROOT", self.root),
+            mock.patch.object(
+                VALIDATION, "candidate_target_sha", return_value=target_sha
+            ),
+            mock.patch.object(
+                VALIDATION.subprocess,
+                "run",
+                side_effect=[completed, mock.Mock(returncode=0)],
+            ),
+        ):
+            self.assertEqual(
+                VALIDATION.run_format_validation(
+                    Path("/toolchain/just"), {}, target_sha
+                ),
+                0,
+            )
+
+    def test_format_validation_rejects_just_when_justfile_differs_from_target(
+        self,
+    ) -> None:
+        target_sha = "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a"
+        completed = mock.Mock(returncode=11, stdout="Formatting failed: Just\n")
+
+        with (
+            mock.patch.object(VALIDATION, "REPO_ROOT", self.root),
+            mock.patch.object(
+                VALIDATION, "candidate_target_sha", return_value=target_sha
+            ),
+            mock.patch.object(
+                VALIDATION.subprocess,
+                "run",
+                side_effect=[completed, mock.Mock(returncode=1)],
+            ),
+        ):
+            self.assertEqual(
+                VALIDATION.run_format_validation(
+                    Path("/toolchain/just"), {}, target_sha
+                ),
+                11,
+            )
 
 
 if __name__ == "__main__":
