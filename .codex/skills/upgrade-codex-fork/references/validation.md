@@ -156,13 +156,25 @@ to the managed checkout or mutates shared Git worktree metadata. Use a fresh clo
 state for each failed command; a setup failure blocks that comparison but does not prevent later
 candidate commands from running.
 
+Before freezing the target's pre-test snapshot, run offline Cargo lock normalization in that fresh
+clone. First prove HEAD, index, and worktree are pristine at the exact target. Then accept only local
+source-less workspace packages restamped from `0.0.0` to the target's `workspace.package` version.
+Compute that exact expected textual transformation from the original lock and require the result to
+match byte-for-byte; comments, whitespace, or key order changes are not normalization. Retain the
+structural package-set check and reject any dependency, source, checksum, package-set, metadata,
+index, or non-lockfile change. Record the prepared target snapshot and run both candidate and target
+workspace commands with `--locked` so the identical argv cannot rewrite either lock. Require the
+target's post-test snapshot to exactly equal its prepared target snapshot. Emit a redacted bounded
+delta on any normalization or snapshot violation; every such diagnostic is a redacted bounded delta.
+
 Both sides run with `INSTA_UPDATE=no`, but use private per-side `HOME`, `TMPDIR`,
 `CARGO_TARGET_DIR`, `CODEX_HOME`, and XDG cache paths so candidate artifacts cannot make the target
 pass or fail. The validator parses normalized nextest failure names from the complete command
 output while emitting only explicit summaries, complete failure membership, and bounded useful
-excerpts. Large command logs, Cargo outputs, and the target clone use disk-backed private validation
-storage rather than RAM-backed temporary filesystems. A hard output cap terminates the process
-group and fails closed, and every emitted excerpt is redacted. Redaction must cover Authorization
+excerpts. Large command logs, Cargo outputs, and Git diagnostics are streamed to disk before they
+are buffered, using disk-backed private validation storage rather than RAM-backed temporary
+filesystems. A shared hard output cap terminates the process group on overflow or timeout and fails
+closed, and every emitted excerpt is redacted. Redaction must cover Authorization
 and Cookie headers through the end of their line, quoted JSON credentials, sensitive assignments,
 and sensitive values supplied through the environment.
 
