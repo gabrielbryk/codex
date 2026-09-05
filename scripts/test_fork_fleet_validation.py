@@ -1,7 +1,10 @@
 import importlib.util
+import os
 import shutil
+import sys
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
@@ -91,7 +94,7 @@ class UpgradeWorkflowAuditTests(unittest.TestCase):
                 with self.subTest(filename=filename, marker=marker):
                     self.assert_mutation_rejected(filename, marker, "mutated contract")
                     checked += 1
-        self.assertEqual(checked, 29)
+        self.assertEqual(checked, 46)
 
 
 class FormatBaselineTests(unittest.TestCase):
@@ -268,6 +271,349 @@ class FormatBaselineTests(unittest.TestCase):
                 ),
                 11,
             )
+
+
+class DifferentialWorkspaceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary_directory.cleanup)
+        self.root = Path(self.temporary_directory.name) / "candidate"
+        self.root.mkdir()
+        self.target = Path(self.temporary_directory.name) / "target"
+        self.target.mkdir()
+        self.command = VALIDATION.WorkspaceCommand(
+            cwd=self.root / "codex-rs",
+            argv=("just", "test", "--workspace"),
+        )
+        self.snapshot = ("candidate-head", "candidate-tree", "")
+        self.target_snapshot = ("a" * 40, "target-tree", "")
+        self.target_factory_calls: list[str] = []
+
+    @contextmanager
+    def target_factory(self, target_sha: str):
+        self.target_factory_calls.append(target_sha)
+        yield self.target
+
+    @staticmethod
+    def result(
+        returncode: int,
+        *failed_tests: str,
+        parseable: bool = True,
+        truncated: bool = False,
+    ) -> object:
+        return VALIDATION.CommandResult(
+            returncode=returncode,
+            failed_tests=frozenset(failed_tests),
+            declared_failed_count=len(failed_tests) if parseable else None,
+            summary_count=1 if parseable else 0,
+            excerpt="bounded output",
+            parse_error=(
+                None if parseable else "expected one terminal nextest summary, found 0"
+            ),
+            truncated=truncated,
+        )
+
+    def execute_commands(
+        self,
+        commands: tuple[object, ...],
+        runner: mock.Mock,
+        *,
+        target_factory=None,
+        candidate_snapshots=None,
+        target_snapshots=None,
+    ) -> int:
+        with (
+            mock.patch.object(VALIDATION, "REPO_ROOT", self.root),
+            mock.patch.object(
+                VALIDATION,
+                "candidate_snapshot",
+                side_effect=candidate_snapshots or [self.snapshot, self.snapshot],
+            ),
+            mock.patch.object(
+                VALIDATION,
+                "repository_snapshot",
+                side_effect=target_snapshots,
+                return_value=self.target_snapshot,
+            ),
+        ):
+            return VALIDATION.run_differential_workspace_tests(
+                commands,
+                {"PATH": "/bin", "INSTA_UPDATE": "always"},
+                "a" * 40,
+                runner=runner,
+                target_factory=target_factory or self.target_factory,
+            )
+
+    def execute_gate(self, runner: mock.Mock) -> int:
+        return self.execute_commands((self.command,), runner)
+
+    def test_candidate_pass_skips_exact_target(self) -> None:
+        runner = mock.Mock(return_value=self.result(0))
+
+        self.assertEqual(self.execute_gate(runner), 0)
+
+        self.assertEqual(self.target_factory_calls, [])
+        self.assertEqual(runner.call_count, 1)
+        self.assertEqual(runner.call_args.args[1]["INSTA_UPDATE"], "no")
+        self.assertIn("CARGO_TARGET_DIR", runner.call_args.args[1])
+
+    def test_parser_uses_only_terminal_failures_after_summary(self) -> None:
+        output = """\
+  TRY 1 FAIL [ 0.100s] (1/2) crate test::eventual_flake
+────────────
+     Summary [ 1.000s] 2 tests run: 1 passed (1 flaky), 1 failed
+   FLAKY 2/2 [ 0.100s] (1/2) crate test::eventual_flake
+  TRY 2 FAIL [ 0.200s] (2/2) crate test::terminal_failure
+"""
+
+        self.assertEqual(
+            VALIDATION.parse_nextest_output(output),
+            (frozenset({"crate test::terminal_failure"}), 1, 1, None),
+        )
+
+    def test_parser_rejects_ambiguous_terminal_formats(self) -> None:
+        count_mismatch = """\
+     Summary [ 1.000s] 2 tests run: 0 passed, 2 failed
+  TRY 2 FAIL [ 0.200s] (2/2) crate test::only_parsed_failure
+"""
+        multiple_summaries = """\
+     Summary [ 1.000s] 1 test run: 1 passed
+     Summary [ 1.000s] 1 test run: 0 passed, 1 failed
+  TRY 2 FAIL [ 0.200s] (1/1) crate test::failure
+"""
+        unknown_status = """\
+     Summary [ 1.000s] 1 test run: 0 passed, 1 failed
+  XFAIL [ 0.200s] (1/1) crate test::failure
+"""
+        cases = (
+            (count_mismatch, "declared 2 failures"),
+            (multiple_summaries, "expected one terminal nextest summary"),
+            (unknown_status, "unknown terminal nextest failure status"),
+        )
+        for output, expected_error in cases:
+            with self.subTest(expected_error=expected_error):
+                self.assertIn(
+                    expected_error, VALIDATION.parse_nextest_output(output)[3]
+                )
+
+    def test_accepts_candidate_failures_that_are_subset_of_target(self) -> None:
+        runner = mock.Mock(
+            side_effect=[
+                self.result(100, "crate test::shared_failure"),
+                self.result(
+                    100,
+                    "crate test::shared_failure",
+                    "crate test::target_only_failure",
+                ),
+            ]
+        )
+
+        self.assertEqual(self.execute_gate(runner), 0)
+
+        self.assertEqual(self.target_factory_calls, ["a" * 40])
+        self.assertEqual(runner.call_args_list[1].args[0].cwd, self.target / "codex-rs")
+        candidate_environment = runner.call_args_list[0].args[1]
+        target_environment = runner.call_args_list[1].args[1]
+        for variable in ("HOME", "TMPDIR", "CARGO_TARGET_DIR"):
+            self.assertNotEqual(
+                candidate_environment[variable], target_environment[variable]
+            )
+
+    def test_rejects_candidate_only_failure(self) -> None:
+        runner = mock.Mock(
+            side_effect=[
+                self.result(100, "crate test::candidate_regression"),
+                self.result(100, "crate test::upstream_failure"),
+            ]
+        )
+
+        self.assertEqual(self.execute_gate(runner), 1)
+
+    def test_rejects_unparseable_nonzero_target(self) -> None:
+        runner = mock.Mock(
+            side_effect=[
+                self.result(100, "crate test::shared_failure"),
+                self.result(101, parseable=False),
+            ]
+        )
+
+        self.assertEqual(self.execute_gate(runner), 1)
+
+    def test_rejects_non_nextest_failure_exit_code(self) -> None:
+        runner = mock.Mock(return_value=self.result(101, "crate test::failure"))
+
+        self.assertEqual(self.execute_gate(runner), 1)
+
+    def test_redacts_sensitive_environment_and_assignments(self) -> None:
+        output = "API_KEY=visible token:also-visible ordinary=safe"
+
+        self.assertEqual(
+            VALIDATION.redact_output(output, {"API_KEY": "visible"}),
+            "API_KEY=<REDACTED> token:<REDACTED> ordinary=safe",
+        )
+
+    def test_redacts_bearer_authorization_header_through_end_of_line(self) -> None:
+        output = "Authorization: Bearer abc123 trailing-material\nordinary=safe"
+
+        self.assertEqual(
+            VALIDATION.redact_output(output, {}),
+            "Authorization: <REDACTED>\nordinary=safe",
+        )
+
+    def test_redacts_cookie_header_through_end_of_line(self) -> None:
+        output = "Cookie: session=abc123; csrf=def456\nordinary=safe"
+
+        self.assertEqual(
+            VALIDATION.redact_output(output, {}),
+            "Cookie: <REDACTED>\nordinary=safe",
+        )
+
+    def test_redacts_quoted_json_credentials(self) -> None:
+        output = (
+            '{"access_token":"generated-secret","authorization":"Bearer read-secret",'
+            '"ordinary":"safe"}'
+        )
+
+        self.assertEqual(
+            VALIDATION.redact_output(output, {}),
+            '{"access_token":"<REDACTED>","authorization":"<REDACTED>",'
+            '"ordinary":"safe"}',
+        )
+
+    def test_command_output_cap_marks_result_truncated(self) -> None:
+        command = VALIDATION.WorkspaceCommand(
+            cwd=self.root,
+            argv=(sys.executable, "-c", "print('x' * 4096)"),
+        )
+        with (
+            mock.patch.object(VALIDATION, "MAX_COMMAND_OUTPUT_BYTES", 64),
+            mock.patch.object(
+                VALIDATION, "validation_temp_parent", return_value=self.root
+            ),
+        ):
+            result = VALIDATION.run_bounded_command(command, dict(os.environ))
+
+        self.assertTrue(result.truncated)
+        self.assertLessEqual(len(result.excerpt.encode()), 64)
+
+    def test_rejects_target_timeout(self) -> None:
+        target_timeout = VALIDATION.CommandResult(
+            returncode=-15,
+            failed_tests=frozenset(),
+            declared_failed_count=None,
+            summary_count=0,
+            excerpt="timed out",
+            timed_out=True,
+        )
+        runner = mock.Mock(
+            side_effect=[
+                self.result(100, "crate test::shared_failure"),
+                target_timeout,
+            ]
+        )
+
+        self.assertEqual(self.execute_gate(runner), 1)
+
+    def test_rejects_dirty_candidate_before_running_commands(self) -> None:
+        runner = mock.Mock()
+        dirty_snapshot = ("candidate-head", "candidate-tree", "?? generated.snap.new\n")
+        with (
+            mock.patch.object(VALIDATION, "REPO_ROOT", self.root),
+            mock.patch.object(
+                VALIDATION, "candidate_snapshot", return_value=dirty_snapshot
+            ),
+        ):
+            result = VALIDATION.run_differential_workspace_tests(
+                (self.command,),
+                {"PATH": "/bin"},
+                "a" * 40,
+                runner=runner,
+                target_factory=self.target_factory,
+            )
+
+        self.assertEqual(result, 1)
+        runner.assert_not_called()
+
+    def test_rejects_candidate_mutation_during_gate(self) -> None:
+        runner = mock.Mock(return_value=self.result(0))
+        changed_snapshot = ("changed-head", "changed-tree", "")
+        result = self.execute_commands(
+            (self.command,),
+            runner,
+            candidate_snapshots=[self.snapshot, changed_snapshot],
+        )
+
+        self.assertEqual(result, 1)
+
+    def test_rejects_target_setup_failure(self) -> None:
+        @contextmanager
+        def failing_target_factory(_target_sha: str):
+            raise RuntimeError("clone failed")
+            yield self.target
+
+        second_command = VALIDATION.WorkspaceCommand(
+            cwd=self.root,
+            argv=("just", "test", "-p", "codex-v8-poc"),
+        )
+        runner = mock.Mock(
+            side_effect=[
+                self.result(100, "crate test::shared_failure"),
+                self.result(0),
+            ]
+        )
+        result = self.execute_commands(
+            (self.command, second_command),
+            runner,
+            target_factory=failing_target_factory,
+        )
+
+        self.assertEqual(result, 1)
+        self.assertEqual(runner.call_count, 2)
+
+    def test_rejects_target_repository_mutation(self) -> None:
+        changed_target = ("a" * 40, "changed-tree", " M Cargo.lock\n")
+        runner = mock.Mock(
+            side_effect=[
+                self.result(100, "crate test::shared_failure"),
+                self.result(100, "crate test::shared_failure"),
+            ]
+        )
+        result = self.execute_commands(
+            (self.command,),
+            runner,
+            target_snapshots=[self.target_snapshot, changed_target],
+        )
+
+        self.assertEqual(result, 1)
+
+    def test_evaluates_every_workspace_command(self) -> None:
+        second_command = VALIDATION.WorkspaceCommand(
+            cwd=self.root,
+            argv=("just", "test", "-p", "codex-v8-poc"),
+        )
+        runner = mock.Mock(
+            side_effect=[
+                self.result(0),
+                self.result(100, "crate test::shared_failure"),
+                self.result(100, "crate test::shared_failure"),
+            ]
+        )
+        result = self.execute_commands((self.command, second_command), runner)
+
+        self.assertEqual(result, 0)
+        self.assertEqual(runner.call_count, 3)
+
+    def test_uses_fresh_target_for_each_failed_command(self) -> None:
+        second_command = VALIDATION.WorkspaceCommand(
+            cwd=self.root,
+            argv=("just", "test", "-p", "codex-v8-poc"),
+        )
+        failure = self.result(100, "crate test::shared_failure")
+        runner = mock.Mock(side_effect=[failure, failure, failure, failure])
+        result = self.execute_commands((self.command, second_command), runner)
+
+        self.assertEqual(result, 0)
+        self.assertEqual(self.target_factory_calls, ["a" * 40, "a" * 40])
 
 
 if __name__ == "__main__":
