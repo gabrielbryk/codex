@@ -47,10 +47,34 @@ SHA, digest, patch count, and leaf contracts must match the validated registry v
 bounded generated-CLI warning only when the resolved launcher uses an artifact whose source/build
 provenance may be stale; never turn a registry mismatch into a warning.
 
+## Heavy-gate placement
+
+Before the first Cargo, Bazel, Clippy, workspace-test, or release-build gate, record the launcher's
+actual cgroup and its effective `MemoryHigh`, `MemoryMax`, and swap limit. Heavy work must enter
+`agent-workloads.slice`; inheriting `worklens.service`, `agent-control.slice`, or another bounded
+control-plane service is a preflight failure even when the host still has free RAM. Do not infer
+capacity from host-wide memory utilization because a child can be throttled by an ancestor cgroup.
+
+On Huginn, launch coordinator-owned heavy gates through `agent-slice-exec`:
+
+```bash
+agent-slice-exec codex-upgrade-workflow gate \
+  --run-dir <run-dir> \
+  --cwd <candidate-worktree> \
+  --timeout <seconds> \
+  -- <executable> <literal-args...>
+```
+
+Treat registered `forkctl validate` results as authoritative only after verifying that Fork Fleet's
+validation child enters the workload slice rather than inheriting the daemon's service cgroup. If
+that placement contract is absent or fails, stop before the broad gate and repair the source-owned
+Fork Fleet process launcher; a manually relocated gate is diagnostic evidence but does not update
+candidate validation state.
+
 The coordinator owns every heavy gate through this form:
 
 ```bash
-codex-upgrade-workflow gate \
+agent-slice-exec codex-upgrade-workflow gate \
   --run-dir <run-dir> \
   --cwd <candidate-worktree> \
   --timeout <seconds> \

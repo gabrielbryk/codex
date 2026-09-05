@@ -76,6 +76,11 @@ SECTION_CONTRACTS = (
             "Fork Fleet",
         ),
     ),
+    (
+        "validation.md",
+        "Heavy-gate placement",
+        ("`agent-workloads.slice`", "`agent-slice-exec`", "`forkctl validate`"),
+    ),
 )
 TARGET_SHA_PATTERN = re.compile(r"(?m)^- Target: `[^`]+` \(`(?P<sha>[0-9a-f]{40})`\)$")
 FORMAT_FAILURE_PATTERN = re.compile(r"(?m)^Formatting failed: (?P<groups>.+)$")

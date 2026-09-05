@@ -47,8 +47,9 @@ Follow this order; reopen phases only for new evidence.
 4. **Candidate:** mutate only the Fork Fleet candidate worktree. Join all writers, review/stage the
    intended tree, record HEAD plus index tree, then freeze it before a read-only heavy gate.
 5. **Validation:** run deterministic checks, candidate-coherence compile, and each retained leaf's
-   tests. Serialize heavy commands through `codex-upgrade-workflow gate`; reject results if
-   HEAD/index changed. The complete Rust suite requires repository-mandated user approval.
+   tests. Verify heavy-gate cgroup placement, then serialize commands through
+   `agent-slice-exec codex-upgrade-workflow gate`; reject results if HEAD/index changed. The
+   complete Rust suite requires repository-mandated user approval.
 6. **Final tail:** after semantic leaves and fix/fmt, generate and commit release metadata as the
    last isolated leaf with exact allowed paths. Revalidate target, diff, trailer, generated outputs,
    and final SHA; never hide semantic edits in this tail.

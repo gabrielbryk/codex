@@ -91,7 +91,7 @@ class UpgradeWorkflowAuditTests(unittest.TestCase):
                 with self.subTest(filename=filename, marker=marker):
                     self.assert_mutation_rejected(filename, marker, "mutated contract")
                     checked += 1
-        self.assertEqual(checked, 26)
+        self.assertEqual(checked, 29)
 
 
 class FormatBaselineTests(unittest.TestCase):
