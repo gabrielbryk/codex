@@ -3969,19 +3969,16 @@ impl ChatComposer {
         if self.draft.textarea.vim_query().is_some() || self.footer.flash_visible() {
             return Some(1);
         }
-        let hint_height = self.footer
+        let hint_height = self
+            .footer
             .hint_override
             .as_ref()
             .map(|items| if items.is_empty() { 0 } else { 1 });
         if hint_height.is_some() {
             return hint_height;
         }
-        uses_passive_footer_status_layout(&self.footer_props()).then_some(
-            self.footer
-                .status_line_lines
-                .len()
-                .max(/*other*/ 1) as u16,
-        )
+        uses_passive_footer_status_layout(&self.footer_props())
+            .then_some(self.footer.status_line_lines.len().max(/*other*/ 1) as u16)
     }
 
     pub(crate) fn sync_popups(&mut self) {
