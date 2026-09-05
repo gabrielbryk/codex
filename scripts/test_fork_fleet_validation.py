@@ -95,7 +95,7 @@ class UpgradeWorkflowAuditTests(unittest.TestCase):
                 with self.subTest(filename=filename, marker=marker):
                     self.assert_mutation_rejected(filename, marker, "mutated contract")
                     checked += 1
-        self.assertEqual(checked, 61)
+        self.assertEqual(checked, 63)
 
 
 class FormatBaselineTests(unittest.TestCase):
@@ -822,6 +822,65 @@ dependencies = ["dep"]
 
         self.assertTrue(result.truncated)
         self.assertLessEqual(len((result.stdout + result.stderr).encode()), 64)
+
+    def test_capped_capture_closes_files_when_process_start_fails(self) -> None:
+        stdout_file = mock.Mock()
+        stderr_file = mock.Mock()
+        with (
+            mock.patch.object(
+                VALIDATION, "validation_temp_parent", return_value=self.root
+            ),
+            mock.patch.object(
+                VALIDATION.Path,
+                "open",
+                side_effect=[stdout_file, stderr_file],
+            ),
+            mock.patch.object(
+                VALIDATION.subprocess,
+                "Popen",
+                side_effect=FileNotFoundError("missing executable"),
+            ),
+            self.assertRaises(FileNotFoundError),
+        ):
+            VALIDATION.run_capped_process(
+                ("missing-cargo",),
+                self.root,
+                {},
+                timeout_seconds=30,
+            )
+
+        stdout_file.close.assert_called_once_with()
+        stderr_file.close.assert_called_once_with()
+
+    def test_registered_tests_use_explicit_tool_paths(self) -> None:
+        real_home = Path("/trusted/home")
+        completed = mock.Mock(returncode=0)
+        with (
+            mock.patch.object(
+                VALIDATION.sys,
+                "argv",
+                [str(SCRIPT), "upgrade-workflow-tests"],
+            ),
+            mock.patch.object(VALIDATION.Path, "home", return_value=real_home),
+            mock.patch.dict(
+                VALIDATION.os.environ,
+                {"PATH": "/untrusted/inherited/bin"},
+                clear=True,
+            ),
+            mock.patch.object(
+                VALIDATION.subprocess, "run", return_value=completed
+            ) as run,
+            self.assertRaisesRegex(SystemExit, "0"),
+        ):
+            VALIDATION.main()
+
+        environment = run.call_args.kwargs["env"]
+        self.assertEqual(
+            environment,
+            VALIDATION.registered_test_environment(real_home),
+        )
+        self.assertNotIn("/untrusted/inherited/bin", environment["PATH"])
+        self.assertIn(str(real_home / ".cargo/bin"), environment["PATH"])
 
     def test_capped_capture_terminates_on_timeout(self) -> None:
         with mock.patch.object(

@@ -80,6 +80,8 @@ SECTION_CONTRACTS = (
             "does not inspect or report candidate finalization state",
             "registered release evidence",
             "`upgrade-workflow-tests`",
+            "explicit tool path",
+            "does not inherit an arbitrary `PATH`",
             "Fork Fleet",
         ),
     ),
@@ -515,15 +517,27 @@ def run_capped_process(
         output_paths = [Path(temporary_root) / "stdout.log"]
         if not merge_stderr:
             output_paths.append(Path(temporary_root) / "stderr.log")
-        output_files = [path.open("wb") for path in output_paths]
-        process = subprocess.Popen(
-            argv,
-            cwd=cwd,
-            env=environment,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT if merge_stderr else subprocess.PIPE,
-            start_new_session=True,
-        )
+        output_files = []
+        try:
+            for path in output_paths:
+                output_files.append(path.open("wb"))
+        except BaseException:
+            for output_file in output_files:
+                output_file.close()
+            raise
+        try:
+            process = subprocess.Popen(
+                argv,
+                cwd=cwd,
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT if merge_stderr else subprocess.PIPE,
+                start_new_session=True,
+            )
+        except BaseException:
+            for output_file in output_files:
+                output_file.close()
+            raise
         selector = selectors.DefaultSelector()
         assert process.stdout is not None
         selector.register(process.stdout, selectors.EVENT_READ, output_files[0])
@@ -1120,6 +1134,30 @@ def workspace_test_commands(just: Path) -> tuple[WorkspaceCommand, ...]:
     )
 
 
+def validation_tool_paths(real_home: Path) -> tuple[Path, ...]:
+    return (
+        real_home / ".local/bin",
+        real_home / ".cargo/bin",
+        real_home / ".asdf/shims",
+        real_home / ".proto/bin",
+        Path("/usr/local/sbin"),
+        Path("/usr/local/bin"),
+        Path("/usr/sbin"),
+        Path("/usr/bin"),
+        Path("/sbin"),
+        Path("/bin"),
+    )
+
+
+def registered_test_environment(real_home: Path) -> dict[str, str]:
+    return {
+        "HOME": str(real_home),
+        "PATH": os.pathsep.join(map(str, validation_tool_paths(real_home))),
+        "CARGO_HOME": str(real_home / ".cargo"),
+        "RUSTUP_HOME": str(real_home / ".rustup"),
+    }
+
+
 def main() -> None:
     real_home = Path.home()
     fork_fleet_just = (
@@ -1192,6 +1230,7 @@ def main() -> None:
                     "-v",
                 ],
                 cwd=REPO_ROOT,
+                env=registered_test_environment(real_home),
                 check=False,
             ).returncode
         )
@@ -1199,18 +1238,7 @@ def main() -> None:
         raise SystemExit(f"Fork Fleet just executable is missing: {fork_fleet_just}")
 
     commands = actions[sys.argv[1]]
-    tool_paths = [
-        real_home / ".local/bin",
-        real_home / ".cargo/bin",
-        real_home / ".asdf/shims",
-        real_home / ".proto/bin",
-        Path("/usr/local/sbin"),
-        Path("/usr/local/bin"),
-        Path("/usr/sbin"),
-        Path("/usr/bin"),
-        Path("/sbin"),
-        Path("/bin"),
-    ]
+    tool_paths = validation_tool_paths(real_home)
     temporary_parent = None
     runtime_dir = Path(f"/run/user/{os.getuid()}")
     for candidate in (Path("/dev/shm"), runtime_dir):
