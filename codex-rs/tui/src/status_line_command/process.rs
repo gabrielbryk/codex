@@ -34,7 +34,7 @@ async fn execute_inner(
         .command
         .split_first()
         .ok_or_else(|| "empty formatter command".to_string())?;
-    let stdin = input.to_json_line().map_err(str::to_string)?;
+    let stdin = input.to_json_line().map_err(|error| error.to_string())?;
     let env = formatter_environment(std::env::vars());
     let spawned = spawn_pipe_process(program, args, cwd, &env, &None, &[])
         .await

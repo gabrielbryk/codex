@@ -1,4 +1,11 @@
 use super::*;
+use crate::status_line_command::wire::STATUS_LINE_COMMAND_SCHEMA_VERSION;
+use crate::status_line_command::wire::StatusLineCommandCodex;
+use crate::status_line_command::wire::StatusLineCommandContextWindow;
+use crate::status_line_command::wire::StatusLineCommandModel;
+use crate::status_line_command::wire::StatusLineCommandSessionId;
+use crate::status_line_command::wire::StatusLineCommandThinking;
+use crate::status_line_command::wire::StatusLineCommandWorkspace;
 
 fn input() -> StatusLineCommandInput {
     StatusLineCommandInput {
