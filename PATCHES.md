@@ -21,7 +21,7 @@ The Fork Fleet plan contains the complete file lists and source-commit mapping.
 
 - Owner: `codex-rs/config/src/loader/mod.rs`; alternate-home load decision only.
 - Proof: predicate tests plus full layer discovery/composition across independent
-  Primary and Uprising homes.
+  Primary and Uprising homes, including project-root collisions and symlink aliases.
 - Impact/shared: no public or wire change; shares loader plumbing with status config.
 - Retire: when upstream has equivalent cross-installation leakage coverage.
 
@@ -141,7 +141,8 @@ The Fork Fleet plan contains the complete file lists and source-commit mapping.
 ### `maintenance-repo-local-upgrade-workflow` — rework
 
 - Owner: `.codex/skills/upgrade-codex-fork/` entrypoint and five playbooks.
-- Proof: workflow contract mutation tests and exact-reference audit.
+- Proof: workflow contract mutation tests, exact-reference audit, and mandatory
+  workload-slice placement checks before heavy validation.
 - Impact/shared: maintainer policy only; no product/runtime surface.
 - Retire: when an upstream/shared workflow provides the same Codex-specific leaf,
   target, preservation, gate, and authorization guarantees.
