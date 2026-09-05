@@ -36,6 +36,7 @@ use codex_connectors::ConnectorRuntimeContext;
 use codex_connectors::ConnectorRuntimeContextKey;
 use codex_connectors::ConnectorRuntimeFetchSource;
 use codex_connectors::ConnectorRuntimeManager;
+use codex_exec_server::EnvironmentManager;
 use codex_exec_server::ExecServerError;
 use codex_exec_server::HttpClient;
 use codex_exec_server::HttpRequestParams;
@@ -85,6 +86,8 @@ use rmcp::service::RequestContext;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -4775,6 +4778,123 @@ async fn reconcile_reusable_server_with_mcp_config(
         ElicitationRequestRouter::default(),
     )
     .await
+}
+
+#[cfg(unix)]
+async fn workload_attributed_stdio_manager(
+    previous: Option<&McpConnectionSet>,
+    config: McpServerConfig,
+    thread_id: &str,
+    codex_home: PathBuf,
+    environment_manager: Arc<EnvironmentManager>,
+) -> McpConnectionSet {
+    McpConnectionSet::new(
+        previous,
+        McpPublicationGate::already_published(),
+        McpRuntimeInput {
+            startup_policy: McpStartupPolicy::Eager,
+            config: Arc::new(crate::mcp::tests::test_mcp_config(codex_home)),
+            plugins_available: false,
+            ready_selected_capability_roots: Vec::new(),
+            mcp_servers: HashMap::from([(
+                "observed".to_string(),
+                EffectiveMcpServer::configured(config)
+                    .with_stdio_workload_attribution(thread_id.to_string()),
+            )]),
+            submit_id: "workload-attribution".to_string(),
+            tx_event: None,
+            startup_cancellation_token: CancellationToken::new(),
+            runtime_context: McpRuntimeContext::new(environment_manager, std::env::temp_dir()),
+            codex_apps_tools_cache: ConnectorRuntimeManager::default(),
+            tool_catalog_cache: McpToolCatalogCache::default(),
+            codex_apps_tools_cache_key: ConnectorRuntimeContextKey::personal(
+                /*account_id*/ None, /*chatgpt_user_id*/ None,
+            ),
+            client_mcp_extensions: ClientMcpExtensions::default(),
+            auth: None,
+            auth_manager: None,
+            elicitation_reviewer: None,
+            elicitation_lifecycle: None,
+        },
+        ElicitationRequestRouter::default(),
+    )
+    .await
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn stdio_workload_attribution_is_observed_once_and_connection_is_reused() -> anyhow::Result<()>
+{
+    let temp = tempdir()?;
+    let marker = temp.path().join("launch-env");
+    let server = temp.path().join("server.sh");
+    std::fs::write(
+        &server,
+        format!(
+            r#"#!/bin/sh
+printf '%s|%s|%s\n' "$CODEX_WORKLOAD_THREAD_ID" "$CODEX_WORKLOAD_TYPE" "$$" > '{}'
+IFS= read -r _initialize
+printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"protocolVersion":"2025-06-18","capabilities":{{"tools":{{}}}},"serverInfo":{{"name":"observed","version":"1"}}}}}}'
+IFS= read -r _initialized
+IFS= read -r _list_tools
+printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"tools":[]}}}}'
+while IFS= read -r _request; do :; done
+"#,
+            marker.display()
+        ),
+    )?;
+    std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o700))?;
+    let configured = McpServerConfig {
+        transport: McpServerTransportConfig::Stdio {
+            command: server.to_string_lossy().into_owned(),
+            args: Vec::new(),
+            env: Some(HashMap::from([
+                (
+                    crate::server::CODEX_WORKLOAD_THREAD_ID_ENV.to_string(),
+                    "spoofed-thread".to_string(),
+                ),
+                (
+                    crate::server::CODEX_WORKLOAD_TYPE_ENV.to_string(),
+                    "spoofed-type".to_string(),
+                ),
+            ])),
+            env_vars: Vec::new(),
+            cwd: None,
+        },
+        ..serde_json::from_value(serde_json::json!({ "command": "unused" }))?
+    };
+    let environment_manager = Arc::new(EnvironmentManager::default_for_tests());
+
+    let first = workload_attributed_stdio_manager(
+        None,
+        configured.clone(),
+        "thread-1",
+        temp.path().to_path_buf(),
+        Arc::clone(&environment_manager),
+    )
+    .await;
+    assert!(
+        first
+            .wait_for_server_ready("observed", Duration::from_secs(5))
+            .await
+    );
+    let first_launch = std::fs::read_to_string(&marker)?;
+    assert!(
+        first_launch.starts_with("thread-1|mcp|"),
+        "{first_launch:?}"
+    );
+
+    let second = workload_attributed_stdio_manager(
+        Some(&first),
+        configured,
+        "thread-2",
+        temp.path().to_path_buf(),
+        environment_manager,
+    )
+    .await;
+    assert!(first.shares_test_connection_with(&second, "observed"));
+    assert_eq!(std::fs::read_to_string(marker)?, first_launch);
+    Ok(())
 }
 
 #[tokio::test]

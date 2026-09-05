@@ -535,6 +535,7 @@ impl McpConnectionSet {
             } else {
                 None
             };
+            let server = server.with_applied_runtime_stdio_env();
             let has_runtime_auth = runtime_auth_provider.is_some();
             let async_managed_client = AsyncManagedClient::new(
                 server_name.clone(),

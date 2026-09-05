@@ -22,11 +22,15 @@ use codex_utils_path_uri::PathUri;
 use rmcp::model::ElicitationCapability;
 use tracing::warn;
 
+pub(crate) const CODEX_WORKLOAD_THREAD_ID_ENV: &str = "CODEX_WORKLOAD_THREAD_ID";
+pub(crate) const CODEX_WORKLOAD_TYPE_ENV: &str = "CODEX_WORKLOAD_TYPE";
+
 /// MCP server after runtime additions have been applied.
 #[derive(Debug, Clone)]
 pub struct EffectiveMcpServer {
     config: McpServerConfig,
     agent_plugin: bool,
+    runtime_stdio_env: HashMap<String, String>,
 }
 
 impl EffectiveMcpServer {
@@ -34,6 +38,7 @@ impl EffectiveMcpServer {
         Self {
             config,
             agent_plugin: false,
+            runtime_stdio_env: HashMap::new(),
         }
     }
 
@@ -56,6 +61,27 @@ impl EffectiveMcpServer {
 
     pub fn is_agent_plugin(&self) -> bool {
         self.agent_plugin
+    }
+
+    /// Adds process-only workload attribution without changing configured server identity.
+    pub fn with_stdio_workload_attribution(mut self, thread_id: String) -> Self {
+        self.runtime_stdio_env
+            .insert(CODEX_WORKLOAD_THREAD_ID_ENV.to_string(), thread_id);
+        self.runtime_stdio_env
+            .insert(CODEX_WORKLOAD_TYPE_ENV.to_string(), "mcp".to_string());
+        self
+    }
+
+    /// Materializes process-only values after connection reuse and catalog cache decisions.
+    pub(crate) fn with_applied_runtime_stdio_env(mut self) -> Self {
+        if let McpServerTransportConfig::Stdio { env, .. } = &mut self.config.transport {
+            let env = env.get_or_insert_with(HashMap::new);
+            for (name, value) in self.runtime_stdio_env {
+                env.insert(name, value);
+            }
+        }
+        self.runtime_stdio_env = HashMap::new();
+        self
     }
 }
 

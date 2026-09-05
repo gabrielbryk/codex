@@ -353,7 +353,16 @@ impl Session {
             .environment_cwds
             .entry(codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string())
             .or_insert_with(|| PathUri::from_abs_path(&desired.config.cwd));
-        let mcp_servers = effective_mcp_servers(&config, auth.as_ref());
+        let thread_id = self.thread_id.to_string();
+        let mcp_servers = effective_mcp_servers(&config, auth.as_ref())
+            .into_iter()
+            .map(|(name, server)| {
+                (
+                    name,
+                    server.with_stdio_workload_attribution(thread_id.clone()),
+                )
+            })
+            .collect();
         config.set_server_permission_profiles(
             &mcp_servers,
             desired.environments.turn_environments().map(|environment| {
