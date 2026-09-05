@@ -95,7 +95,7 @@ class UpgradeWorkflowAuditTests(unittest.TestCase):
                 with self.subTest(filename=filename, marker=marker):
                     self.assert_mutation_rejected(filename, marker, "mutated contract")
                     checked += 1
-        self.assertEqual(checked, 63)
+        self.assertEqual(checked, 65)
 
 
 class FormatBaselineTests(unittest.TestCase):
@@ -303,6 +303,7 @@ class DifferentialWorkspaceTests(unittest.TestCase):
         parseable: bool = True,
         truncated: bool = False,
         timed_out_tests: tuple[str, ...] = (),
+        flaky_tests: tuple[str, ...] = (),
     ) -> object:
         return VALIDATION.CommandResult(
             returncode=returncode,
@@ -312,6 +313,8 @@ class DifferentialWorkspaceTests(unittest.TestCase):
             declared_timed_out_count=(len(timed_out_tests) if parseable else None),
             summary_count=1 if parseable else 0,
             excerpt="bounded output",
+            flaky_tests=frozenset(flaky_tests),
+            declared_flaky_count=len(flaky_tests) if parseable else None,
             parse_error=(
                 None if parseable else "expected one terminal nextest summary, found 0"
             ),
@@ -385,6 +388,22 @@ class DifferentialWorkspaceTests(unittest.TestCase):
                 1,
                 None,
             ),
+        )
+        self.assertEqual(
+            VALIDATION.parse_nextest_flaky_lines(output.splitlines()),
+            (frozenset({"crate test::eventual_flake"}), 1, None),
+        )
+
+    def test_flaky_parser_rejects_count_mismatch(self) -> None:
+        output = """\
+     Summary [ 1.000s] 2 tests run: 1 passed (2 flaky), 1 failed
+   FLAKY 2/2 [ 0.100s] (1/2) crate test::only_flake
+  TRY 2 FAIL [ 0.200s] (2/2) crate test::terminal_failure
+"""
+
+        self.assertIn(
+            "declared 2 flaky",
+            VALIDATION.parse_nextest_flaky_lines(output.splitlines())[2],
         )
 
     def test_parser_rejects_ambiguous_terminal_formats(self) -> None:
@@ -477,6 +496,19 @@ class DifferentialWorkspaceTests(unittest.TestCase):
             self.assertNotEqual(
                 candidate_environment[variable], target_environment[variable]
             )
+
+    def test_rejects_candidate_failure_observed_as_target_flake(self) -> None:
+        test_name = "crate test::shared_flake"
+        runner = mock.Mock(
+            side_effect=[
+                self.result(100, test_name),
+                self.result(
+                    100, "crate test::target_failure", flaky_tests=(test_name,)
+                ),
+            ]
+        )
+
+        self.assertEqual(self.execute_gate(runner), 1)
 
     def test_accepts_candidate_timeout_subset_of_target_timeouts(self) -> None:
         runner = mock.Mock(

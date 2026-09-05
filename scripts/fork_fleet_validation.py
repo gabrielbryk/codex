@@ -121,6 +121,8 @@ SECTION_CONTRACTS = (
             "prepared target snapshot",
             "Git diagnostics are streamed to disk",
             "redacted bounded delta",
+            "post-summary `FLAKY` retry list",
+            "target flaky retry cannot cover a candidate terminal failure",
             "candidate-only failed test names",
             "categories separately",
             "exact-target failures",
@@ -145,6 +147,10 @@ NEXTEST_TIMED_OUT_COUNT_PATTERN = re.compile(r"(?:^|, )(?P<count>\d+) timed out(
 NEXTEST_TIMEOUT_PATTERN = re.compile(
     r"^\s*(?:TRY\s+\d+\s+)?TMT\s+\[[^]]+\]\s+\([^)]+\)\s+(?P<name>.+?)\s*$"
 )
+NEXTEST_FLAKY_PATTERN = re.compile(
+    r"^\s*FLAKY\s+\d+/\d+\s+\[[^]]+\]\s+\([^)]+\)\s+(?P<name>.+?)\s*$"
+)
+NEXTEST_FLAKY_COUNT_PATTERN = re.compile(r"\b(?P<count>\d+) flaky\b")
 UNKNOWN_FAILURE_STATUS_PATTERN = re.compile(r"^\s*(?:TRY\s+\d+\s+)?\S*FAIL\S*\b")
 LOCK_PACKAGE_BLOCK_PATTERN = re.compile(
     r"(?ms)^\[\[package\]\]\n.*?(?=^\[\[package\]\]\n|\Z)"
@@ -180,6 +186,8 @@ class CommandResult:
     declared_timed_out_count: int | None
     summary_count: int
     excerpt: str
+    flaky_tests: frozenset[str] = frozenset()
+    declared_flaky_count: int | None = None
     parse_error: str | None = None
     timed_out: bool = False
     truncated: bool = False
@@ -470,6 +478,42 @@ def parse_nextest_output(
     return parse_nextest_lines(output.splitlines())
 
 
+def parse_nextest_flaky_lines(
+    lines: Iterable[str],
+) -> tuple[frozenset[str], int | None, str | None]:
+    flaky_tests = set()
+    declared_flaky_count = None
+    summary_count = 0
+    for raw_line in lines:
+        line = ANSI_ESCAPE_PATTERN.sub("", raw_line)
+        if summary_match := NEXTEST_SUMMARY_PATTERN.match(line):
+            summary_count += 1
+            flaky_tests.clear()
+            flaky_count_match = NEXTEST_FLAKY_COUNT_PATTERN.search(
+                summary_match.group("body")
+            )
+            declared_flaky_count = (
+                int(flaky_count_match.group("count")) if flaky_count_match else 0
+            )
+            continue
+        if summary_count and (match := NEXTEST_FLAKY_PATTERN.match(line)):
+            flaky_tests.add(" ".join(match.group("name").split()))
+    if summary_count != 1:
+        return (
+            frozenset(flaky_tests),
+            declared_flaky_count,
+            f"expected one terminal nextest summary, found {summary_count}",
+        )
+    if declared_flaky_count != len(flaky_tests):
+        return (
+            frozenset(flaky_tests),
+            declared_flaky_count,
+            "nextest summary declared "
+            f"{declared_flaky_count} flaky but parsed {len(flaky_tests)} unique names",
+        )
+    return frozenset(flaky_tests), declared_flaky_count, None
+
+
 def bounded_excerpt(output_file: Path) -> tuple[str, bool]:
     size = output_file.stat().st_size
     with output_file.open("rb") as output:
@@ -634,6 +678,9 @@ def run_bounded_command(
         summary_count,
         parse_error,
     ) = parse_nextest_lines(captured.stdout.splitlines())
+    flaky_tests, declared_flaky_count, flaky_parse_error = parse_nextest_flaky_lines(
+        captured.stdout.splitlines()
+    )
     with tempfile.TemporaryDirectory(
         prefix="ffv-excerpt-", dir=validation_temp_parent()
     ) as temporary_root:
@@ -648,7 +695,9 @@ def run_bounded_command(
         declared_timed_out_count=declared_timed_out_count,
         summary_count=summary_count,
         excerpt=redact_output(excerpt, environment),
-        parse_error=parse_error,
+        flaky_tests=flaky_tests,
+        declared_flaky_count=declared_flaky_count,
+        parse_error=parse_error or flaky_parse_error,
         timed_out=captured.timed_out,
         truncated=captured.truncated,
     )
@@ -1052,8 +1101,16 @@ def run_differential_workspace_tests(
             candidate_only_timeouts = (
                 candidate_result.timed_out_tests - target_result.timed_out_tests
             )
-
             if candidate_only:
+                target_flake_overlap = candidate_only & target_result.flaky_tests
+                if target_flake_overlap:
+                    print(
+                        "candidate terminal failures observed only as exact-target flaky retries: "
+                        + redact_output(
+                            ", ".join(sorted(target_flake_overlap)), environment
+                        ),
+                        file=sys.stderr,
+                    )
                 print(
                     "candidate-only failed test names: "
                     + redact_output(", ".join(sorted(candidate_only)), environment),

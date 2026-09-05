@@ -189,13 +189,17 @@ Recognize the explicit nextest terminal failure statuses `FAIL` and `FL+LK`; the
 retry that also leaked. Parse the terminal timeout status `TMT` into its own category. Reject multiple
 summaries, count mismatches, unknown terminal failure statuses, and format drift rather than guessing
 at membership. A validator process timeout remains separate fail-closed evidence and never becomes
-a parsed test name.
+a parsed test name. Parse the post-summary `FLAKY` retry list separately and require its unique names
+to match the summary's declared flaky count before using it as exact-target evidence.
 
-Candidate failures are accepted only when they are a subset of exact-target failures for that same
-command, and candidate timeouts only when they are a subset of exact-target timeouts. Compare these
-categories separately: a target failure cannot cover a candidate timeout or vice versa. Any
-candidate-only failed test names or candidate-only timed-out test names block release. A target
-setup error, process timeout,
+Candidate failures are accepted only when they are a subset of exact-target terminal failures for
+that same command. A target flaky retry cannot cover a candidate terminal failure: that overlap is
+diagnostic evidence for a narrow test-isolation review, not an automatic waiver. Stabilize an owned
+test fixture in a dedicated maintenance patch or leave the release blocked; do not put target-specific
+waivers in the generic validator. Candidate timeouts are accepted only when they are a subset of
+exact-target timeouts; a target failure or flake cannot cover a candidate timeout. Compare
+exact-target failures, target flaky retries, and timeouts as categories separately. Any candidate-only failed test names
+or candidate-only timed-out test names block release. A target setup error, process timeout,
 truncation, or unparseable nonzero result also blocks; it is not evidence that the candidate is
 equivalent. Apply this comparison independently to every workspace-test command, including the
 separate V8 sandbox command, and always remove the temporary clone.
