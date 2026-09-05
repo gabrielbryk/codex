@@ -3,6 +3,7 @@ mod client;
 mod managed_install;
 mod remote_control_client;
 mod settings;
+mod stock_updater_policy;
 mod update_loop;
 
 use std::path::Path;
@@ -494,6 +495,7 @@ impl Daemon {
     async fn ensure_remote_control_started(&self) -> Result<RemoteControlStartOutput> {
         let _operation_lock = self.acquire_operation_lock().await?;
         let settings = self.load_settings().await?;
+        self.ensure_updater_stopped_for_cutover(&settings).await?;
         if self.is_bootstrapped(&settings).await? {
             let _ = self
                 .set_remote_control_locked(RemoteControlMode::Enabled)
@@ -585,11 +587,11 @@ impl Daemon {
     }
 
     async fn bootstrap_locked(&self, options: BootstrapOptions) -> Result<BootstrapOutput> {
-        self.ensure_managed_codex_bin()?;
-
         let settings = DaemonSettings {
             remote_control_enabled: options.remote_control_enabled,
         };
+        self.ensure_updater_stopped_for_cutover(&settings).await?;
+        self.ensure_managed_codex_bin()?;
         if client::probe(&self.socket_path).await.is_ok()
             && self.running_backend(&settings).await?.is_none()
         {
@@ -599,24 +601,14 @@ impl Daemon {
         }
         settings.save(&self.settings_file).await?;
 
-        if let Some(backend) = self.running_backend_instance(&settings).await? {
-            backend.stop().await?;
-        }
-
-        let backend = backend::pid_backend(self.backend_paths(&settings));
-        backend.start().await?;
-        let updater = backend::pid_update_loop_backend(self.backend_paths(&settings));
-        if updater.is_starting_or_running().await? {
-            updater.stop().await?;
-        }
-        updater.start().await?;
+        self.restart_backend_for_bootstrap(&settings).await?;
 
         let info = self.wait_until_ready().await?;
         let managed_codex_version = self.managed_codex_version_best_effort().await;
         Ok(BootstrapOutput {
             status: BootstrapStatus::Bootstrapped,
             backend: BackendKind::Pid,
-            auto_update_enabled: true,
+            auto_update_enabled: false,
             remote_control_enabled: settings.remote_control_enabled,
             managed_codex_path: self.managed_codex_bin.clone(),
             managed_codex_version,
@@ -657,11 +649,6 @@ impl Daemon {
         let backend =
             backend::pid_backend(self.backend_paths_with_bin(settings, managed_codex_bin));
         backend.start().await
-    }
-
-    async fn is_bootstrapped(&self, settings: &DaemonSettings) -> Result<bool> {
-        let updater = backend::pid_update_loop_backend(self.backend_paths(settings));
-        updater.is_starting_or_running().await
     }
 
     fn ensure_managed_codex_bin(&self) -> Result<()> {
@@ -976,7 +963,7 @@ mod tests {
         let bootstrap_output = BootstrapOutput {
             status: BootstrapStatus::Bootstrapped,
             backend: BackendKind::Pid,
-            auto_update_enabled: true,
+            auto_update_enabled: false,
             remote_control_enabled: true,
             managed_codex_path: "codex".into(),
             managed_codex_version: Some("1.2.3".to_string()),
@@ -991,7 +978,7 @@ mod tests {
             serde_json::json!({
                 "status": "bootstrapped",
                 "backend": "pid",
-                "autoUpdateEnabled": true,
+                "autoUpdateEnabled": false,
                 "remoteControlEnabled": true,
                 "managedCodexPath": "codex",
                 "managedCodexVersion": "1.2.3",
