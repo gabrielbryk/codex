@@ -32,6 +32,7 @@ use url::Url;
 
 use crate::auth_status::OAuthDiscoveryTimeout;
 use crate::http_client_adapter::StreamableHttpRedirectMode;
+use crate::slack_oauth_envelope::SlackOAuthResponseAdapter;
 use crate::utils::MCP_USER_AGENT;
 
 const MAX_OAUTH_HTTP_RESPONSE_BODY_BYTES: usize = 1024 * 1024;
@@ -303,7 +304,14 @@ impl OAuthHttpClientAdapter {
         for header in response.headers {
             builder = builder.header(header.name, header.value);
         }
-        builder.body(body).map_err(oauth_http_client_error)
+        let response = builder.body(body).map_err(oauth_http_client_error)?;
+        Ok(
+            if let Some(adapter) = SlackOAuthResponseAdapter::from_token_endpoint(&request_url) {
+                adapter.normalize_response(response)
+            } else {
+                response
+            },
+        )
     }
 }
 
