@@ -53,6 +53,7 @@ use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_host_windows;
 use core_test_support::skip_if_no_network;
+use core_test_support::skip_if_no_remote_env;
 use core_test_support::skip_if_sandbox;
 use core_test_support::skip_if_target_windows;
 use core_test_support::skip_if_wine_exec;
@@ -78,6 +79,12 @@ const SCOPED_COMMAND_TEST_NAME: &str =
     "suite::unified_exec::scoped_command_wraps_the_prepared_sandbox_command_and_uses_session_home";
 #[cfg(unix)]
 const SCOPED_COMMAND_TEST_SUBPROCESS_ENV: &str = "CODEX_SCOPED_COMMAND_TEST_SUBPROCESS";
+#[cfg(unix)]
+const REMOTE_SCOPED_COMMAND_TEST_NAME: &str =
+    "suite::unified_exec::remote_exec_does_not_forward_local_command_scope_wrapper";
+#[cfg(unix)]
+const REMOTE_SCOPED_COMMAND_TEST_SUBPROCESS_ENV: &str =
+    "CODEX_REMOTE_SCOPED_COMMAND_TEST_SUBPROCESS";
 
 fn extract_output_text(item: &Value) -> Option<&str> {
     item.get("output").and_then(|value| match value {
@@ -3709,6 +3716,86 @@ async fn run_scoped_command_test(shell_snapshot_v2: bool) -> Result<()> {
             .all(|arg| arg.as_str() != wrapper.as_str()),
         "trusted launcher must stay out of policy and event argv"
     );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_exec_does_not_forward_local_command_scope_wrapper() -> Result<()> {
+    skip_if_no_remote_env!(Ok(()));
+
+    if std::env::var_os(REMOTE_SCOPED_COMMAND_TEST_SUBPROCESS_ENV).is_none() {
+        let fixture = tempfile::tempdir()?;
+        let wrapper = fixture.path().join("host-only-scope-wrapper");
+        fs::write(&wrapper, "#!/bin/sh\nexit 86\n")?;
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700))?;
+        let output = Command::new(std::env::current_exe()?)
+            .arg("--exact")
+            .arg(REMOTE_SCOPED_COMMAND_TEST_NAME)
+            .env(REMOTE_SCOPED_COMMAND_TEST_SUBPROCESS_ENV, "1")
+            .env("CODEX_COMMAND_SCOPE_EXEC", wrapper)
+            .output()
+            .await?;
+        assert!(
+            output.status.success(),
+            "subprocess test `{REMOTE_SCOPED_COMMAND_TEST_NAME}` failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        return Ok(());
+    }
+
+    let server = start_mock_server().await;
+    let mut builder = test_codex().with_model("gpt-5.4");
+    let test = builder.build_with_auto_env(&server).await?;
+    let call_id = "remote-unwrapped-command";
+    let args = json!({
+        "cmd": "echo remote-unwrapped",
+        "yield_time_ms": 5_000,
+    });
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                ev_function_call(call_id, "exec_command", &serde_json::to_string(&args)?),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_assistant_message("msg-1", "done"),
+                ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+
+    submit_unified_exec_turn(
+        &test,
+        "run the command on the remote executor",
+        PermissionProfile::Disabled,
+    )
+    .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let output = collect_tool_outputs(
+        &responses
+            .requests()
+            .iter()
+            .map(core_test_support::responses::ResponsesRequest::body_json)
+            .collect::<Vec<_>>(),
+    )?
+    .remove(call_id)
+    .expect("remote command output");
+    assert_eq!(output.exit_code, Some(0));
+    assert!(
+        output.output.contains("remote-unwrapped"),
+        "remote command should run without the host-only scope wrapper: {:?}",
+        output.output,
+    );
+
     Ok(())
 }
 
