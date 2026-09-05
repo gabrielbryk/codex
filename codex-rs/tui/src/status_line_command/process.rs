@@ -6,8 +6,8 @@ use codex_config::types::TuiStatusLineCommand;
 use codex_utils_pty::spawn_pipe_process;
 use tokio::sync::mpsc;
 
-use super::MAX_OUTPUT_BYTES;
-use super::parse_output;
+use super::parser::MAX_STATUS_LINE_COMMAND_BYTES;
+use super::parser::parse_status_line_command_output;
 use super::runner::Completion;
 use super::runner::Invocation;
 
@@ -29,7 +29,7 @@ async fn execute_inner(
     config: TuiStatusLineCommand,
     cwd: &Path,
     input: super::wire::StatusLineCommandInput,
-) -> Result<String, String> {
+) -> Result<super::parser::ParsedStatusLine, String> {
     let (program, args) = config
         .command
         .split_first()
@@ -73,14 +73,16 @@ async fn execute_inner(
     if exit_code != 0 {
         return Err(format!("formatter exited with status {exit_code}"));
     }
-    parse_output(&stdout).map_err(str::to_string)
+    parse_status_line_command_output(&stdout).map_err(|error| error.to_string())
 }
 
 async fn collect(mut receiver: mpsc::Receiver<Vec<u8>>) -> Result<Vec<u8>, String> {
     let mut output = Vec::new();
     while let Some(chunk) = receiver.recv().await {
-        if output.len().saturating_add(chunk.len()) > MAX_OUTPUT_BYTES {
-            return Err("formatter stream exceeded 4096 bytes".to_string());
+        if output.len().saturating_add(chunk.len()) > MAX_STATUS_LINE_COMMAND_BYTES {
+            return Err(format!(
+                "formatter stream exceeded {MAX_STATUS_LINE_COMMAND_BYTES} bytes"
+            ));
         }
         output.extend_from_slice(&chunk);
     }
@@ -98,6 +100,7 @@ fn formatter_environment(
                 "SYSTEMROOT"
                     | "COMSPEC"
                     | "WINDIR"
+                    | "PATH"
                     | "HOME"
                     | "USERPROFILE"
                     | "HOMEDRIVE"
@@ -112,6 +115,29 @@ fn formatter_environment(
                     | "TERM"
                     | "COLORTERM"
                     | "NO_COLOR"
+                    | "XDG_CACHE_HOME"
+                    | "XDG_CONFIG_HOME"
+                    | "XDG_DATA_HOME"
+                    | "XDG_STATE_HOME"
+                    | "XDG_RUNTIME_DIR"
+                    | "CODEX_HOME"
+                    | "CCSTATUSLINE_BIN"
+                    | "CODEX_STATUSLINE_CONFIG"
+                    | "CODEX_STATUSLINE_HOME_BADGE"
+                    | "AGENT_LIVE_STATUSLINE_BADGE"
+                    | "AGENT_LIVE_STATUSLINE_OWNER_PID"
+                    | "AGENT_LIVE_STATUSLINE_OWNER_STARTED_AT"
+                    | "AGENT_LIVE_STATUSLINE_RELEASE_AT"
+                    | "AGENT_LIVE_STATUSLINE_RELEASE_PATH"
+                    | "STATUSLINE_RENDER_TIMEOUT_MS"
+                    | "STATUSLINE_HELPER_TIMEOUT_MS"
+                    | "STATUSLINE_TELEMETRY_PATH"
+                    | "STATUSLINE_TELEMETRY_MAX_BYTES"
+                    | "STATUSLINE_TELEMETRY_WRITE_TIMEOUT_MS"
+                    | "STATUSLINE_VERSION_SKEW_BADGE"
+                    | "STATUSLINE_VERSION_SKEW_CACHE_PATH"
+                    | "STATUSLINE_VERSION_SKEW_CACHE_TTL_SECONDS"
+                    | "STATUSLINE_WORKTREE_ABBREV"
             )
         })
         .collect()
