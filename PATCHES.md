@@ -168,7 +168,8 @@ The Fork Fleet plan contains the complete file lists and source-commit mapping.
   subset acceptance, candidate-only rejection, target setup/timeout/parse failure,
   terminal-summary count and format rejection, explicit `FAIL`/`FL+LK` failure and
   `TMT` timeout membership parsing, category-preserving subset comparison, streaming
-  output cap/redaction,
+  output cap/redaction, exact post-summary `FLAKY` membership parsing and rejection
+  when a candidate terminal failure is only a target retry,
   per-command isolation, candidate/target immutability, byte-exact target lock
   normalization acceptance and mutation rejection, locked production command argv,
   real full-offline Cargo metadata restamping, and multi-command continuation tests.
@@ -176,8 +177,9 @@ The Fork Fleet plan contains the complete file lists and source-commit mapping.
   independently derives history and rejects any provided mismatch. Only an unchanged
   exact-target `justfile` failure may be tolerated after all language groups pass.
   Workspace failures are dynamically accepted only when their normalized terminal
-  nextest membership is a subset of a freshly executed exact-target result; there is
-  no static failure allowlist. Per-side Cargo outputs, Git diagnostics, logs, and the
+  nextest membership is a subset of a freshly executed exact-target terminal result;
+  a target flaky retry is diagnostic only and cannot waive a candidate terminal
+  failure. There is no static failure allowlist. Per-side Cargo outputs, Git diagnostics, logs, and the
   disposable clone use private disk-backed, hard-capped storage rather than tmpfs.
   Name-set equivalence is
   classification evidence only; retained-leaf and changed-path tests still own
@@ -202,19 +204,23 @@ The Fork Fleet plan contains the complete file lists and source-commit mapping.
 - Owner: only the matching-turn analytics wait in
   `app-server/tests/suite/v2/guardian_v2.rs`, the MCP refresh gate held by
   `core/src/session/turn_input_tests.rs`, the idle-turn and reusable-hook gate in
-  `core/tests/suite/hooks.rs`, and the grandchild completion event wait in
+  `core/tests/suite/hooks.rs`, the bounded rollback-after-completion retry in
+  `core/tests/suite/model_switching.rs`, the production-equivalent test timeout in
+  `ext/git-attribution/src/policy.rs`, and the grandchild completion event wait in
   `core/tests/suite/subagent_notifications.rs`.
 - Upstream: the Guardian synchronization is the exact test hunk from upstream
   `ddf04ad26789d040f9ef6a96736f76602e35a6cc`; the other three fixture barriers use
   existing local synchronization primitives without changing product behavior.
 - Proof: focused Guardian v2 scoped-approval, accepted thread-settings input, and
-  grandchild full-fork context tests plus both idle async-hook handoff variants,
-  followed by repository formatting.
+  grandchild full-fork context tests plus both idle async-hook handoff variants;
+  all three model-rollback parameterizations and the auth-refresh attribution test
+  each passed cleanly in three consecutive focused runs, followed by repository formatting.
 - Impact/shared: test-only ordering stabilization; assertions and production logic
   are unchanged, and no broad-test failure is allowlisted or weakened.
 - Retire: drop the Guardian hunk when the target contains upstream `ddf04ad26789`;
   drop each remaining barrier when its fixture is upstream-owned with equivalent
-  event/gate synchronization rather than transient state polling or reusable gates.
+  event/gate synchronization rather than transient state polling or reusable gates,
+  and drop the attribution timeout normalization when upstream tests use the production deadline.
 
 ### `maintenance-generated-release-tail` — rework, final
 
