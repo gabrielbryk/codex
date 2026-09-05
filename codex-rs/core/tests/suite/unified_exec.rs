@@ -9,8 +9,6 @@ use codex_protocol::protocol::SandboxPolicy;
 use core_test_support::test_codex::local_selections;
 use std::collections::HashMap;
 use std::ffi::OsStr;
-#[cfg(unix)]
-use std::ffi::OsString;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -70,36 +68,16 @@ use regex_lite::Regex;
 use serde_json::Value;
 use serde_json::json;
 #[cfg(unix)]
-use serial_test::serial;
+use tokio::process::Command;
 use tokio::time::Duration;
 
 const UNIFIED_EXEC_LAGGED_OUTPUT_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[cfg(unix)]
-struct ScopedCommandEnvGuard {
-    original: Option<OsString>,
-}
-
+const SCOPED_COMMAND_TEST_NAME: &str =
+    "suite::unified_exec::scoped_command_wraps_the_prepared_sandbox_command_and_uses_session_home";
 #[cfg(unix)]
-impl ScopedCommandEnvGuard {
-    fn set(wrapper: &OsStr) -> Self {
-        let original = std::env::var_os("CODEX_COMMAND_SCOPE_EXEC");
-        unsafe { std::env::set_var("CODEX_COMMAND_SCOPE_EXEC", wrapper) };
-        Self { original }
-    }
-}
-
-#[cfg(unix)]
-impl Drop for ScopedCommandEnvGuard {
-    fn drop(&mut self) {
-        unsafe {
-            match &self.original {
-                Some(value) => std::env::set_var("CODEX_COMMAND_SCOPE_EXEC", value),
-                None => std::env::remove_var("CODEX_COMMAND_SCOPE_EXEC"),
-            }
-        }
-    }
-}
+const SCOPED_COMMAND_TEST_SUBPROCESS_ENV: &str = "CODEX_SCOPED_COMMAND_TEST_SUBPROCESS";
 
 fn extract_output_text(item: &Value) -> Option<&str> {
     item.get("output").and_then(|value| match value {
@@ -3566,15 +3544,59 @@ async fn unified_exec_runs_under_sandbox() -> Result<()> {
 }
 
 #[cfg(unix)]
-#[test_case::test_case(false; "without_shell_snapshot_v2")]
-#[test_case::test_case(true; "with_shell_snapshot_v2")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial(scoped_command_env)]
 async fn scoped_command_wraps_the_prepared_sandbox_command_and_uses_session_home(
-    shell_snapshot_v2: bool,
 ) -> Result<()> {
     skip_if_sandbox!(Ok(()));
 
+    if std::env::var_os(SCOPED_COMMAND_TEST_SUBPROCESS_ENV).is_none() {
+        let fixture = tempfile::tempdir()?;
+        let wrapper = fixture.path().join("scope-wrapper");
+        fs::write(
+            &wrapper,
+            r#"#!/bin/sh
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --thread-id) scope_thread=$2; shift 2 ;;
+        --turn-id) scope_turn=$2; shift 2 ;;
+        --call-id) scope_call=$2; shift 2 ;;
+        --profile) scope_profile=$2; shift 2 ;;
+        --) shift; break ;;
+        *) exit 64 ;;
+    esac
+done
+export SCOPE_THREAD="$scope_thread"
+export SCOPE_TURN="$scope_turn"
+export SCOPE_CALL="$scope_call"
+export SCOPE_PROFILE="$scope_profile"
+exec "$@"
+"#,
+        )?;
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700))?;
+        let output = Command::new(std::env::current_exe()?)
+            .arg("--exact")
+            .arg(SCOPED_COMMAND_TEST_NAME)
+            .env(SCOPED_COMMAND_TEST_SUBPROCESS_ENV, "1")
+            .env("CODEX_COMMAND_SCOPE_EXEC", wrapper)
+            .output()
+            .await?;
+        assert!(
+            output.status.success(),
+            "subprocess test `{SCOPED_COMMAND_TEST_NAME}` failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        return Ok(());
+    }
+
+    for shell_snapshot_v2 in [false, true] {
+        run_scoped_command_test(shell_snapshot_v2).await?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn run_scoped_command_test(shell_snapshot_v2: bool) -> Result<()> {
     let server = start_mock_server().await;
     let mut builder = test_codex()
         .with_model("gpt-5.4")
@@ -3598,29 +3620,6 @@ async fn scoped_command_wraps_the_prepared_sandbox_command_and_uses_session_home
         ..
     } = builder.build_with_auto_env(&server).await?;
     fs::create_dir_all(&config.cwd)?;
-    let wrapper = config.cwd.join("scope-wrapper");
-    fs::write(
-        &wrapper,
-        r#"#!/bin/sh
-while [ "$#" -gt 0 ]; do
-    case "$1" in
-        --thread-id) scope_thread=$2; shift 2 ;;
-        --turn-id) scope_turn=$2; shift 2 ;;
-        --call-id) scope_call=$2; shift 2 ;;
-        --profile) scope_profile=$2; shift 2 ;;
-        --) shift; break ;;
-        *) exit 64 ;;
-    esac
-done
-export SCOPE_THREAD="$scope_thread"
-export SCOPE_TURN="$scope_turn"
-export SCOPE_CALL="$scope_call"
-export SCOPE_PROFILE="$scope_profile"
-exec "$@"
-"#,
-    )?;
-    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700))?;
-    let _env = ScopedCommandEnvGuard::set(wrapper.as_os_str());
     let call_id = if shell_snapshot_v2 {
         "scoped-snapshot"
     } else {
@@ -3703,11 +3702,11 @@ exec "$@"
     assert_eq!(output.exit_code, Some(0));
     let begin_command = begin_command.expect("original command begin event");
     assert_eq!(begin_command.last().map(String::as_str), Some(command));
-    let wrapper_display = wrapper.to_string_lossy();
+    let wrapper = std::env::var("CODEX_COMMAND_SCOPE_EXEC")?;
     assert!(
         begin_command
             .iter()
-            .all(|arg| arg.as_str() != wrapper_display.as_ref()),
+            .all(|arg| arg.as_str() != wrapper.as_str()),
         "trusted launcher must stay out of policy and event argv"
     );
     Ok(())
