@@ -35,7 +35,7 @@ fn formatter_environment_excludes_credentials_and_proxy_configuration() {
 }
 
 fn invocation() -> Invocation {
-    Lifecycle::new(1)
+    Lifecycle::new(/*owner*/ 1)
         .begin(
             StatusLineCommandInput {
                 cwd: "/remote".to_string(),
@@ -100,7 +100,7 @@ async fn command_receives_json_and_returns_one_row() {
     let config = shell(
         "IFS= read -r line; case \"$line\" in *working*) printf ready;; *) exit 9;; esac",
         &[],
-        1_000,
+        /*timeout_ms*/ 1_000,
     );
     let completion = execute(config, &std::env::current_dir().expect("cwd"), invocation()).await;
     assert_eq!(
@@ -115,7 +115,7 @@ async fn command_receives_json_and_returns_one_row() {
 #[tokio::test]
 async fn timeout_and_output_overflow_fail_closed() {
     let cwd = std::env::current_dir().expect("cwd");
-    let timeout = shell("/bin/sleep 1", &[], 250);
+    let timeout = shell("/bin/sleep 1", &[], /*timeout_ms*/ 250);
     assert_eq!(
         execute(timeout, &cwd, invocation()).await.result,
         Err("formatter timed out".to_string())
@@ -123,7 +123,7 @@ async fn timeout_and_output_overflow_fail_closed() {
     let overflow = shell(
         "/usr/bin/head -c 8193 /dev/zero | /usr/bin/tr '\\0' x",
         &[],
-        1_000,
+        /*timeout_ms*/ 1_000,
     );
     assert_eq!(
         execute(overflow, &cwd, invocation()).await.result,
@@ -142,7 +142,7 @@ async fn timeout_terminates_descendants_in_the_formatter_process_group() {
             "status-line-command".to_string(),
             marker.to_string_lossy().into_owned(),
         ],
-        250,
+        /*timeout_ms*/ 250,
     );
 
     assert_eq!(

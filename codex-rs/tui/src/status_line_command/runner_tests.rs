@@ -69,7 +69,7 @@ fn completion(token: RequestToken, result: Result<&str, &str>) -> Completion {
 
 #[test]
 fn lifecycle_rejects_stale_completions_and_retains_last_good() {
-    let mut lifecycle = Lifecycle::new(7);
+    let mut lifecycle = Lifecycle::new(/*owner*/ 7);
     let now = Instant::now();
     let old = lifecycle.begin(input(), now).expect("generation");
     let mut changed = input();
@@ -93,7 +93,7 @@ fn lifecycle_rejects_stale_completions_and_retains_last_good() {
 
 #[test]
 fn failed_unchanged_input_retries_after_backoff_then_deduplicates_success() {
-    let mut lifecycle = Lifecycle::new(7);
+    let mut lifecycle = Lifecycle::new(/*owner*/ 7);
     let now = Instant::now();
     let input = input();
     let failed = lifecycle
