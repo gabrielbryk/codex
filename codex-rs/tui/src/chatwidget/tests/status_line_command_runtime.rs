@@ -144,7 +144,7 @@ async fn command_input_uses_latest_context_usage_instead_of_session_total() {
             crate::status_line_command::wire::StatusLineCommandCurrentUsage {
                 input_tokens: 175_000,
                 output_tokens: 12_000,
-                cache_creation_input_tokens: 4_000,
+                cache_creation_input_tokens: 0,
                 cache_read_input_tokens: 120_000,
             }
         )
