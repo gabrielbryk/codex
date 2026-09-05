@@ -109,6 +109,7 @@ SECTION_CONTRACTS = (
             "target HEAD, index tree, and untracked state",
             "does not prove semantic equivalence",
             "offline Cargo lock normalization",
+            "full offline Cargo metadata",
             "source-less workspace packages",
             "`workspace.package` version",
             "byte-for-byte",
@@ -782,7 +783,7 @@ def prepare_target_clone(
     lock_path = target_root / "codex-rs/Cargo.lock"
     before_lock = lock_path.read_text(encoding="utf-8")
     completed = run_capped_process(
-        ("cargo", "metadata", "--offline", "--format-version", "1", "--no-deps"),
+        ("cargo", "metadata", "--offline", "--format-version", "1"),
         target_root / "codex-rs",
         environment,
         timeout_seconds=300,
