@@ -7,8 +7,8 @@ machine-readable contract; this file is the human blast-radius ledger.
 - Target: `rust-v0.153.4` (`3d2ee51ca2d5db578f328aa75e20aa22c0197c9a`)
 - Source head: `1798ad4dd7028dc37fb264b648a084420a0251bf`
 - Source base: `rust-v0.150.1` (`90854393966b21e9ebfd21b122334eb09a20c93d`)
-- Immutable plan: `7ac49981-b347-420f-8939-807f42d2a17e`
-- Candidate: `ed586ea9-cc23-4899-9316-6acfcb94fa42`
+- Immutable plan: `9c300db0-54e1-48b7-a935-178aa551a96a`
+- Candidate: `04b626fc-1711-42ce-8832-986958d36440`
 - Model: 41 leaves — 18 rework, 23 drop/upstream/quarantine
 
 Each retained leaf below names one failure boundary, its production owner,
@@ -203,24 +203,33 @@ The Fork Fleet plan contains the complete file lists and source-commit mapping.
 
 - Owner: only the matching-turn analytics wait in
   `app-server/tests/suite/v2/guardian_v2.rs`, the MCP refresh gate held by
-  `core/src/session/turn_input_tests.rs`, the idle-turn and reusable-hook gate in
-  `core/tests/suite/hooks.rs`, the bounded rollback-after-completion retry in
-  `core/tests/suite/model_switching.rs`, the production-equivalent test timeout in
-  `ext/git-attribution/src/policy.rs`, and the grandchild completion event wait in
+  `core/src/session/turn_input_tests.rs`, the stored-permit termination release in
+  `core/src/unified_exec/mod_tests.rs`, the shared bounded rollback-after-completion
+  helper in `core/tests/common/lib.rs` and its model-switching and rollout-budget
+  call sites, the idle-turn and reusable-hook gate in `core/tests/suite/hooks.rs`,
+  the production-equivalent test timeout in `ext/git-attribution/src/policy.rs`,
+  and the grandchild completion event wait in
   `core/tests/suite/subagent_notifications.rs`.
 - Upstream: the Guardian synchronization is the exact test hunk from upstream
-  `ddf04ad26789d040f9ef6a96736f76602e35a6cc`; the other three fixture barriers use
-  existing local synchronization primitives without changing product behavior.
+  `ddf04ad26789d040f9ef6a96736f76602e35a6cc`; current upstream still has both the
+  non-permit-storing unified-exec notification and the TurnComplete-before-idle
+  rollback race. The remaining fixture barriers use existing local synchronization
+  primitives without changing product behavior.
 - Proof: focused Guardian v2 scoped-approval, accepted thread-settings input, and
   grandchild full-fork context tests plus both idle async-hook handoff variants;
-  all three model-rollback parameterizations and the auth-refresh attribution test
-  each passed cleanly in three consecutive focused runs, followed by repository formatting.
+  the unified-exec termination fixture, rollout-budget rollback fixture, all three
+  model-rollback parameterizations, and auth-refresh attribution test each passed
+  cleanly in three consecutive focused runs, followed by scoped lint and repository
+  formatting.
 - Impact/shared: test-only ordering stabilization; assertions and production logic
   are unchanged, and no broad-test failure is allowlisted or weakened.
 - Retire: drop the Guardian hunk when the target contains upstream `ddf04ad26789`;
-  drop each remaining barrier when its fixture is upstream-owned with equivalent
-  event/gate synchronization rather than transient state polling or reusable gates,
-  and drop the attribution timeout normalization when upstream tests use the production deadline.
+  drop the unified-exec release when upstream stores a notification permit, drop the
+  shared rollback helper when upstream clears active turns before terminal completion
+  is observable, drop each remaining barrier when its fixture is upstream-owned with
+  equivalent event/gate synchronization rather than transient state polling or
+  reusable gates, and drop the attribution timeout normalization when upstream tests
+  use the production deadline.
 
 ### `maintenance-generated-release-tail` — rework, final
 
