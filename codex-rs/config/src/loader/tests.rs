@@ -331,6 +331,86 @@ fn alternate_codex_home_preserves_repo_local_project_config() {
     ));
 }
 
+#[test]
+fn alternate_codex_home_isolates_default_user_config_during_layer_composition() {
+    let tmp = tempdir().expect("tempdir");
+    let home = tmp.path().join("home");
+    let default_codex_home = home.join(".codex");
+    let alternate_codex_home = home.join(".codex-uprising");
+    let project = home.join("work/project");
+    let project_dot_codex = project.join(".codex");
+    for dir in [
+        &default_codex_home,
+        &alternate_codex_home,
+        &project_dot_codex,
+        &project.join(".git"),
+    ] {
+        std::fs::create_dir_all(dir).expect("create fixture directory");
+    }
+    std::fs::write(project.join(".git/HEAD"), "ref: refs/heads/main\n")
+        .expect("write git head");
+    std::fs::write(
+        default_codex_home.join(CONFIG_TOML_FILE),
+        "default_home_only = true\nshared = \"default-home\"\n",
+    )
+    .expect("write default user config");
+    let project_key = TomlValue::String(project_trust_key(&project)).to_string();
+    std::fs::write(
+        alternate_codex_home.join(CONFIG_TOML_FILE),
+        format!(
+            "alternate_home_only = true\nshared = \"alternate-home\"\n\
+             [projects.{project_key}]\ntrust_level = \"trusted\"\n"
+        ),
+    )
+    .expect("write alternate user config");
+    std::fs::write(
+        project_dot_codex.join(CONFIG_TOML_FILE),
+        "project_only = true\nshared = \"project\"\n",
+    )
+    .expect("write project config");
+
+    let stack = AbsolutePathBufGuard::with_home_directory(&home, || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build current-thread runtime")
+            .block_on(load_config_layers_state(
+                &TestFileSystem,
+                &alternate_codex_home,
+                Some(
+                    AbsolutePathBuf::from_absolute_path(&project)
+                        .expect("absolute project path"),
+                ),
+                &[],
+                LoaderOverrides::without_managed_config_for_tests(),
+                &crate::NoopThreadConfigLoader,
+            ))
+    })
+    .expect("load alternate-home config layers");
+
+    assert_eq!(
+        stack
+            .all_layers_low_to_high()
+            .filter_map(|layer| match &layer.name {
+                ConfigLayerSource::User { file, .. } => Some(file.as_path().to_path_buf()),
+                ConfigLayerSource::Project { dot_codex_folder } => {
+                    Some(dot_codex_folder.as_path().to_path_buf())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            alternate_codex_home.join(CONFIG_TOML_FILE),
+            project_dot_codex,
+        ]
+    );
+    let effective = stack.effective_config();
+    assert_eq!(effective.get("default_home_only"), None);
+    assert_eq!(effective.get("alternate_home_only"), Some(&true.into()));
+    assert_eq!(effective.get("project_only"), Some(&true.into()));
+    assert_eq!(effective.get("shared"), Some(&"project".into()));
+}
+
 impl ExecutorFileSystem for TestFileSystem {
     fn canonicalize<'a>(
         &'a self,
