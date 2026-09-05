@@ -153,18 +153,29 @@ The Fork Fleet plan contains the complete file lists and source-commit mapping.
   `scripts/fork_fleet_validation.py` and its unit tests.
 - Proof: malformed sections, extra/missing references, spoofed markers, dependency
   order, source accounting, retained-evidence rejection, target derivation,
-  subprocess propagation, and exact Just-only formatter adjudication.
+  subprocess propagation, exact Just-only formatter adjudication, and the
+  fail-closed differential-workspace contract markers and unit cases.
 - Impact/shared: shares the two validation scripts only with target-format policy.
 - Retire: when Fork Fleet natively provides this Codex workflow/leaf audit.
 
 ### `maintenance-target-bound-format-validation` — rework
 
-- Owner: target derivation and formatter-baseline portions of the validation scripts.
+- Owner: target derivation and exact-target baseline portions of the validation scripts.
 - Proof: missing/mismatched manifest target, injected-target mismatch, history target,
-  Just-only baseline, and multiple-formatter failure tests.
+  Just-only baseline, multiple-formatter failure tests, and workspace pass-fast,
+  subset acceptance, candidate-only rejection, target setup/timeout/parse failure,
+  terminal-summary count and format rejection, output cap/redaction, per-command
+  isolation, candidate/target immutability, and multi-command continuation tests.
 - Impact/shared: updated Fork Fleet injects immutable target identity; standalone use
   independently derives history and rejects any provided mismatch. Only an unchanged
   exact-target `justfile` failure may be tolerated after all language groups pass.
+  Workspace failures are dynamically accepted only when their normalized terminal
+  nextest membership is a subset of a freshly executed exact-target result; there is
+  no static failure allowlist. Per-side Cargo outputs, logs, and the disposable clone
+  live in private disk-backed storage rather than tmpfs. Name-set equivalence is
+  classification evidence only; retained-leaf and changed-path tests still own
+  semantic proof. Emitted evidence redacts credential-bearing headers through their
+  line plus assignments, quoted JSON credentials, and sensitive environment values.
 - Retire: when Fork Fleet natively owns exact-target baseline comparison.
 
 ### `maintenance-validation-environment-fixtures` — rework
