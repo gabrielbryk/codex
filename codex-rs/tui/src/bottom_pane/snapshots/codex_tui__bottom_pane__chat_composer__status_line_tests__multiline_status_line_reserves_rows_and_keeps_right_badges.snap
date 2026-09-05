@@ -1,0 +1,10 @@
+---
+source: tui/src/bottom_pane/chat_composer_status_line_tests.rs
+expression: terminal.backend()
+---
+"                                                    "
+"› Ask Codex to do anything                          "
+"                                                    "
+"  first row is independently truncated at the termi…"
+"  second row                                        "
+"  third row is truncated … Plan mode · IDE context  "

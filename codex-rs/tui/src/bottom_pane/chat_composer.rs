@@ -263,6 +263,7 @@ use super::footer::render_context_right;
 use super::footer::render_footer_from_props;
 use super::footer::render_footer_hint_items;
 use super::footer::render_footer_line;
+use super::footer::render_footer_lines;
 use super::footer::reset_mode_after_activity;
 use super::footer::side_conversation_context_line;
 use super::footer::single_line_footer_layout;
@@ -333,6 +334,11 @@ use crate::clipboard_paste::normalize_pasted_path;
 use crate::clipboard_paste::pasted_image_format;
 use crate::history_cell;
 use crate::skills_helpers::skill_display_name;
+use crate::terminal_hyperlinks::HyperlinkLine;
+use crate::terminal_hyperlinks::mark_buffer_hyperlinks;
+use crate::terminal_hyperlinks::prefix_hyperlink_lines;
+use crate::terminal_hyperlinks::remap_hyperlinks_to_visible_line;
+use crate::terminal_hyperlinks::visible_lines;
 use crate::tui::FrameRequester;
 use crate::ui_consts::LIVE_PREFIX_COLS;
 #[cfg(test)]
@@ -664,6 +670,8 @@ impl ChatComposer {
                 goal_status_indicator: None,
                 ide_context_active: false,
                 status_line_value: None,
+                status_line_lines: Vec::new(),
+                status_line_hyperlink_lines: Vec::new(),
                 status_line_hyperlink_url: None,
                 status_line_enabled: false,
                 side_conversation_context_label: None,
@@ -3961,10 +3969,19 @@ impl ChatComposer {
         if self.draft.textarea.vim_query().is_some() || self.footer.flash_visible() {
             return Some(1);
         }
-        self.footer
+        let hint_height = self.footer
             .hint_override
             .as_ref()
-            .map(|items| if items.is_empty() { 0 } else { 1 })
+            .map(|items| if items.is_empty() { 0 } else { 1 });
+        if hint_height.is_some() {
+            return hint_height;
+        }
+        uses_passive_footer_status_layout(&self.footer_props()).then_some(
+            self.footer
+                .status_line_lines
+                .len()
+                .max(/*other*/ 1) as u16,
+        )
     }
 
     pub(crate) fn sync_popups(&mut self) {
@@ -4438,10 +4455,36 @@ impl ChatComposer {
     }
 
     pub(crate) fn set_status_line(&mut self, status_line: Option<Line<'static>>) -> bool {
-        if self.footer.status_line_value == status_line {
+        self.set_status_lines(status_line.into_iter().collect())
+    }
+
+    pub(crate) fn set_status_lines(&mut self, mut status_lines: Vec<Line<'static>>) -> bool {
+        status_lines.truncate(crate::status_line_command::parser::MAX_STATUS_LINE_COMMAND_ROWS);
+        if self.footer.status_line_lines == status_lines
+            && self.footer.status_line_hyperlink_lines.is_empty()
+        {
             return false;
         }
-        self.footer.status_line_value = status_line;
+        self.footer.status_line_value = status_lines.last().cloned();
+        self.footer.status_line_lines = status_lines;
+        self.footer.status_line_hyperlink_lines.clear();
+        true
+    }
+
+    pub(crate) fn set_status_hyperlink_lines(
+        &mut self,
+        mut status_lines: Vec<HyperlinkLine>,
+    ) -> bool {
+        status_lines.truncate(crate::status_line_command::parser::MAX_STATUS_LINE_COMMAND_ROWS);
+        let visible = visible_lines(status_lines.clone());
+        if self.footer.status_line_lines == visible
+            && self.footer.status_line_hyperlink_lines == status_lines
+        {
+            return false;
+        }
+        self.footer.status_line_value = visible.last().cloned();
+        self.footer.status_line_lines = visible;
+        self.footer.status_line_hyperlink_lines = status_lines;
         true
     }
 
@@ -4729,10 +4772,18 @@ impl ChatComposer {
                     let available_width =
                         hint_rect.width.saturating_sub(FOOTER_INDENT_COLS as u16) as usize;
                     let status_line_active = uses_passive_footer_status_layout(&footer_props);
-                    let combined_status_line = if status_line_active {
-                        passive_footer_status_line(&footer_props)
+                    let mut combined_status_lines = if status_line_active {
+                        let mut lines = self.footer.status_line_lines.clone();
+                        if let Some(last) = passive_footer_status_line(&footer_props) {
+                            if let Some(existing) = lines.last_mut() {
+                                *existing = last;
+                            } else {
+                                lines.push(last);
+                            }
+                        }
+                        lines
                     } else {
-                        None
+                        Vec::new()
                     };
                     let transition_visible = status_line_active
                         && !self.footer.flash_visible()
@@ -4742,23 +4793,30 @@ impl ChatComposer {
                             .effort_status_line_transition
                             .as_ref()
                             .is_some_and(|transition| !transition.is_finished());
-                    let combined_status_line = if transition_visible
+                    if transition_visible
                         && let Some(transition) = &self.effort_status_line_transition
                         && !transition.is_finished()
                     {
-                        transition.render_line(
-                            combined_status_line.as_ref(),
+                        let rendered = transition.render_line(
+                            combined_status_lines.last(),
                             hint_rect.width.saturating_sub(FOOTER_INDENT_COLS as u16),
-                        )
+                        );
+                        if let Some(last) = combined_status_lines.last_mut() {
+                            *last = rendered.unwrap_or_default();
+                        } else if let Some(rendered) = rendered {
+                            combined_status_lines.push(rendered);
+                        }
+                    }
+                    let mut truncated_status_lines = if status_line_active {
+                        combined_status_lines
+                            .iter()
+                            .cloned()
+                            .map(|line| {
+                                truncate_line_with_ellipsis_if_overflow(line, available_width)
+                            })
+                            .collect::<Vec<_>>()
                     } else {
-                        combined_status_line
-                    };
-                    let mut truncated_status_line = if status_line_active {
-                        combined_status_line.as_ref().map(|line| {
-                            truncate_line_with_ellipsis_if_overflow(line.clone(), available_width)
-                        })
-                    } else {
-                        None
+                        Vec::new()
                     };
                     let left_mode_indicator = if status_line_active {
                         None
@@ -4775,8 +4833,8 @@ impl ChatComposer {
                     } else if let Some(items) = active_footer_hint_override {
                         footer_hint_items_width(items)
                     } else if status_line_active {
-                        truncated_status_line
-                            .as_ref()
+                        truncated_status_lines
+                            .last()
                             .map(|line| line.width() as u16)
                             .unwrap_or(0)
                     } else {
@@ -4811,12 +4869,14 @@ impl ChatComposer {
                     if status_line_active
                         && let Some(max_left) = max_left_width_for_right(hint_rect, right_width)
                         && left_width > max_left
-                        && let Some(line) = combined_status_line.as_ref().map(|line| {
+                        && let Some(line) = combined_status_lines.last().map(|line| {
                             truncate_line_with_ellipsis_if_overflow(line.clone(), max_left as usize)
                         })
                     {
                         left_width = line.width() as u16;
-                        truncated_status_line = Some(line);
+                        if let Some(last) = truncated_status_lines.last_mut() {
+                            *last = line;
+                        }
                     }
                     let can_show_left_and_context =
                         can_show_left_with_context(hint_rect, left_width, right_width);
@@ -4861,13 +4921,26 @@ impl ChatComposer {
                             .map(|(_, show_context)| *show_context)
                             .unwrap_or(can_show_left_and_context)
                     };
+                    let truncated_status_hyperlink_lines = self
+                        .footer
+                        .status_line_hyperlink_lines
+                        .iter()
+                        .zip(&truncated_status_lines)
+                        .map(|(source, line)| {
+                            remap_hyperlinks_to_visible_line(source, line.clone())
+                        })
+                        .collect::<Vec<_>>();
 
                     if let Some((summary_left, _)) = single_line_layout {
                         match summary_left {
                             SummaryLeft::Default => {
                                 if status_line_active {
-                                    if let Some(line) = truncated_status_line.clone() {
-                                        render_footer_line(hint_rect, buf, line);
+                                    if !truncated_status_lines.is_empty() {
+                                        render_footer_lines(
+                                            hint_rect,
+                                            buf,
+                                            truncated_status_lines.clone(),
+                                        );
                                     } else {
                                         render_footer_from_props(
                                             hint_rect,
@@ -4903,8 +4976,8 @@ impl ChatComposer {
                     } else if let Some(items) = active_footer_hint_override {
                         render_footer_hint_items(hint_rect, buf, items);
                     } else if status_line_active {
-                        if let Some(line) = truncated_status_line {
-                            render_footer_line(hint_rect, buf, line);
+                        if !truncated_status_lines.is_empty() {
+                            render_footer_lines(hint_rect, buf, truncated_status_lines);
                         }
                     } else {
                         render_footer_from_props(
@@ -4919,6 +4992,15 @@ impl ChatComposer {
                     }
                     if show_right && let Some(line) = &right_line {
                         render_context_right(hint_rect, buf, line);
+                    }
+                    if transition_visible && !truncated_status_hyperlink_lines.is_empty() {
+                        let prefix: Span<'static> = " ".repeat(FOOTER_INDENT_COLS).into();
+                        let lines = prefix_hyperlink_lines(
+                            truncated_status_hyperlink_lines,
+                            prefix.clone(),
+                            prefix,
+                        );
+                        mark_buffer_hyperlinks(buf, hint_rect, &lines, /*scroll_rows*/ 0);
                     }
                     if status_line_active
                         && let Some(url) = self.footer.status_line_hyperlink_url.as_deref()
@@ -5048,6 +5130,10 @@ mod agents_navigation_tests;
 #[cfg(test)]
 #[path = "chat_composer_effort_tests.rs"]
 mod effort_tests;
+
+#[cfg(test)]
+#[path = "chat_composer_status_line_tests.rs"]
+mod status_line_tests;
 
 #[cfg(test)]
 mod tests {
