@@ -2832,6 +2832,13 @@ impl App {
                 items,
                 use_theme_colors,
             } => {
+                if self.config.tui_status_line_command.is_some() {
+                    self.chat_widget.add_error_message(
+                        "Built-in status settings were not saved because `tui.status_line_command` is configured."
+                            .to_string(),
+                    );
+                    return Ok(AppRunControl::Continue);
+                }
                 let ids = items.iter().map(ToString::to_string).collect::<Vec<_>>();
                 let items_edit = crate::legacy_core::config::edit::status_line_items_edit(&ids);
                 let colors_edit =
@@ -2873,6 +2880,17 @@ impl App {
             }
             AppEvent::StatusLineSetupCancelled => {
                 self.chat_widget.cancel_status_line_setup();
+            }
+            AppEvent::StatusLineCommandFinished(completion) => {
+                if self
+                    .chat_widget
+                    .apply_status_line_command_completion(completion)
+                {
+                    tui.frame_requester().schedule_frame();
+                }
+            }
+            AppEvent::StatusLineCommandRetry { token, input } => {
+                self.chat_widget.retry_status_line_command(token, input);
             }
             AppEvent::TerminalTitleSetup { items } => {
                 let ids = items.iter().map(ToString::to_string).collect::<Vec<_>>();

@@ -1293,6 +1293,13 @@ pub(crate) enum AppEvent {
     },
     /// Dismiss the status-line setup UI without changing config.
     StatusLineSetupCancelled,
+    /// Result of one bounded external status formatter invocation.
+    StatusLineCommandFinished(crate::status_line_command::runner::Completion),
+    /// Wake a failed formatter after its retry delay if its widget and input are still current.
+    StatusLineCommandRetry {
+        token: crate::status_line_command::runner::RequestToken,
+        input: crate::status_line_command::wire::StatusLineCommandInput,
+    },
 
     /// Apply a user-confirmed terminal-title item ordering/selection.
     TerminalTitleSetup {

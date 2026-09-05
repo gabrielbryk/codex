@@ -29,6 +29,7 @@ impl ChatWidget {
             self.pending_automatic_thread_names.clear();
             self.review.recent_auto_review_denials = RecentAutoReviewDenials::default();
             self.clear_thread_usage_state();
+            self.reset_status_line_command();
         }
         self.turn_lifecycle.reset_thread();
         self.clear_safety_buffering();

@@ -103,7 +103,12 @@ pub(super) struct CachedProjectRootName {
 
 impl ChatWidget {
     fn status_surface_selections(&self) -> StatusSurfaceSelections {
-        let (status_line_items, invalid_status_line_items) = self.status_line_items_with_invalids();
+        let (status_line_items, invalid_status_line_items) =
+            if self.config.tui_status_line_command.is_some() {
+                (Vec::new(), Vec::new())
+            } else {
+                self.status_line_items_with_invalids()
+            };
         let (terminal_title_items, invalid_terminal_title_items) =
             self.terminal_title_items_with_invalids();
         StatusSurfaceSelections {
@@ -198,6 +203,12 @@ impl ChatWidget {
     }
 
     fn refresh_status_line_from_selections(&mut self, selections: &StatusSurfaceSelections) {
+        if self.config.tui_status_line_command.is_some() {
+            self.bottom_pane.set_status_line_enabled(/*enabled*/ true);
+            self.set_status_line_hyperlink(/*url*/ None);
+            self.schedule_status_line_command();
+            return;
+        }
         let enabled = !selections.status_line_items.is_empty();
         self.bottom_pane.set_status_line_enabled(enabled);
         if !enabled {

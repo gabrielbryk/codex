@@ -1,0 +1,7 @@
+---
+source: tui/src/chatwidget/tests/status_line_command_runtime.rs
+expression: "render_bottom_popup(&chat, 80)"
+---
+› Ask Codex to do anything
+
+  external ready

@@ -63,6 +63,10 @@ impl ChatWidget {
         let active_cell = Some(Self::placeholder_session_header_cell(&config));
 
         let current_cwd = Some(config.cwd.to_path_buf());
+        let status_line_command = config
+            .tui_status_line_command
+            .as_ref()
+            .map(|_| super::status_line_command::StatusLineCommandRuntime::new());
         let effective_service_tier = crate::service_tier_resolution::effective_service_tier(
             &config,
             &header_model,
@@ -253,6 +257,7 @@ impl ChatWidget {
             next_status_line_workspace_headline_request_id: 0,
             status_line_workspace_headline_last_requested_at: None,
             status_line_workspace_messages_disabled: false,
+            status_line_command,
             thread_usage: thread_usage::ThreadUsageState::default(),
             current_goal_status_indicator: None,
             current_goal_status: None,

@@ -40,15 +40,16 @@ impl ChatWidget {
             StatusDetailsCapitalization::Preserve,
             details_max_lines,
         );
-        let title_uses_status = self
-            .config
-            .tui_terminal_title
-            .as_ref()
-            .is_some_and(|items| {
-                items
-                    .iter()
-                    .any(|item| item == "run-state" || item == "status")
-            });
+        let title_uses_status = self.config.tui_status_line_command.is_some()
+            || self
+                .config
+                .tui_terminal_title
+                .as_ref()
+                .is_some_and(|items| {
+                    items
+                        .iter()
+                        .any(|item| item == "run-state" || item == "status")
+                });
         if title_uses_status {
             self.refresh_status_surfaces();
         }
@@ -298,6 +299,14 @@ impl ChatWidget {
     }
 
     pub(super) fn open_status_line_setup(&mut self) {
+        if self.config.tui_status_line_command.is_some() {
+            self.add_info_message(
+                "An external status command is configured. Remove `tui.status_line_command` to edit built-in status items."
+                    .to_string(),
+                /*hint*/ None,
+            );
+            return;
+        }
         let configured_status_line_items = self.configured_status_line_items();
         let view = StatusLineSetupView::new(
             Some(configured_status_line_items.as_slice()),
