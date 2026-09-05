@@ -7,9 +7,9 @@ machine-readable contract; this file is the human blast-radius ledger.
 - Target: `rust-v0.153.4` (`3d2ee51ca2d5db578f328aa75e20aa22c0197c9a`)
 - Source head: `1798ad4dd7028dc37fb264b648a084420a0251bf`
 - Source base: `rust-v0.150.1` (`90854393966b21e9ebfd21b122334eb09a20c93d`)
-- Immutable plan: `9c300db0-54e1-48b7-a935-178aa551a96a`
-- Candidate: `04b626fc-1711-42ce-8832-986958d36440`
-- Model: 41 leaves — 18 rework, 23 drop/upstream/quarantine
+- Immutable plan: `33bd1e3c-4794-461f-9736-b6344c90bf61`
+- Candidate: `33c8599f-f80c-4c8e-a0aa-79146ac0c147`
+- Model: 42 leaves — 19 rework, 23 drop/upstream/quarantine
 
 Each retained leaf below names one failure boundary, its production owner,
 focused proof, compatibility/shared impact, and exact retirement condition.
@@ -230,6 +230,20 @@ The Fork Fleet plan contains the complete file lists and source-commit mapping.
   equivalent event/gate synchronization rather than transient state polling or
   reusable gates, and drop the attribution timeout normalization when upstream tests
   use the production deadline.
+
+### `maintenance-canonical-package-validation` — rework
+
+- Owner: the `release-build` action in `scripts/fork_fleet_validation.py` and
+  focused command/authority tests; the source-owned package helper remains the
+  sole package implementation.
+- Proof: validation invokes the helper with the clean full candidate SHA,
+  candidate path, explicit x86_64 GNU Linux target, durable cache/release roots,
+  and no activation or rollout flags.
+- Impact/shared: validation now builds and retains the artifact actually intended
+  for this host. Upstream's six-platform Bazel/RBE matrix is untouched and no
+  runtime link, Git ref, or running process changes.
+- Retire: when Fork Fleet natively retains the same exact-SHA canonical package
+  as candidate evidence without activation.
 
 ### `maintenance-generated-release-tail` — rework, final
 
