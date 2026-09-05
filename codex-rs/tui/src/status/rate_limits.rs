@@ -431,6 +431,7 @@ mod tests {
     fn window(used_percent: f64) -> RateLimitWindowDisplay {
         RateLimitWindowDisplay {
             used_percent,
+            resets_at_epoch_seconds: None,
             resets_at: Some("soon".to_string()),
             window_minutes: Some(300),
         }
@@ -490,11 +491,13 @@ mod tests {
             captured_at: now,
             primary: Some(RateLimitWindowDisplay {
                 used_percent: 20.0,
+                resets_at_epoch_seconds: None,
                 resets_at: Some("soon".to_string()),
                 window_minutes: Some(60),
             }),
             secondary: Some(RateLimitWindowDisplay {
                 used_percent: 40.0,
+                resets_at_epoch_seconds: None,
                 resets_at: Some("later".to_string()),
                 window_minutes: Some(2 * 60),
             }),
