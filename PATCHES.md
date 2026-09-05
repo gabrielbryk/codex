@@ -164,18 +164,25 @@ The Fork Fleet plan contains the complete file lists and source-commit mapping.
 - Proof: missing/mismatched manifest target, injected-target mismatch, history target,
   Just-only baseline, multiple-formatter failure tests, and workspace pass-fast,
   subset acceptance, candidate-only rejection, target setup/timeout/parse failure,
-  terminal-summary count and format rejection, output cap/redaction, per-command
-  isolation, candidate/target immutability, and multi-command continuation tests.
+  terminal-summary count and format rejection, streaming output cap/redaction,
+  per-command isolation, candidate/target immutability, byte-exact target lock
+  normalization acceptance and mutation rejection, locked production command argv,
+  and multi-command continuation tests.
 - Impact/shared: updated Fork Fleet injects immutable target identity; standalone use
   independently derives history and rejects any provided mismatch. Only an unchanged
   exact-target `justfile` failure may be tolerated after all language groups pass.
   Workspace failures are dynamically accepted only when their normalized terminal
   nextest membership is a subset of a freshly executed exact-target result; there is
-  no static failure allowlist. Per-side Cargo outputs, logs, and the disposable clone
-  live in private disk-backed storage rather than tmpfs. Name-set equivalence is
+  no static failure allowlist. Per-side Cargo outputs, Git diagnostics, logs, and the
+  disposable clone use private disk-backed, hard-capped storage rather than tmpfs.
+  Name-set equivalence is
   classification evidence only; retained-leaf and changed-path tests still own
   semantic proof. Emitted evidence redacts credential-bearing headers through their
   line plus assignments, quoted JSON credentials, and sensitive environment values.
+  Each fresh target clone is normalized offline only for the byte-for-byte expected
+  local `0.0.0` package version-line restamps; comments, whitespace, key order, and
+  all other drift fail closed. Both sides then run identical locked workspace-test
+  argv.
 - Retire: when Fork Fleet natively owns exact-target baseline comparison.
 
 ### `maintenance-validation-environment-fixtures` — rework
