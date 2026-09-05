@@ -1331,12 +1331,10 @@ async fn grandchild_full_fork_preserves_context_baseline(
                 .expect("descendant thread id"),
         )?;
         let thread = test.thread_manager.get_thread(thread_id).await?;
-        timeout(Duration::from_secs(/*secs*/ 10), async {
-            while !matches!(thread.agent_status().await, AgentStatus::Completed(_)) {
-                sleep(Duration::from_millis(/*millis*/ 10)).await;
-            }
+        wait_for_event(thread.as_ref(), |event| {
+            matches!(event, EventMsg::TurnComplete(_))
         })
-        .await?;
+        .await;
         descendant_requests.push(request);
     }
     let context_counts = [

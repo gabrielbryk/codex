@@ -171,6 +171,11 @@ async fn steering_does_not_wait_for_realtime_history() {
 async fn accepted_input_applies_thread_settings() {
     let (session, turn_context, _rx) = make_session_and_context_with_rx().await;
     let config = session.get_config().await;
+    let _mcp_refresh = session
+        .mcp_refresh
+        .acquire()
+        .await
+        .expect("acquire MCP refresh gate");
     handle(
         &session,
         TurnInputRequest::user_input(vec![UserInput::Text {
