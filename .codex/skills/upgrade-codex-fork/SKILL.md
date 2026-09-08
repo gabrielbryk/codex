@@ -28,6 +28,8 @@ changing Codex history or runtime state.
 Read each selected reference completely before acting:
 
 - Every `check`, `prepare`, or `ship`: [planning and reconciliation](references/planning-and-reconciliation.md)
+- Before patch review: [release-history dossier](references/release-history.md)
+- Every `improve`, and before repeating a prior upgrade: [September upgrade lessons](references/2026-09-upgrade-lessons.md)
 - Every validation or build: [validation funnel](references/validation.md)
 - Every `ship`: [shipping and cutover](references/shipping-and-cutover.md)
 - When delegation is authorized or work is long-running: [coordination and status](references/coordination-and-status.md)
@@ -64,8 +66,9 @@ Use this order and do not reopen an earlier phase without new evidence:
 3. Decide `apply`, `rework`, or `drop` for every logical patch using behavior and test evidence.
 4. Prepare and resolve conflicts only in the Fork Fleet candidate worktree.
 5. Run deterministic gates, targeted behavior tests, at most one broad canary, then final fix/fmt.
-6. In `ship`, publish with safety refs and exact leases, build the exact SHA once, and request the
-   managed natural-drain rollout.
+6. In `ship`, publish with safety refs and exact leases, build the exact SHA once, and use the
+   behaviorally verified lifecycle path. Natural drain requires the custom protocol; a native-server
+   migration is a separate host-owned plan, not an automatic fallback.
 7. Separate “engineering complete” from passive drain waiting; verify the live generation after
    the controller finishes.
 

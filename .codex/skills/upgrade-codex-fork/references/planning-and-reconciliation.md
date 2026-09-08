@@ -49,6 +49,16 @@ Interpret target intent literally:
 
 ## Logical patch decisions
 
+First generate the [release-history dossier](release-history.md). Pin the target for this run;
+a newly discovered hotfix requires an explicit retarget decision, an endpoint delta, and a fresh
+immutable plan, not a restart of all evidence collection. Reuse unaffected patch-family evidence
+with its original provenance, but do not claim old-SHA validation proves the new candidate.
+
+Before replay, record the publication destination and authority separately from the upstream fetch
+remote. A prepare-only registry ceiling or missing fork write destination is an early shipping
+blocker, not a reason to discover the problem after a release build. Do not silently change policy.
+Record the installed host lifecycle contract and every in-scope Codex home/client generation too.
+
 For every active patch, inspect `maintenance_class`, `required_symbols`, `required_tests`,
 `conflict_hotspots`, and `upstream_references`. Record exactly one decision:
 
@@ -59,6 +69,12 @@ For every active patch, inspect `maintenance_class`, `required_symbols`, `requir
 Similar symbols, nearby refactors, or a clean cherry-pick are not supersession proof. Compare
 observable behavior, failure handling, configuration/API compatibility, and tests. When only part
 of a patch is superseded, rework the surviving intent rather than dropping the logical patch.
+
+`rework` is not permission to replay historical commits and resolve conflicts until they compile.
+Before preparation, require a target-native design, retained invariant, test mapping, and bounded
+implementation stages for each reworked family. Test upstream's replacement first where possible.
+If a dropped patch supplies an API used by the host router/controller, either retain that contract
+or record an authorized host migration as a release dependency. Do not discover this at activation.
 
 Have Luna populate the helper-generated patch-evidence/template artifact with facts for every patch:
 patch ID and source commit, exact symbols/files/tests, upstream equivalent or absence, behavior and
@@ -103,6 +119,10 @@ forkctl candidate continue <candidate-id>
 forkctl candidate show <candidate-id> --json
 forkctl logs show <candidate-id> --json
 ```
+
+Never follow Git's generic `git cherry-pick --continue` hint inside a coordinator-owned candidate.
+Stage the reviewed resolution, then use `forkctl candidate continue`. A persisted/worktree SHA
+mismatch is a coordinator-state defect, not a test-environment failure; preserve it and stop replay.
 
 If reviewed reconciliation adds commits after the candidate was ready, use the exact-SHA
 `candidate finalize` compare-and-swap and rerun only validation invalidated by that finalization.

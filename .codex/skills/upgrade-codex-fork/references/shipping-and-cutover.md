@@ -33,6 +33,16 @@ authorized stronger reviewer.
 
 ## Preflight and build once
 
+Choose the lifecycle path before building. The commands below using `--rollout`, drain RPCs, and
+router generations apply only to a candidate that implements the custom natural-drain contract.
+The September 0.153.4 candidate dropped that contract; upstream-native reconnect does not restore
+it. For native-server ownership, inspect the host source repository's lifecycle instructions and
+plan migration there. Never resurrect unsafe fork lifecycle patches simply to satisfy an old helper.
+
+Probe the exact candidate executable in isolated state: initialization capabilities, required RPCs,
+generation environment handling, and truthful writer release. Grepping strings, caches, or package
+directories is not behavioral proof. Failure blocks activation, not permission for a hard cutover.
+
 Inspect active turns and rollout state before building:
 
 ```bash
@@ -99,3 +109,21 @@ lifecycle states; never kill clients or routers without separate explicit author
 Only after publication succeeds, propose registry mappings with
 `forkctl registry update --proposal`. Archive the candidate only after package, safety refs,
 maintained branch, and registry evidence are durable.
+
+## Completion across profiles and generations
+
+Track source publication, selected package, running app-server, and running TUI clients separately.
+Record exact source/package identity, not only semver: custom builds can share the same version.
+For every explicitly in-scope Codex home, resolve socket ownership, executable, process ancestry,
+service owner, active turns, loaded threads, and old clients. One primary-home check cannot prove
+another profile migrated. Use generic host-owned service templates, not account-specific fork code.
+
+An already-running TUI does not upgrade when `current` changes. Preserve active turns and drafts;
+client exit/relaunch or disruptive migration needs appropriate authority. Do not kill a shared scope
+to retire one daemon. Verify exact old-process retirement and recovery after any authorized cutover.
+
+For reconnect acceptance, use an isolated persisted thread and test-owned server: wait for completed
+bootstrap, submit one known message, retain a separate unsent draft, interrupt only the test server,
+restart it on the same socket, and assert reattachment plus draft retention and exactly one recorded
+message/turn start. An empty-thread or transport-only smoke is insufficient. Do not use production
+credentials or disrupt live clients for this test; use fixture-ready signals rather than sleep guesses.

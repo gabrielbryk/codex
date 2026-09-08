@@ -16,6 +16,13 @@ Before a long command:
    names, and a short error excerpt to the terminal/model.
 5. Do not run concurrent Cargo, Bazel, Clippy, or package builds against the same cache or host.
 
+Inspect the registered gate's actual expansion before scheduling it. Upstream's six-platform Bazel
+release matrix is not a valid local Linux packaging gate when it requires remote execution or
+Windows SDK libraries. Do not create zlib/BLAKE3 product patches to satisfy an irrelevant gate.
+Changing registered validation requires a reviewed plan; never silently omit a required gate.
+Use a focused test/debug profile for iteration and the canonical optimized package once at the end.
+Record toolchain, target, profile, and features alongside cache identity.
+
 Use the installed repo-owned workflow helper for one bounded preflight JSON written outside the
 managed checkout:
 
@@ -158,6 +165,13 @@ required target/baseline evidence.
 - Never restart a completed validation phase while the package is only waiting for natural drain.
 
 ## Compact evidence
+
+Fixture preflight must check inherited terminal/runtime environment, per-test lock/state isolation,
+and whether localhost probes can reach mock listeners. Reject unrelated non-WebSocket handshakes
+without terminating the server; expose mock-task errors immediately. Split long reconnect cases
+under runner deadlines and avoid equality assertions at an exact wall-clock deadline. Never update
+snapshots merely to accommodate inherited `TERM`/`TMUX` differences. Run fixtures from a clean
+reviewed source snapshot so unrelated dirty host-tool changes do not contaminate the result.
 
 For each gate record: exact command, candidate SHA, duration, pass/fail/skip counts, failed names,
 classification, baseline comparison when performed, and artifact path. Never paste all passing
