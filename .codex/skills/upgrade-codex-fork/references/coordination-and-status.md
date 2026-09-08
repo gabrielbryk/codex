@@ -4,32 +4,17 @@ Use this playbook when the user authorizes delegation or the upgrade contains lo
 
 ## Delegation and model routing
 
-Use cheap-first delegation. Luna is the default for every safely separable mechanical or evidence
-task:
-
-- inventory, searches, commit mapping, and patch evidence collection;
-- enumerate and fix a complete static-lint finding set;
-- update snapshots or generated artifacts after intent is established;
-- audit disjoint logical patches for exact symbols, tests, or upstream equivalents;
-- make repetitive call-site migrations with explicit file ownership;
-- classify logs, collect structured status, and perform other bounded, deterministic checks.
-
-Use Terra for one bounded semantic conflict, narrow-test diagnosis, or review of a Luna result when
-the evidence does not settle the behavior. Reserve Sol/frontier for high-risk ambiguity: partial
-upstream supersession, cross-cutting architecture conflicts, ambiguous regression classification,
-release/publish/cutover decisions, and final safety adjudication. Keep semantic conflict resolution,
-partial-supersession decisions, release classification, and final ship authority with the primary
-agent unless explicitly escalated.
-
-Escalate only when a concrete evidence-backed uncertainty remains after a Luna attempt, when the
-decision can drop preserved fork behavior, corrupt history, publish the wrong SHA, or interrupt the
-runtime, or when independent evidence conflicts. Do not escalate merely because a task is long;
-split it into smaller mechanical units first. Deterministic checks and tests should verify mechanical
-work instead of spending frontier tokens on review. The coordinator owns the heavy-command queue:
+Run deterministic collection through scripts first: dossier, template, next, metrics, and bounded
+log extraction. Do not create an agent for work those commands already perform. Delegate only when
+there is a concrete semantic uncertainty, independent review value, or useful disjoint implementation.
+Give the agent the affected family packet and precise question, not a complete transcript or diff.
+Choose the least costly adequate model; escalate only with an evidence-backed reason. Keep release
+authority and ambiguous safety decisions with the primary agent. A long task alone is not a reason
+to escalate or fan out. The coordinator owns the heavy-command queue:
 agents may prepare commands and inspect results, but Cargo, Bazel, Clippy, full-test, and package
 builds run serially through that queue.
 
-Use at most 2–4 concurrent Luna lanes, each with disjoint file ownership, while reserving capacity
+Use at most 2–4 justified lanes, each with disjoint file ownership, while reserving capacity
 for coordination. Every delegated editing, review, or testing prompt must include:
 
 - the exact candidate path and recorded HEAD;
@@ -63,13 +48,13 @@ Use a strict phase barrier for candidate work:
 1. **Edit:** run only disjoint writer lanes. The coordinator does not start a heavy gate.
 2. **Join:** wait for every agent with candidate write authority to finish. Do not send an editor a
    follow-up that can write while a gate is running.
-3. **Review and stage:** inspect all returned diffs, remove superseded attempts, and stage only the
-   intended candidate state. No unstaged or untracked source files may remain.
-4. **Freeze:** record candidate HEAD and index tree, and mark all writer lanes inactive.
+3. **Review and seal:** inspect returned diffs, commit only intended changes, and continue/finalize
+   through Fork Fleet. No staged, unstaged, or untracked source files may remain.
+4. **Freeze:** record the coordinator SHA and mark all writer lanes inactive.
 5. **Gate:** the coordinator starts one serialized command. Read-only evidence agents may continue,
    but nothing else may write anywhere in the candidate, including disjoint files.
-6. **Capture:** after the command exits, verify the same HEAD/index tree and absence of unstaged or
-   untracked source changes before accepting the result.
+6. **Capture:** the source-bound gate verifies source/plan/tool inputs and stores a receipt; only an
+   authoritative receipt may advance `next`. Review failures rather than accepting process exit alone.
 
 A mutating formatter, fixer, or generator is itself the sole writer during step 5. Review and stage
 its output, then establish a new frozen snapshot before the next read-only gate.
@@ -87,7 +72,7 @@ Maintain one compact ledger and update it only when state changes:
 Target: <ref> @ <sha>
 Patches: <decided>/<total> (<apply>/<rework>/<drop>)
 Candidate: <id> @ <sha> (<clean|dirty>)
-Candidate snapshot: <HEAD + index tree, or unfrozen>
+Candidate snapshot: <committed coordinator SHA + verified receipt, or unfrozen>
 Writer lanes: <active count and owners, or joined>
 Current gate: <exact gate and progress>
 Real blockers: <candidate regressions only>

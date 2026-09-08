@@ -1,179 +1,76 @@
-# Validation Funnel
+# Validation funnel
 
-The purpose of validation is to find candidate regressions, not to make every host-dependent test
-green. Move from cheap deterministic evidence to expensive broad evidence exactly once.
+Find candidate regressions with the smallest authoritative gate. Read the
+[enforced helper workflow](enforced-workflow.md) before execution; its source-owned operational
+contract defines plan fields, committed-source receipts, automatic reuse, and phase prerequisites.
 
-## Preflight
+## Before expensive commands
 
-Before a long command:
+Inspect the actual registered command expansion, executable, cwd, timeout, toolchain, target,
+profile/features, external inputs, and host requirements. Upstream's six-platform Bazel release
+matrix is not a local Linux package gate when it needs remote execution or Windows SDK libraries.
+Do not invent zlib/BLAKE3 patches to satisfy an irrelevant gate. A change to registered validation
+requires a reviewed plan; helper receipts do not silently replace `forkctl validate` evidence.
 
-1. Verify its executable, cwd, required environment, target triple, output path, and timeout.
-2. Confirm every writer lane has joined and the candidate is still at the recorded HEAD. Review and
-   stage every intended change; require no unstaged or untracked source files.
-3. Isolate mutable `HOME`, `TMPDIR`, sockets, and test state when required, but reuse persistent
-   Cargo, Bazel, V8/download, and package build caches keyed by toolchain/candidate.
-4. Direct the complete raw log to a bounded artifact. Print only duration, totals, failed test
-   names, and a short error excerpt to the terminal/model.
-5. Do not run concurrent Cargo, Bazel, Clippy, or package builds against the same cache or host.
+Isolate mutable homes, sockets, temp paths, and locks while reusing persistent dependency/build
+caches. Never put build caches or cloned repositories on tmpfs. Declare external gate inputs and
+environment so receipt reuse is sound; ignored files and remote services are not automatically
+fingerprinted. Tool versions are checked from the actual gate cwd.
 
-Inspect the registered gate's actual expansion before scheduling it. Upstream's six-platform Bazel
-release matrix is not a valid local Linux packaging gate when it requires remote execution or
-Windows SDK libraries. Do not create zlib/BLAKE3 product patches to satisfy an irrelevant gate.
-Changing registered validation requires a reviewed plan; never silently omit a required gate.
-Use a focused test/debug profile for iteration and the canonical optimized package once at the end.
-Record toolchain, target, profile, and features alongside cache identity.
+Join every writer, review and commit intended source, and seal the candidate through Fork Fleet.
+Require no staged, unstaged, or untracked files. Source-bound gates enforce this under the existing
+heavy lock and verify source/plan/tool inputs afterward. A pass whose inputs changed is diagnostic
+only. Do not edit even disjoint candidate files while a gate runs.
 
-Use the installed repo-owned workflow helper for one bounded preflight JSON written outside the
-managed checkout:
+## Gate order and reuse
 
-```bash
-codex-upgrade-workflow preflight \
-  --repo /mnt/wd-black/ClonedRepos/codex \
-  --fork-id codex > <run-dir>/preflight.json
-```
+1. Deterministic checks: schemas/lockfiles when affected, `git diff --check`, complete argument-comment
+   lint, and other required static checks. Batch all mechanical findings from one bounded artifact.
+2. Targeted tests: derive crate/behavior coverage from the dossier and retained invariants. Use the
+   repo's `just test` contract and a focused test/debug profile, not release LTO for iteration.
+3. At most one approved broad canary: discover new failure classes, not universal host health. The
+   complete Rust suite requires repository-mandated user approval.
+4. Required fix/fmt: a sole-writer ordinary `gate` with no reusable phase receipt. Review, commit,
+   and finalize its changes. Follow repository test-order rules; do not rerun tests solely because
+   fix/fmt ran, and never relabel pre-format proof as a pass on a different SHA. If source changed,
+   retain the old proof with provenance and resolve required exact-SHA validation explicitly.
+5. Behavioral compatibility: actual isolated protocol/env/writer probes, with freshly written,
+   source-bound JSON proof. Markers in binary strings or build caches are insufficient.
+6. Canonical package once: use the exact-SHA builder and verify its actual manifest/checksums.
+   No second Bazel release build unless the reviewed registry explicitly requires it.
 
-The result contains bounded repository/worktree/stash, package, runtime, registry, plan, patch
-template, and stable source-plan/runtime fingerprints. Treat a missing, stale, or contradictory
-result as a preflight failure. Preflight may inspect state, but must not mutate the candidate,
-acquire the heavy lock, or start a gate.
-
-The coordinator owns every heavy gate (Cargo, Bazel, Clippy, full test, package build, or other
-resource-intensive command) through this form:
-
-```bash
-codex-upgrade-workflow gate \
-  --run-dir <run-dir> \
-  --cwd <candidate-worktree> \
-  --timeout <seconds> \
-  -- <executable> <literal-args...>
-```
-
-The helper holds the host-wide lock through completion and result capture, writes a capped private
-redacted log, and emits a compact outcome plus `inputFingerprint`. That fingerprint covers the gate
-invocation (cwd, argv, selected environment, timeout, and log limit); it does **not** prove that the
-candidate source stayed unchanged.
-
-Before a read-only gate, record the candidate HEAD and staged index tree after reviewing all edits.
-Require no unstaged or untracked source files, then freeze the candidate until the result is
-captured. After the gate, verify the same HEAD/index tree and the same absence of unstaged or
-untracked source files. Pair this candidate snapshot with the helper's invocation fingerprint in the
-checkpoint. A delegated agent may prepare the command or inspect its bounded artifact, but may not
-start a competing heavy gate. Read-only analysis may continue; no agent or command may edit any
-candidate file, even one outside the crate under test.
-
-From the candidate worktree, the minimal snapshot evidence is:
-
-```bash
-git rev-parse HEAD
-git write-tree
-git diff --quiet
-git ls-files --others --exclude-standard
-```
-
-The last command must print nothing. Record the first two values, run the final two checks again
-after the gate, and compare the HEAD/tree values exactly. Do not use a blind `git add -A` to make
-these checks pass; review every intended file before staging it.
-
-For a formatter, fixer, generator, or other intentionally mutating gate, the command must be the
-candidate's sole writer. Its pre-command snapshot is invalidated by design: review and stage its
-output and record a new frozen snapshot before accepting any later read-only gate.
-
-If source changes during a read-only gate, let the command finish rather than killing a Rust build,
-record the candidate-input drift in the gate note, and do not count its pass or failure as
-authoritative. Once all writers have joined, rerun only the affected narrow gate on the frozen
-candidate. Do not restart a broad canary merely because its input drifted.
-
-## Gate order
-
-1. **Deterministic repository gates**
-   - generated schema and lockfile consistency when affected;
-   - `git diff --check`;
-   - argument-comment lint, captured completely in one invocation;
-   - other registered static checks that do not execute the product.
-2. **Targeted behavior tests**
-   - derive affected crates and maintained fork behaviors from the target diff and patch metadata;
-   - run the specific crate/test commands required by Codex `AGENTS.md`;
-   - retain integration/snapshot coverage for changed user-visible behavior.
-3. **One broad canary at most**
-   - run only when required by reviewed validation or explicitly approved under `AGENTS.md`;
-   - its job is to discover new failure classes, not establish universal host health.
-4. **Final lint/fmt**
-   - run scoped `just fix -p <project>` or the shared equivalent required by `AGENTS.md`;
-   - run final `just fmt` automatically;
-   - do not rerun tests solely because fix/fmt ran.
-5. **Release artifact**
-   - use the canonical exact-SHA package builder once;
-   - do not add a redundant Bazel release build unless the reviewed registry requires it.
-
-Batch every mechanical lint finding from the first complete artifact. When delegation is authorized,
-give that complete set to one Luna agent with disjoint file ownership; do not discover and repair
-one truncated batch per full lint invocation.
-
-For patch reconciliation, use `patchDecisionEvidence` and `patchDecisionTemplate` from the preflight
-artifact. Have Luna fill observable facts, exact file/symbol/test references, behavior comparisons,
-and uncertainty. The primary agent (or a deliberately stronger reviewer) adjudicates only ambiguous
-`apply`/`rework`/`drop` cases, partial supersession, or conflicting evidence. Do not spend a stronger
-model on mechanically complete evidence or deterministic lint repairs.
+Use `next` to select an eligible gate, then `gate --plan <workflow.json> --gate-id <id>` with its exact
+declared command. Matching successful receipts are reused. Source or relevant input changes
+invalidate proof; session resumption, passive drain, and downstream-only plan edits do not.
+Broad/package attempts cannot be repeated on unchanged source within the run. Do not rename gates
+or start another run to evade that bound. A failed narrow retry requires a classification supplied
+with `--rerun-reason`, not merely “try again.”
 
 ## Failure classification
 
-Classify each failure before changing code:
-
 | Class | Evidence | Action |
 | --- | --- | --- |
-| Candidate regression | Repeatable narrow failure, absent at target/baseline, on a changed behavior path | Fix candidate and rerun the narrow gate |
-| Upstream regression | Same narrow failure on the exact target in the same isolated environment | Record; block only if it violates a required fork behavior |
-| Test-isolation defect | Product request is confused with probes, shared listeners/state, fixed ports, or leaked environment | Harden the owned fixture once and prove repeated narrow passes |
-| Host/environment failure | Sandbox, localhost watcher, temp path, resource pressure, or timing; failure membership drifts | Record `validation-environment-failure`; do not patch product logic |
-| Flake | Same unchanged narrow test alternates pass/fail without target-specific difference | Record retry evidence; do not restart the broad suite |
+| Candidate regression | Repeatable narrow failure absent on exact target in equivalent environment | Fix candidate; rerun affected narrow gate |
+| Upstream regression | Same narrow failure on target | Record; block only if required behavior is violated |
+| Test-isolation defect | Probe traffic, shared locks/state, leaked environment, fixed ports | Fix the owned fixture and prove narrow behavior |
+| Host/environment | Sandbox/resource/timing issue or drifting failure membership | Record; do not patch product logic |
+| Flake | Unchanged narrow test alternates outcomes without target-specific difference | Record retry evidence; do not restart broad suite |
 
-For a repeatable suspicious failure, compare the exact narrow test against the target/baseline once.
-Do not run a second complete suite to obtain that comparison.
+Compare a suspicious narrow failure with the exact target once, not with another complete suite.
+Use `compare-failures --before <artifact> --after <artifact>` to classify bounded broad failure sets.
+If membership drifts, stop broad retries immediately. An unchanged membership result alone does
+not authorize another broad run. Do not kill an in-flight Rust build by PID; let its bounded command
+finish for diagnostic/cache value, then resolve the actual blocker.
 
-After a broad canary, compare its bounded failure membership with the prior recorded set:
+Fixture checks: isolate terminal/runtime environment and locks; tolerate unrelated localhost
+handshakes without terminating a mock server; surface mock-task failures promptly. Split long
+reconnect cases under runner deadlines and avoid exact wall-clock equality assertions. Do not
+accept new snapshots just to accommodate inherited `TERM`/`TMUX`. Test from reviewed source so
+unrelated dirty host-tool changes cannot contaminate results.
 
-```bash
-codex-upgrade-workflow compare-failures \
-  --before <previous-failure-set> \
-  --after <current-failure-set> \
-  [--repeat <additional-recorded-set>] > <run-dir>/failure-comparison.json
-```
+## Evidence at handoff
 
-The comparison must normalize test names and classify added, removed, and unchanged failures. If
-material membership drift is detected, record `validation-environment-failure`, stop broad reruns,
-and continue only with narrow reproductions that can distinguish candidate behavior from host
-instability. The helper must not turn drift into a retry loop or declare a regression without the
-required target/baseline evidence.
-
-## Hard stop rules
-
-- Do not start a read-only gate while any agent retains candidate write authority or while the
-  candidate has unreviewed, unstaged, or untracked source changes.
-- Do not dispatch or follow up candidate-writing work until the current read-only gate result and
-  post-gate snapshot are captured.
-- Never run more than one broad canary for an unchanged candidate SHA.
-- A broad rerun requires both a candidate change relevant to a deterministic prior failure and a
-  reviewed reason that targeted tests cannot cover it.
-- If two existing broad results have materially different failure membership, classify the broad
-  environment as unstable immediately. Continue only with narrow reproductions.
-- If targeted maintained-path tests pass and remaining failures are classified upstream,
-  environmental, or flaky, they are not cutover blockers.
-- Do not rewrite production code to satisfy a host probe, nested sandbox limitation, fixed socket,
-  or timing-sensitive fixture.
-- Do not keep a large run alive merely to increase the pass count after its remaining failures are
-  already classified.
-- Never restart a completed validation phase while the package is only waiting for natural drain.
-
-## Compact evidence
-
-Fixture preflight must check inherited terminal/runtime environment, per-test lock/state isolation,
-and whether localhost probes can reach mock listeners. Reject unrelated non-WebSocket handshakes
-without terminating the server; expose mock-task errors immediately. Split long reconnect cases
-under runner deadlines and avoid equality assertions at an exact wall-clock deadline. Never update
-snapshots merely to accommodate inherited `TERM`/`TMUX` differences. Run fixtures from a clean
-reviewed source snapshot so unrelated dirty host-tool changes do not contaminate the result.
-
-For each gate record: exact command, candidate SHA, duration, pass/fail/skip counts, failed names,
-classification, baseline comparison when performed, and artifact path. Never paste all passing
-test lines or an entire JSON status payload into agent context. Poll long-running commands using a
-small progress summary, not an ever-growing tail.
+Link receipts and bounded logs; report duration, totals, failed names, classification, and baseline
+comparison when needed. Do not stream passing tests or repeated JSON into context. Preserve
+partial/unfinished attempts in metrics. After a valid package, waiting for authorized rollout or
+fresh runtime proof never justifies rebuilding or repeating validation.

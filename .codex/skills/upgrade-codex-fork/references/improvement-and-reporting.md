@@ -21,11 +21,14 @@ only when its SHA, fingerprint, and required artifacts still match; legacy check
 fingerprint are evidence but are never reusable. Otherwise invalidate and rerun only that phase.
 Never repeat a completed gate solely because the session resumed or the report was reopened.
 
-Persist compact delegation records with `--delegation <model> <task> <outcome>`; checkpoints carry
-their evidence paths. Route routine inventory, mechanical edits, lint batches, generated artifacts,
-and bounded evidence collection to the cheap subagent by default. Escalate only for semantic
-ambiguity, cross-cutting conflicts, release classification, or safety/cutover authority, and record
-why in the bounded task/outcome text.
+Persist justified delegation with `--delegation <model> <task> <outcome>`; record the uncertainty and
+bounded evidence path. Scripts own routine collection. Do not delegate a dossier or inventory that
+the helper already computes. Escalate only for concrete semantic ambiguity or safety adjudication.
+
+Source-bound `gate --plan --gate-id` receipts are the reuse authority; older report checkpoints are
+historical context unless independently matched by the helper. Run `metrics` at handoff and record
+its bounded artifact: duplicates, reuse, invalidation, unfinished attempts, elapsed gate time, review
+reuse, and explicitly recorded abandoned work. Preserve unknown token cost without request evidence.
 
 Reports expose machine-readable `engineeringState` and `rolloutState` separately. Engineering may
 be `pending`, `running`, `ready`, `blocked`, `failed`, or `complete`; rollout may be
@@ -71,6 +74,7 @@ improve run separately, and resume the active upgrade afterward.
 For the normal terminal improvement pass:
 
 1. Read the terminal report, bounded candidate logs, transcript summary, and exact failed command.
+   Read historical postmortems only for the matching failure; they are not required upgrade context.
 2. Classify each issue with an allowed friction code and distinguish deterministic tooling defects
    from external state or one-off operator mistakes.
 3. Change source only when a regression test reproduces a deterministic defect or the same friction

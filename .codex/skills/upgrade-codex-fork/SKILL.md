@@ -1,105 +1,69 @@
 ---
 name: upgrade-codex-fork
-description: Safely check, prepare, ship, or improve Gabe's local OpenAI Codex fork upgrade workflow with Fork Fleet. Use for syncing /mnt/wd-black/ClonedRepos/codex to upstream/main or a rust-v release, validating the logical patch stack, preparing an isolated candidate, building an exact-SHA canonical package, performing an explicitly authorized runtime cutover, or improving this process from recorded friction.
+description: Check, prepare, ship, or improve Gabe's Codex fork using Fork Fleet, incremental Git evidence, source-bound validation receipts, and explicit runtime authority.
 ---
 
 # Upgrade Codex Fork
 
-Use Fork Fleet as the authority for patch intent and isolated candidates. Never rebase the active
-Codex checkout in place, infer the stack from a target-dependent merge base, or edit installed skill
-caches. This repo-local directory is the durable skill source. Fork Fleet owns the external
-installer, package helper, and report writer under `libs/fork-fleet` in the Worklens repository.
+This skill coordinates; deterministic helpers collect evidence and enforce gate eligibility. Fork
+Fleet owns registry intent and candidates. This directory owns Codex-specific instructions; Worklens
+`libs/fork-fleet/ops/codex` owns helpers. Never edit installed caches or rebase the maintained checkout.
 
-## Select One Mode
+## Mode and authority
 
-Announce the mode and why before commands:
+Announce one mode: `check` (read-only), `prepare` (isolated candidate and approved validation),
+`ship` (only explicitly authorized publication/install/cutover), or `improve` (source-owned process
+changes). “Upgrade” alone means prepare, not ship. No mode raises registry authority or permits
+interrupting active work without explicit authorization. “No PR” means direct repository commits.
 
-- `check`: read-only preservation, target, patch, and release-distance evidence.
-- `prepare`: `check` plus one isolated reviewed candidate and required validation. This is the
-  default when an upgrade request does not authorize publication or cutover.
-- `ship`: only after explicit publish, install, activate, deploy, or cutover authority.
-- `improve`: post-run, evidence-gated changes to source-owned workflow or documentation.
+Before acting, read the complete applicable root/more-specific `AGENTS.md`. Read playbooks only
+when entering their phase, completely once selected:
 
-“Update” or “upgrade” alone does not authorize `ship`. Improving the workflow does not authorize
-changing Codex history or runtime state.
+- Planning: [planning and reconciliation](references/planning-and-reconciliation.md).
+- Patch evidence: [release-history dossier](references/release-history.md).
+- Prepare/ship execution: [enforced helper workflow](references/enforced-workflow.md).
+- Tests/builds: [validation funnel](references/validation.md).
+- Shipping: [shipping and cutover](references/shipping-and-cutover.md).
+- Delegation/long-running work: [coordination and status](references/coordination-and-status.md).
+- Reports/improve: [improvement and reporting](references/improvement-and-reporting.md).
 
-## Read the Relevant Playbooks
+Historical postmortems are reference material for a matching failure or improve task, not mandatory
+context for every upgrade. Start from current receipts, not full transcripts.
 
-Read each selected reference completely before acting:
+## One run, one next action
 
-- Every `check`, `prepare`, or `ship`: [planning and reconciliation](references/planning-and-reconciliation.md)
-- Before patch review: [release-history dossier](references/release-history.md)
-- Every `improve`, and before repeating a prior upgrade: [September upgrade lessons](references/2026-09-upgrade-lessons.md)
-- Every validation or build: [validation funnel](references/validation.md)
-- Every `ship`: [shipping and cutover](references/shipping-and-cutover.md)
-- When delegation is authorized or work is long-running: [coordination and status](references/coordination-and-status.md)
-- Every run report and every `improve`: [improvement and reporting](references/improvement-and-reporting.md)
+Before mutation create a durable report with `codex-upgrade-report --mode <mode> --status running
+--repo <source-repo>`; retain its run directory across resumes. Then:
 
-Repository `AGENTS.md` remains authoritative for Codex code style and test ordering. Before any
-mutation, delegation, validation, or build, read the complete root `AGENTS.md` from the candidate
-worktree plus any more-specific `AGENTS.md` governing touched paths. Do not assume a delegated
-agent inherits that policy; put the requirement and exact candidate path in every editing or testing
-prompt.
+1. Preserve and inventory using one bounded `codex-upgrade-workflow preflight`. Resolve the explicit
+   source base, pinned target, publication destination/authority, and installed lifecycle contract.
+2. Generate `dossier` from the immutable Fork Fleet plan. On retarget use `--previous`; retain valid
+   family evidence, not old-SHA test claims. Generate an unapproved `template` for the evidence plan.
+3. Review every family's invariant/test mapping and apply/rework/drop decision. Rework requires
+   target-native implementation stages. Dropped host APIs require a host-owned migration plan.
+4. Run `codex-upgrade-workflow next --run-dir <run> --plan <workflow.json>`. Address its precise
+   blocker or execute its eligible action. Candidate mutations still use Fork Fleet; never raw
+   `git cherry-pick --continue`. Record the actual coordinator SHA after continue/finalize.
+5. Run eligible read-only gates with `gate --plan <workflow.json> --gate-id <id>`. Require committed,
+   clean source and no writers. Successful matching receipts are reused automatically. Ordinary
+   unbound gates are for sole-writer formatting/fixing and never count as reusable phase proof.
+6. Keep validation, behavioral compatibility, and one canonical package build separate. Inspect
+   actual gate expansion/host prerequisites before any expensive command. Full Rust suites require
+   repo-mandated approval; never repeat broad suites for drifting environmental failures.
+7. In ship, verify publication, selected artifact, every scoped live server, and existing clients
+   separately. Refresh stale runtime proof without rebuilding. Preserve drafts and active turns.
 
-## Start a Durable Run
+The helper is an evidence boundary, not permission to execute external actions. Its JSON checks
+cannot establish the truth of an arbitrary probe script; review probe behavior and source ownership.
+Missing helpers or receipts are blockers, not reasons to substitute memory or disable enforcement.
 
-Before mutation, create one report and retain its run ID:
+## Keep the coordinator small
 
-```bash
-codex-upgrade-report \
-  --mode <check|prepare|ship|improve> \
-  --status running \
-  --repo /mnt/wd-black/ClonedRepos/codex
-```
+Use scripts for inventory, diffs, logs, and mechanical collection. Delegate only a bounded unresolved
+semantic question or genuinely useful disjoint implementation; include paths, authority, and a small
+evidence packet, not full histories. No blanket agent fan-out. Serialize heavy gates and join writers.
 
-Update that same report at terminal boundaries. Keep raw logs in bounded artifacts, not in the
-report or model context.
-
-## Execution Contract
-
-Use this order and do not reopen an earlier phase without new evidence:
-
-1. Preserve and inventory every checkout, ref, stash, installed package, and active runtime.
-   Use `codex-upgrade-workflow preflight` to capture one bounded artifact.
-2. Resolve and verify the exact requested target; explicit stable requests override prerelease
-   registry defaults.
-3. Decide `apply`, `rework`, or `drop` for every logical patch using behavior and test evidence.
-4. Prepare and resolve conflicts only in the Fork Fleet candidate worktree.
-5. Run deterministic gates, targeted behavior tests, at most one broad canary, then final fix/fmt.
-6. In `ship`, publish with safety refs and exact leases, build the exact SHA once, and use the
-   behaviorally verified lifecycle path. Natural drain requires the custom protocol; a native-server
-   migration is a separate host-owned plan, not an automatic fallback.
-7. Separate “engineering complete” from passive drain waiting; verify the live generation after
-   the controller finishes.
-
-## Non-Negotiable Efficiency Rules
-
-- Do not run the complete Rust suite without the repository-required user approval.
-- Never repeat a broad suite merely because its failure set changed. Follow the validation
-  classification and stop rules in the linked playbook.
-- Capture complete lint output once, batch all mechanical repairs, then rerun the lint once.
-- Reuse persistent Cargo/Bazel/download caches while isolating mutable runtime state.
-- Serialize heavy Rust/Bazel/package builds; parallelize only independent analysis and mechanical
-  edits with disjoint ownership between gates.
-- Join every writer lane, review and stage its intended changes, and freeze the candidate before a
-  read-only heavy gate. No candidate edits, even to disjoint files, may overlap that gate. A
-  formatter, fixer, or generator that writes the candidate must be the only writer.
-- Delegate every safely separable mechanical or evidence task to Luna by default. Use Terra only for
-  bounded semantic uncertainty and Sol/frontier only for high-risk ambiguity or release safety.
-- Run every heavy gate through `codex-upgrade-workflow gate`; compare broad failure membership with
-  `codex-upgrade-workflow compare-failures` before considering a rerun.
-- Treat the gate helper's `inputFingerprint` as an invocation fingerprint, not a source snapshot.
-  Record and compare the candidate HEAD/index tree before and after every gate; invalidate results
-  whose candidate input changed while the command ran.
-- On resume, reuse a completed checkpoint only when its exact SHA, input fingerprint, and artifact
-  still match. Session restart alone never invalidates a gate.
-- Load only summaries and novel failures into agent context. Do not stream passing-test output.
-- The canonical exact-SHA package build is the release build unless reviewed registry validation
-  explicitly requires another build system.
-- Never rebuild or retest while a valid package is merely waiting for natural drain.
-
-## Finish
-
-Report mode/run path, source/base/target/candidate SHAs, patch decisions, compact gate outcomes,
-safety refs, package/source markers, live generation state, preserved dirty worktrees, and only real
-remaining blockers. For a waiting rollout, report the exact drain state and no engineering ETA.
+Finish with commit/run/artifact links, compact results, separate engineering/runtime states, and
+real remaining blockers. Include `metrics` counts for executed/reused/invalidated/duplicate gates,
+review reuse, and recorded abandoned work. Token cost is unknown without authoritative request data;
+never add cached input to total input or sum cumulative transcript counters.

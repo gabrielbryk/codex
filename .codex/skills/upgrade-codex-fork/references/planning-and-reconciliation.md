@@ -76,12 +76,11 @@ implementation stages for each reworked family. Test upstream's replacement firs
 If a dropped patch supplies an API used by the host router/controller, either retain that contract
 or record an authorized host migration as a release dependency. Do not discover this at activation.
 
-Have Luna populate the helper-generated patch-evidence/template artifact with facts for every patch:
-patch ID and source commit, exact symbols/files/tests, upstream equivalent or absence, behavior and
-failure-handling comparison, expected conflicts, and uncertainty. Luna returns compact evidence and
-bounded artifact links, not a final decision. The primary agent or a stronger reviewer adjudicates
-only ambiguous `apply`/`rework`/`drop` cases, partial supersession, and contradictory evidence.
-Deterministic evidence collection and mechanical template completion stay on the cheap agent path.
+Generate dossier families and the unapproved workflow template from the immutable Fork Fleet plan.
+Scripts own commit/path/test metadata collection. Delegate only an unresolved behavior comparison
+or useful independent review, using the affected family packet. The coordinator adjudicates
+apply/rework/drop and records retained invariants, tests, host consumers, and evidence. Do not spend
+agents recollecting deterministic metadata or reproducing the same broad review after retargeting.
 
 Produce a compact decision table before replay: patch ID, decision, upstream evidence, fork intent
 remaining, expected conflicts, required validation, and adjudicator. Every source commit must map
@@ -107,8 +106,8 @@ Use the workflow helper's coordinator-owned heavy-gate lock for every expensive 
 primary agent schedules and records those gates. Delegated agents may analyze bounded results at
 any time and may make disjoint mechanical edits only during an explicit edit phase; they must not
 launch competing Cargo, Bazel, Clippy, full-test, or package commands. Before a gate, join every
-writer lane, review and stage the intended edits, record the candidate snapshot, and freeze the
-candidate until the result is captured. After finalization changes the candidate SHA, invalidate
+writer lane, review and commit intended edits, seal through Fork Fleet, and use source-bound
+`gate --plan --gate-id` on the clean committed candidate. After finalization changes the SHA, invalidate
 only gates that depend on that SHA and regenerate the relevant bounded evidence; do not rerun
 unrelated gates.
 

@@ -1,8 +1,14 @@
 # Release-history dossier
 
-Generate once per pinned target; save bounded artifacts in the upgrade run directory. Git narrows
-review; it does not replace behavior tests. These commands are read-only after fetching and pinning
-refs in the planning preflight. Resolve each placeholder to a verified commit first:
+Generate once per pinned target with `codex-upgrade-workflow dossier`; see the
+[enforced helper workflow](enforced-workflow.md) for the source-owned command contract. Use
+`--fleet-plan` to derive families from reviewed registry intent, `--previous` on retarget, and
+`--candidate` for the final range-diff. The helper saves bounded artifacts and prints counts, not
+the full diff. Template generation is deterministic and grants no authority.
+
+Git narrows review; it does not replace behavior tests. The commands below explain dossier evidence
+and are for targeted investigation, not a second inventory every run. They are read-only after
+fetching and pinning refs in preflight. Resolve placeholders to verified commits first:
 
 ```bash
 git rev-parse 'refs/tags/<old-stable>^{commit}'

@@ -55,13 +55,13 @@ cache, rollout controller, expected markers, and destination before starting the
 The source-owned wrapper exports `CODEX_REPO_ROOT` from `--repo`; callers must not need an ambient
 variable for the canonical builder.
 
-Build and request natural drain in one exact-SHA operation from the candidate worktree:
+Build the exact SHA once as the eligible package gate, without activation. Supply the custom
+protocol markers only for a candidate that implements that contract:
 
 ```bash
 codex-use-local-build \
   --repo <candidate-worktree> \
   --sha <candidate-sha> \
-  --rollout \
   --expect 'server/drain/start' \
   --expect 'threadWriterLeaseV1' \
   --expect '<feature-marker>'
@@ -69,8 +69,14 @@ codex-use-local-build \
 
 The helper uses Codex's canonical optimized package builder, immutable provenance variables,
 persistent caches, pre/post SHA and cleanliness checks, package metadata/checksums, and atomic
-promotion. It never restarts or signals an active process. The exact-SHA package build is
+package publication. Without `--activate` or `--rollout`, it leaves the current runtime selection
+unchanged. It never restarts or signals an active process. The exact-SHA package build is
 authoritative; a second release build is not extra proof unless registered validation requires it.
+
+After behavioral compatibility and separate activation authority, request the already-built package
+through the host-owned controller. Do not rerun the builder merely to request rollout. Record
+publication/artifact/server/client observations separately in the workflow plan; `next` validates
+their identity and completeness, but it does not execute or authorize external actions.
 
 ## Natural drain
 

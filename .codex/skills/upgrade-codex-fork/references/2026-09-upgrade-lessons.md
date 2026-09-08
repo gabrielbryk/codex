@@ -44,8 +44,12 @@ Exact audited root files:
 Many efficiency rules already existed: serialized gates, frozen source, narrow failure classification,
 one broad canary, cached builds, compact output, and checkpoint reuse. Their existence did not
 prevent the failures. The coordinator must record the required evidence before advancing, rather
-than merely rereading the rules after a failure. This documentation does not claim new automated
-enforcement. An unresolved registry/publication blocker must be named early with the exact missing
+than merely rereading the rules after a failure. The initial documentation pass added no automated
+enforcement. The subsequent implementation adds dossier/template generation, phase eligibility,
+source-bound receipts/reuse, attempt limits, and regression scenarios through the
+[enforced helper workflow](enforced-workflow.md). Semantic review and external observations still
+require truthful evidence; the helper does not grant authority. An unresolved registry/publication
+blocker must be named early with the exact missing
 choice; repeated “proceed” should not trigger the same expensive inventory or build again.
 
 ## Next-run acceptance contract
