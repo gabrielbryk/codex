@@ -195,6 +195,7 @@ fn update_loop_uses_hidden_app_server_subcommand() {
         pid_file: "updater.pid".into(),
         lock_file: "updater.pid.lock".into(),
         command_kind: PidCommandKind::UpdateLoop,
+        socket_path: None,
     };
 
     assert_eq!(
@@ -214,6 +215,26 @@ fn app_server_remote_control_uses_runtime_flag() {
     assert_eq!(
         backend.command_args(),
         vec!["app-server", "--remote-control", "--listen", "unix://"]
+    );
+}
+
+#[test]
+fn app_server_uses_requested_private_socket() {
+    let backend = PidBackend::new(
+        "codex".into(),
+        "app-server.pid".into(),
+        /*remote_control_enabled*/ true,
+    )
+    .with_socket_path("/var/run/codex/native-daemon.sock".into());
+
+    assert_eq!(
+        backend.command_args(),
+        vec![
+            "app-server",
+            "--remote-control",
+            "--listen",
+            "unix:///var/run/codex/native-daemon.sock",
+        ]
     );
 }
 

@@ -19,6 +19,7 @@ pub(crate) struct BackendPaths {
     pub(crate) pid_file: PathBuf,
     pub(crate) update_pid_file: PathBuf,
     pub(crate) remote_control_enabled: bool,
+    pub(crate) socket_path: PathBuf,
 }
 
 pub(crate) fn pid_backend(paths: BackendPaths) -> PidBackend {
@@ -27,6 +28,7 @@ pub(crate) fn pid_backend(paths: BackendPaths) -> PidBackend {
         paths.pid_file,
         paths.remote_control_enabled,
     )
+    .with_socket_path(paths.socket_path)
 }
 
 pub(crate) fn pid_update_loop_backend(paths: BackendPaths) -> PidBackend {

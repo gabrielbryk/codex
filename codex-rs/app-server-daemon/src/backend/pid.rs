@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::io::SeekFrom;
 use std::path::Path;
 use std::path::PathBuf;
@@ -32,6 +33,7 @@ pub(crate) struct PidBackend {
     pid_file: PathBuf,
     lock_file: PathBuf,
     command_kind: PidCommandKind,
+    socket_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,7 +86,13 @@ impl PidBackend {
             command_kind: PidCommandKind::AppServer {
                 remote_control_enabled,
             },
+            socket_path: None,
         }
+    }
+
+    pub(crate) fn with_socket_path(mut self, socket_path: PathBuf) -> Self {
+        self.socket_path = Some(socket_path);
+        self
     }
 
     pub(crate) fn new_update_loop(codex_bin: PathBuf, pid_file: PathBuf) -> Self {
@@ -94,6 +102,7 @@ impl PidBackend {
             pid_file,
             lock_file,
             command_kind: PidCommandKind::UpdateLoop,
+            socket_path: None,
         }
     }
 
@@ -410,15 +419,36 @@ impl PidBackend {
     }
 
     #[cfg(unix)]
-    fn command_args(&self) -> Vec<&'static str> {
+    fn command_args(&self) -> Vec<OsString> {
         match self.command_kind {
             PidCommandKind::AppServer {
                 remote_control_enabled: true,
-            } => vec!["app-server", "--remote-control", "--listen", "unix://"],
+            } => vec![
+                "app-server".into(),
+                "--remote-control".into(),
+                "--listen".into(),
+                self.listen_address(),
+            ],
             PidCommandKind::AppServer {
                 remote_control_enabled: false,
-            } => vec!["app-server", "--listen", "unix://"],
-            PidCommandKind::UpdateLoop => vec!["app-server", "daemon", "pid-update-loop"],
+            } => vec![
+                "app-server".into(),
+                "--listen".into(),
+                self.listen_address(),
+            ],
+            PidCommandKind::UpdateLoop => vec![
+                "app-server".into(),
+                "daemon".into(),
+                "pid-update-loop".into(),
+            ],
+        }
+    }
+
+    #[cfg(unix)]
+    fn listen_address(&self) -> OsString {
+        match self.socket_path.as_ref() {
+            Some(socket_path) => format!("unix://{}", socket_path.display()).into(),
+            None => "unix://".into(),
         }
     }
 
