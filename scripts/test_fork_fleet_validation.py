@@ -2,11 +2,11 @@
 """Focused tests for the no-side-effect Fork Fleet workflow contract audit."""
 
 import importlib.util
-from pathlib import Path
+import json
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
-
 
 SCRIPT = Path(__file__).with_name("fork_fleet_validation.py")
 SPEC = importlib.util.spec_from_file_location("fork_fleet_validation", SCRIPT)
@@ -33,6 +33,30 @@ class UpgradeWorkflowAuditTest(unittest.TestCase):
             "sourceCommitOrder": [patch["commitShas"][0] for patch in patches],
             "patches": patches,
         }
+
+    def representative_plan(self) -> dict[str, object]:
+        plan = self.workflow_plan()
+        patches = plan["patches"]
+        for leaf in patches:
+            leaf["dependsOn"] = []
+        patches[0]["patchId"] = "oauth-token-store-transaction"
+        patches[0]["commitShas"] = []
+        patches[1]["patchId"] = "oauth-reactive-authorization-retry"
+        patches[1]["commitShas"] = []
+        patches[1]["dependsOn"] = ["oauth-token-store-transaction"]
+        patches[2]["dependsOn"] = ["oauth-reactive-authorization-retry"]
+        patches[32]["patchId"] = "canonical-package"
+        patches[32]["dependsOn"] = ["workflow-contract"]
+        patches[37]["patchId"] = "workflow-contract"
+        patches[37]["dependsOn"] = ["repo-workflow"]
+        patches[41]["patchId"] = "repo-workflow"
+        patches[41]["commitShas"] = []
+        plan["sourceCommitOrder"] = [
+            commit_sha
+            for patch in patches
+            for commit_sha in patch["commitShas"]
+        ]
+        return plan
 
     def write_repo(self, root: Path, test_plan: dict[str, object]) -> None:
         skill = root / ".codex/skills/upgrade-codex-fork"
@@ -186,11 +210,37 @@ class UpgradeWorkflowAuditTest(unittest.TestCase):
     def test_rejects_dependency_out_of_order(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            test_plan = self.workflow_plan()
+            test_plan = self.representative_plan()
             self.write_repo(root, test_plan)
-            test_plan["patches"][0]["dependsOn"] = ["leaf-01"]
-            with self.assertRaisesRegex(SystemExit, "dependency is not ordered"):
+            test_plan["patches"][41]["dependsOn"] = ["canonical-package"]
+            with self.assertRaisesRegex(SystemExit, "dependency cycle"):
                 validation.validate_upgrade_workflow_contract(root, test_plan)
+
+    def test_accepts_source_free_leaves_and_non_topological_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            test_plan = self.representative_plan()
+            self.write_repo(root, test_plan)
+            validation.validate_upgrade_workflow_contract(root, test_plan)
+
+    def test_audit_cli_reads_explicit_immutable_plan_without_subprocess(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            test_plan = self.representative_plan()
+            self.write_repo(root, test_plan)
+            plan_path = root / "fleet-plan.json"
+            plan_path.write_text(json.dumps({"data": test_plan}))
+            with (
+                patch.object(validation, "REPO_ROOT", root),
+                patch.object(
+                    validation.sys,
+                    "argv",
+                    [str(SCRIPT), "upgrade-workflow-audit", str(plan_path)],
+                ),
+                patch.object(validation.subprocess, "run") as run,
+            ):
+                validation.main()
+            run.assert_not_called()
 
 
 if __name__ == "__main__":

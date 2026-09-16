@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run registered Fork Fleet validation with a bounded local toolchain environment."""
 
+import json
 import os
 import platform
 import re
@@ -8,11 +9,11 @@ import stat
 import subprocess
 import sys
 import tempfile
-import tomllib
 from collections.abc import Mapping
-from typing import Any
 from pathlib import Path
+from typing import Any
 
+import tomllib
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CODEX_RS = REPO_ROOT / "codex-rs"
@@ -27,6 +28,22 @@ CANONICAL_REFERENCES = (
     "improvement-and-reporting.md",
 )
 EXPECTED_PATCH_COUNT = 42
+
+
+def load_immutable_plan(path: Path) -> Mapping[str, Any]:
+    """Load a Fork Fleet immutable plan object or its versioned output envelope."""
+    try:
+        payload = json.loads(path.read_text())
+    except OSError as error:
+        raise SystemExit(f"workflow test plan cannot be read: {path}") from error
+    except json.JSONDecodeError as error:
+        raise SystemExit(f"workflow test plan is invalid JSON: {path}") from error
+    if not isinstance(payload, Mapping):
+        raise SystemExit("workflow test plan has invalid root")
+    data = payload.get("data", payload)
+    if not isinstance(data, Mapping):
+        raise SystemExit("workflow test plan has invalid data envelope")
+    return data
 
 
 def validate_test_plan(manifest_text: str, test_plan: Mapping[str, Any]) -> None:
@@ -61,8 +78,8 @@ def validate_test_plan(manifest_text: str, test_plan: Mapping[str, Any]) -> None
         dependencies = patch.get("dependsOn", [])
         if not isinstance(patch_id, str) or not patch_id:
             raise SystemExit("workflow test plan has leaf without patchId")
-        if not isinstance(commit_shas, list) or not commit_shas:
-            raise SystemExit(f"workflow test plan leaf {patch_id} has no source commits")
+        if not isinstance(commit_shas, list):
+            raise SystemExit(f"workflow test plan leaf {patch_id} has invalid source commits")
         if not isinstance(dependencies, list) or not all(
             isinstance(dependency, str) for dependency in dependencies
         ):
@@ -86,20 +103,30 @@ def validate_test_plan(manifest_text: str, test_plan: Mapping[str, Any]) -> None
         raise SystemExit("workflow test plan has duplicate leaf ownership")
     if owned_commits != set(source_commit_order):
         raise SystemExit("workflow test plan source commits are not owned exactly once")
-    positions = {patch_id: position for position, patch_id in enumerate(plan_ids)}
-    for position, patch_id in enumerate(plan_ids):
-        for dependency in dependencies_by_patch[patch_id]:
-            dependency_position = positions.get(dependency)
-            if dependency_position is None:
+    for patch_id, dependencies in dependencies_by_patch.items():
+        for dependency in dependencies:
+            if dependency not in dependencies_by_patch:
                 raise SystemExit(
                     f"workflow test plan leaf {patch_id} has unknown dependency: "
                     f"{dependency}"
                 )
-            if dependency_position >= position:
-                raise SystemExit(
-                    f"workflow test plan dependency is not ordered before "
-                    f"{patch_id}: {dependency}"
-                )
+
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(patch_id: str) -> None:
+        if patch_id in visited:
+            return
+        if patch_id in visiting:
+            raise SystemExit(f"workflow test plan has dependency cycle at: {patch_id}")
+        visiting.add(patch_id)
+        for dependency in dependencies_by_patch[patch_id]:
+            visit(dependency)
+        visiting.remove(patch_id)
+        visited.add(patch_id)
+
+    for patch_id in plan_ids:
+        visit(patch_id)
 
     manifest_target = re.search(
         r"Current upstream target:.*?([0-9a-f]{40})", manifest_text, re.DOTALL
@@ -107,7 +134,7 @@ def validate_test_plan(manifest_text: str, test_plan: Mapping[str, Any]) -> None
     if manifest_target is None or manifest_target.group(1) != target_sha:
         raise SystemExit("fork patch manifest target does not match workflow test plan")
     manifest_ids = extract_manifest_patch_ids(manifest_text)
-    if manifest_ids != plan_ids:
+    if set(manifest_ids) != set(plan_ids):
         raise SystemExit("fork patch manifest leaves do not match workflow test plan")
 
 
@@ -229,8 +256,10 @@ def rusty_v8_environment(real_home: Path) -> dict[str, str]:
 
 
 def main() -> None:
-    if len(sys.argv) == 2 and sys.argv[1] == "upgrade-workflow-audit":
-        validate_upgrade_workflow_contract(REPO_ROOT)
+    if len(sys.argv) == 3 and sys.argv[1] == "upgrade-workflow-audit":
+        validate_upgrade_workflow_contract(
+            REPO_ROOT, load_immutable_plan(Path(sys.argv[2]).resolve())
+        )
         return
     if len(sys.argv) == 2 and sys.argv[1] == "upgrade-workflow-tests":
         run_upgrade_workflow_tests()
@@ -244,7 +273,7 @@ def main() -> None:
         raise SystemExit(f"Fork Fleet just executable is missing: {fork_fleet_just}")
 
     actions = {
-        "upgrade-workflow-audit": [],
+        "upgrade-workflow-audit <immutable-plan-path>": [],
         "upgrade-workflow-tests": [],
         "format": [(REPO_ROOT, [str(fork_fleet_just), "fmt-check"])],
         "locked-metadata": [
