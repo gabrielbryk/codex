@@ -14,6 +14,93 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CODEX_RS = REPO_ROOT / "codex-rs"
 
+CANONICAL_REFERENCES = (
+    "planning-and-reconciliation.md",
+    "release-history.md",
+    "enforced-workflow.md",
+    "validation.md",
+    "shipping-and-cutover.md",
+)
+
+
+def validate_upgrade_workflow_contract(repo_root: Path) -> None:
+    """Reject a malformed repository-owned upgrade workflow before expensive gates."""
+    skill = repo_root / ".codex/skills/upgrade-codex-fork/SKILL.md"
+    manifest = repo_root / "PATCHES.md"
+    missing = [str(path) for path in (skill, manifest) if not path.is_file()]
+    if missing:
+        raise SystemExit(f"upgrade workflow contract is missing: {', '.join(missing)}")
+
+    skill_text = skill.read_text()
+    markers = (
+        "name: upgrade-codex-fork",
+        "Fleet owns registry intent and candidates.",
+        "Never edit installed caches or rebase the maintained checkout.",
+        "## One run, one next action",
+    )
+    missing_markers = [marker for marker in markers if marker not in skill_text]
+    if missing_markers:
+        raise SystemExit(
+            "upgrade workflow skill is missing required markers: "
+            + ", ".join(missing_markers)
+        )
+
+    references = skill.parent / "references"
+    missing_references = [
+        name for name in CANONICAL_REFERENCES if not (references / name).is_file()
+    ]
+    if missing_references:
+        raise SystemExit(
+            "upgrade workflow is missing canonical references: "
+            + ", ".join(missing_references)
+        )
+
+    manifest_text = manifest.read_text()
+    manifest_markers = (
+        "# Fork patch manifest",
+        "Fork Fleet owns the logical patch mapping;",
+        "Current upstream target:",
+        "## Maintained logical patches",
+        "## Per-upgrade verification",
+        "scripts/fork_fleet_validation.py",
+    )
+    missing_manifest_markers = [
+        marker for marker in manifest_markers if marker not in manifest_text
+    ]
+    if missing_manifest_markers:
+        raise SystemExit(
+            "fork patch manifest is missing required evidence: "
+            + ", ".join(missing_manifest_markers)
+        )
+
+    patch_ids = []
+    for line in manifest_text.splitlines():
+        if not line.startswith("| `"):
+            continue
+        cells = [cell.strip() for cell in line.split("|")]
+        if len(cells) < 5 or not cells[1].startswith("`") or not cells[1].endswith("`"):
+            continue
+        patch_ids.append(cells[1][1:-1])
+        if cells[3] not in {"apply", "rework", "drop"} or not cells[4]:
+            raise SystemExit(f"fork patch manifest has incomplete patch evidence: {cells[1]}")
+    if not patch_ids:
+        raise SystemExit("fork patch manifest has no maintained patches")
+    duplicate_ids = sorted({patch_id for patch_id in patch_ids if patch_ids.count(patch_id) > 1})
+    if duplicate_ids:
+        raise SystemExit(
+            "fork patch manifest has duplicate patch ownership: " + ", ".join(duplicate_ids)
+        )
+
+
+def run_upgrade_workflow_tests() -> None:
+    completed = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts/test_fork_fleet_validation.py")],
+        cwd=REPO_ROOT,
+        check=False,
+    )
+    if completed.returncode:
+        raise SystemExit(completed.returncode)
+
 
 def rusty_v8_environment(real_home: Path) -> dict[str, str]:
     with (CODEX_RS / "Cargo.lock").open("rb") as lock_file:
@@ -37,6 +124,13 @@ def rusty_v8_environment(real_home: Path) -> dict[str, str]:
 
 
 def main() -> None:
+    if len(sys.argv) == 2 and sys.argv[1] == "upgrade-workflow-audit":
+        validate_upgrade_workflow_contract(REPO_ROOT)
+        return
+    if len(sys.argv) == 2 and sys.argv[1] == "upgrade-workflow-tests":
+        run_upgrade_workflow_tests()
+        return
+
     real_home = Path.home()
     fork_fleet_just = (
         real_home / ".local/share/fork-fleet/toolchains/just-1.51.0/bin/just"
@@ -45,6 +139,8 @@ def main() -> None:
         raise SystemExit(f"Fork Fleet just executable is missing: {fork_fleet_just}")
 
     actions = {
+        "upgrade-workflow-audit": [],
+        "upgrade-workflow-tests": [],
         "format": [(REPO_ROOT, [str(fork_fleet_just), "fmt-check"])],
         "locked-metadata": [
             (
