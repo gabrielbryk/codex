@@ -3,11 +3,14 @@
 
 import os
 import platform
+import re
 import stat
 import subprocess
 import sys
 import tempfile
 import tomllib
+from collections.abc import Mapping
+from typing import Any
 from pathlib import Path
 
 
@@ -20,10 +23,112 @@ CANONICAL_REFERENCES = (
     "enforced-workflow.md",
     "validation.md",
     "shipping-and-cutover.md",
+    "coordination-and-status.md",
+    "improvement-and-reporting.md",
 )
+EXPECTED_PATCH_COUNT = 42
 
 
-def validate_upgrade_workflow_contract(repo_root: Path) -> None:
+def validate_test_plan(manifest_text: str, test_plan: Mapping[str, Any]) -> None:
+    """Validate a supplied immutable-plan fixture without reading or spawning external tools."""
+    target_sha = test_plan.get("targetSha")
+    patches = test_plan.get("patches")
+    source_commit_order = test_plan.get("sourceCommitOrder")
+    if not isinstance(target_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", target_sha):
+        raise SystemExit("workflow test plan has invalid target SHA")
+    if not isinstance(patches, list) or len(patches) != EXPECTED_PATCH_COUNT:
+        raise SystemExit(
+            f"workflow test plan must contain exactly {EXPECTED_PATCH_COUNT} leaves"
+        )
+    if not isinstance(source_commit_order, list) or not source_commit_order:
+        raise SystemExit("workflow test plan has no source commit order")
+    if not all(
+        isinstance(commit_sha, str) and re.fullmatch(r"[0-9a-f]{40}", commit_sha)
+        for commit_sha in source_commit_order
+    ):
+        raise SystemExit("workflow test plan has invalid source commit order")
+    if len(set(source_commit_order)) != len(source_commit_order):
+        raise SystemExit("workflow test plan has duplicate source commit order")
+
+    plan_ids: list[str] = []
+    dependencies_by_patch: dict[str, list[str]] = {}
+    owned_commits: set[str] = set()
+    for patch in patches:
+        if not isinstance(patch, Mapping):
+            raise SystemExit("workflow test plan has invalid leaf")
+        patch_id = patch.get("patchId")
+        commit_shas = patch.get("commitShas")
+        dependencies = patch.get("dependsOn", [])
+        if not isinstance(patch_id, str) or not patch_id:
+            raise SystemExit("workflow test plan has leaf without patchId")
+        if not isinstance(commit_shas, list) or not commit_shas:
+            raise SystemExit(f"workflow test plan leaf {patch_id} has no source commits")
+        if not isinstance(dependencies, list) or not all(
+            isinstance(dependency, str) for dependency in dependencies
+        ):
+            raise SystemExit(f"workflow test plan leaf {patch_id} has invalid dependencies")
+        for commit_sha in commit_shas:
+            if not isinstance(commit_sha, str) or not re.fullmatch(
+                r"[0-9a-f]{40}", commit_sha
+            ):
+                raise SystemExit(
+                    f"workflow test plan leaf {patch_id} has invalid source commit"
+                )
+            if commit_sha in owned_commits:
+                raise SystemExit(
+                    f"workflow test plan has duplicate source commit ownership: {commit_sha}"
+                )
+            owned_commits.add(commit_sha)
+        plan_ids.append(patch_id)
+        dependencies_by_patch[patch_id] = dependencies
+
+    if len(set(plan_ids)) != len(plan_ids):
+        raise SystemExit("workflow test plan has duplicate leaf ownership")
+    if owned_commits != set(source_commit_order):
+        raise SystemExit("workflow test plan source commits are not owned exactly once")
+    positions = {patch_id: position for position, patch_id in enumerate(plan_ids)}
+    for position, patch_id in enumerate(plan_ids):
+        for dependency in dependencies_by_patch[patch_id]:
+            dependency_position = positions.get(dependency)
+            if dependency_position is None:
+                raise SystemExit(
+                    f"workflow test plan leaf {patch_id} has unknown dependency: "
+                    f"{dependency}"
+                )
+            if dependency_position >= position:
+                raise SystemExit(
+                    f"workflow test plan dependency is not ordered before "
+                    f"{patch_id}: {dependency}"
+                )
+
+    manifest_target = re.search(
+        r"Current upstream target:.*?([0-9a-f]{40})", manifest_text, re.DOTALL
+    )
+    if manifest_target is None or manifest_target.group(1) != target_sha:
+        raise SystemExit("fork patch manifest target does not match workflow test plan")
+    manifest_ids = extract_manifest_patch_ids(manifest_text)
+    if manifest_ids != plan_ids:
+        raise SystemExit("fork patch manifest leaves do not match workflow test plan")
+
+
+def extract_manifest_patch_ids(manifest_text: str) -> list[str]:
+    """Extract logical-patch IDs from the manifest's decision table."""
+    patch_ids = []
+    for line in manifest_text.splitlines():
+        if not line.startswith("| `"):
+            continue
+        cells = [cell.strip() for cell in line.split("|")]
+        if len(cells) < 5 or not cells[1].startswith("`") or not cells[1].endswith("`"):
+            continue
+        patch_ids.append(cells[1][1:-1])
+        if cells[3] not in {"apply", "rework", "drop"} or not cells[4]:
+            raise SystemExit(f"fork patch manifest has incomplete patch evidence: {cells[1]}")
+    return patch_ids
+
+
+def validate_upgrade_workflow_contract(
+    repo_root: Path, test_plan: Mapping[str, Any] | None = None
+) -> None:
     """Reject a malformed repository-owned upgrade workflow before expensive gates."""
     skill = repo_root / ".codex/skills/upgrade-codex-fork/SKILL.md"
     manifest = repo_root / "PATCHES.md"
@@ -54,6 +159,13 @@ def validate_upgrade_workflow_contract(repo_root: Path) -> None:
             "upgrade workflow is missing canonical references: "
             + ", ".join(missing_references)
         )
+    canonical_links = re.findall(
+        r"\[[^]]+\]\(references/([^)]+)\)", skill_text
+    )
+    if canonical_links != list(CANONICAL_REFERENCES):
+        raise SystemExit(
+            "upgrade workflow canonical reference links do not match required order"
+        )
 
     manifest_text = manifest.read_text()
     manifest_markers = (
@@ -73,16 +185,7 @@ def validate_upgrade_workflow_contract(repo_root: Path) -> None:
             + ", ".join(missing_manifest_markers)
         )
 
-    patch_ids = []
-    for line in manifest_text.splitlines():
-        if not line.startswith("| `"):
-            continue
-        cells = [cell.strip() for cell in line.split("|")]
-        if len(cells) < 5 or not cells[1].startswith("`") or not cells[1].endswith("`"):
-            continue
-        patch_ids.append(cells[1][1:-1])
-        if cells[3] not in {"apply", "rework", "drop"} or not cells[4]:
-            raise SystemExit(f"fork patch manifest has incomplete patch evidence: {cells[1]}")
+    patch_ids = extract_manifest_patch_ids(manifest_text)
     if not patch_ids:
         raise SystemExit("fork patch manifest has no maintained patches")
     duplicate_ids = sorted({patch_id for patch_id in patch_ids if patch_ids.count(patch_id) > 1})
@@ -90,6 +193,8 @@ def validate_upgrade_workflow_contract(repo_root: Path) -> None:
         raise SystemExit(
             "fork patch manifest has duplicate patch ownership: " + ", ".join(duplicate_ids)
         )
+    if test_plan is not None:
+        validate_test_plan(manifest_text, test_plan)
 
 
 def run_upgrade_workflow_tests() -> None:
