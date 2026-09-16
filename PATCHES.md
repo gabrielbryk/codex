@@ -259,6 +259,21 @@ The Fork Fleet plan contains the complete file lists and source-commit mapping.
 - Retire: when Fork Fleet natively retains the same exact-SHA canonical package
   as candidate evidence without activation.
 
+### `runtime-daemon-socket-selection` — rework
+
+- Owner: `codex-rs/app-server-daemon/src/lib.rs`; the host-owned attribution
+  proxy and native daemon units consume the environment contract.
+- Proof: focused path-resolution tests cover the canonical default, an absolute
+  private-socket override, and rejection of a relative override. The release
+  artifact must additionally start an isolated daemon with
+  `CODEX_APP_SERVER_SOCKET` and prove that it binds only the requested socket.
+- Impact/shared: `CODEX_APP_SERVER_SOCKET` selects the Unix socket used by the
+  stock daemon lifecycle. It does not restore generation identity, drain RPCs,
+  writer leases, routing, or any other behavior from the dropped legacy
+  handover lifecycle.
+- Retire: when upstream exposes an equivalent absolute private-socket selection
+  contract used by the host attribution boundary.
+
 ### `maintenance-generated-release-tail` — rework, final
 
 - Owner: only `PATCHES.md`, regenerated `codex-rs/Cargo.lock`, and regenerated
@@ -277,9 +292,11 @@ The remaining 23 leaves are evidence, not candidate code:
 - Upstream owns legacy turn/reconnect recovery, agent-gone wait failure, contained
   PTY behavior, and server-request ownership.
 - Compaction epochs, orphan-output persistence, retaining-kind eviction, steer
-  retry, UDS rendezvous, daemon identity, stored-child resume, handover lifecycle,
-  and legacy telemetry were dropped after concrete ordering, race, security,
-  compatibility, or ownership failures.
+  retry, UDS rendezvous, daemon identity, stored-child resume, the legacy
+  generation/drain handover lifecycle, and legacy telemetry were dropped after
+  concrete ordering, race, security, compatibility, or ownership failures. The
+  independent daemon socket-selection seam is retained above without that
+  lifecycle.
 - The mixed OAuth source patch is quarantined; unsafe token transaction/reactive
   retry stay deferred, while only the provider-scoped Slack adapter survives.
 - The broad 4.3k-line external-status source patch is quarantined behind six

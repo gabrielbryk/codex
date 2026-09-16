@@ -34,6 +34,7 @@ const UPDATE_PID_FILE_NAME: &str = "app-server-updater.pid";
 const OPERATION_LOCK_FILE_NAME: &str = "daemon.lock";
 const SETTINGS_FILE_NAME: &str = "settings.json";
 const STATE_DIR_NAME: &str = "app-server-daemon";
+const SOCKET_ENV_VAR: &str = "CODEX_APP_SERVER_SOCKET";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LifecycleCommand {
@@ -263,9 +264,8 @@ struct Daemon {
 impl Daemon {
     fn from_environment() -> Result<Self> {
         let codex_home = find_codex_home().context("failed to resolve CODEX_HOME")?;
-        let socket_path = app_server_control_socket_path(codex_home.as_path())?
-            .as_path()
-            .to_path_buf();
+        let socket_override = std::env::var_os(SOCKET_ENV_VAR);
+        let socket_path = resolve_socket_path(codex_home.as_path(), socket_override.as_deref())?;
         let state_dir = codex_home.as_path().join(STATE_DIR_NAME);
         Ok(Self {
             socket_path,
@@ -773,6 +773,22 @@ impl Daemon {
     }
 }
 
+fn resolve_socket_path(
+    codex_home: &Path,
+    socket_override: Option<&std::ffi::OsStr>,
+) -> Result<PathBuf> {
+    let socket_path = match socket_override {
+        Some(path) => PathBuf::from(path),
+        None => app_server_control_socket_path(codex_home)?
+            .as_path()
+            .to_path_buf(),
+    };
+    if !socket_path.is_absolute() {
+        return Err(anyhow!("{SOCKET_ENV_VAR} must be an absolute path"));
+    }
+    Ok(socket_path)
+}
+
 fn remote_control_status(mode: RemoteControlMode) -> RemoteControlStatus {
     match mode {
         RemoteControlMode::Enabled => RemoteControlStatus::Enabled,
@@ -836,6 +852,8 @@ fn try_lock_file(_file: &tokio::fs::File) -> Result<bool> {
 
 #[cfg(all(test, unix))]
 mod tests {
+    use std::path::Path;
+
     use pretty_assertions::assert_eq;
     use tempfile::TempDir;
 
@@ -851,6 +869,7 @@ mod tests {
     use super::RestartIfRunningOutcome;
     use super::RestartMode;
     use super::UpdaterRefreshMode;
+    use super::resolve_socket_path;
     use super::restart_decision;
     use super::should_reexec_updater;
     use crate::client::ProbeInfo;
@@ -860,6 +879,42 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&RemoteControlStatus::AlreadyEnabled).expect("serialize"),
             "\"alreadyEnabled\""
+        );
+    }
+
+    #[test]
+    fn daemon_socket_path_defaults_to_the_canonical_control_socket() {
+        let codex_home = Path::new("/tmp/codex-home");
+
+        assert_eq!(
+            resolve_socket_path(codex_home, /*socket_override*/ None).expect("socket path"),
+            codex_home
+                .join("app-server-control")
+                .join("app-server-control.sock")
+        );
+    }
+
+    #[test]
+    fn daemon_socket_path_accepts_an_absolute_override() {
+        let socket_path = Path::new("/tmp/codex-private/native-daemon.sock");
+
+        assert_eq!(
+            resolve_socket_path(Path::new("/tmp/codex-home"), Some(socket_path.as_os_str()),)
+                .expect("socket path"),
+            socket_path
+        );
+    }
+
+    #[test]
+    fn daemon_socket_path_rejects_a_relative_override() {
+        assert_eq!(
+            resolve_socket_path(
+                Path::new("/tmp/codex-home"),
+                Some(Path::new("native-daemon.sock").as_os_str()),
+            )
+            .expect_err("relative override must fail")
+            .to_string(),
+            "CODEX_APP_SERVER_SOCKET must be an absolute path"
         );
     }
 
