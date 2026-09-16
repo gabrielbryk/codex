@@ -96,6 +96,8 @@ use futures::StreamExt;
 use http::HeaderMap as ApiHeaderMap;
 use http::HeaderValue;
 use http::StatusCode;
+use std::path::Path;
+use std::sync::RwLock;
 use std::time::Duration;
 use std::time::Instant;
 use tokio::sync::mpsc;
@@ -119,6 +121,7 @@ use crate::context::ContextualUserFragment;
 use crate::feedback_tags;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::subagent_header_value;
+use crate::route_claim::RouteClaimSigner;
 use crate::util::emit_feedback_auth_recovery_tags;
 use codex_feedback::FeedbackRequestTags;
 use codex_feedback::emit_feedback_request_tags_with_auth_env;
@@ -203,6 +206,7 @@ fn session_telemetry_for_request(
 #[derive(Debug)]
 struct ModelClientState {
     thread_id: ThreadId,
+    route_claim_signer: RwLock<Option<RouteClaimSigner>>,
     provider: SharedModelProvider,
     auth_env_telemetry: AuthEnvTelemetry,
     session_source: SessionSource,
@@ -456,6 +460,7 @@ impl ModelClient {
         Self {
             state: Arc::new(ModelClientState {
                 thread_id,
+                route_claim_signer: RwLock::new(None),
                 provider: model_provider,
                 auth_env_telemetry,
                 session_source,
@@ -484,6 +489,34 @@ impl ModelClient {
     ) -> Self {
         self.prompt_cache_key_override = prompt_cache_key_override;
         self
+    }
+
+    pub(crate) fn with_route_claim_signer(
+        self,
+        route_claim_signer: Option<RouteClaimSigner>,
+    ) -> Self {
+        *self
+            .state
+            .route_claim_signer
+            .write()
+            .expect("route-claim signer lock poisoned") = route_claim_signer;
+        self
+    }
+
+    pub(crate) fn update_route_claim_cwd(&self, cwd: &Path) {
+        {
+            let mut signer = self
+                .state
+                .route_claim_signer
+                .write()
+                .expect("route-claim signer lock poisoned");
+            let updated = signer.as_ref().and_then(|signer| signer.with_cwd(cwd).ok());
+            if *signer == updated {
+                return;
+            }
+            *signer = updated;
+        }
+        self.store_cached_websocket_session(WebsocketSession::default());
     }
 
     fn prompt_cache_key(&self, responses_metadata: &CodexResponsesMetadata) -> String {
@@ -632,6 +665,7 @@ impl ModelClient {
         ));
         add_originator_header(&mut extra_headers, self.state.originator.as_str());
         extra_headers.extend(self.build_responses_compatibility_headers(responses_metadata));
+        self.add_route_claim(&mut extra_headers);
         extra_headers.extend(build_session_headers(
             Some(responses_metadata.session_id.to_string()),
             Some(responses_metadata.thread_id.to_string()),
@@ -800,6 +834,18 @@ impl ModelClient {
             );
         }
         extra_headers
+    }
+
+    fn add_route_claim(&self, headers: &mut ApiHeaderMap) {
+        if let Some(signer) = self
+            .state
+            .route_claim_signer
+            .read()
+            .expect("route-claim signer lock poisoned")
+            .as_ref()
+        {
+            signer.insert_header(headers);
+        }
     }
 
     fn build_ws_client_metadata(
@@ -1160,6 +1206,7 @@ impl ModelClient {
             Some(responses_metadata.thread_id.to_string()),
         ));
         headers.extend(self.build_responses_compatibility_headers(responses_metadata));
+        self.add_route_claim(&mut headers);
         if let Some(routing_hint) = &responses_metadata.routing_hint {
             headers.insert(X_CODEX_ROUTING_HINT_HEADER, routing_hint.clone());
         }
@@ -1227,6 +1274,7 @@ impl ModelClientSession {
                     self.client
                         .build_responses_compatibility_headers(responses_metadata),
                 );
+                self.client.add_route_claim(&mut headers);
                 if let Some(header_value) = self.client.generate_attestation_header_for().await {
                     headers.insert(X_OAI_ATTESTATION_HEADER, header_value);
                 }

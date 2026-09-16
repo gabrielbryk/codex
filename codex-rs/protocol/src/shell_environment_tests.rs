@@ -26,6 +26,14 @@ fn non_inheritable_environment_is_removed_after_policy_overrides() {
             "codex_exec_server_noise_auth_token".to_string(),
             "inherited-noise-token".to_string(),
         ),
+        (
+            CODEX_CWD_ROUTE_SIGNING_KEY_ENV_VAR.to_string(),
+            "inherited-route-claim-key".to_string(),
+        ),
+        (
+            CODEX_CWD_ROUTE_AUDIENCE_ENV_VAR.to_string(),
+            "inherited-route-claim-audience".to_string(),
+        ),
     ];
     let policy = ShellEnvironmentPolicy {
         inherit: ShellEnvironmentPolicyInherit::All,
@@ -66,6 +74,14 @@ fn command_scrubber_removes_names_from_real_child_environment() {
             .env(
                 "Codex_Exec_Server_Noise_Auth_Token",
                 "inherited-noise-token",
+            )
+            .env(
+                CODEX_CWD_ROUTE_SIGNING_KEY_ENV_VAR,
+                "inherited-route-claim-key",
+            )
+            .env(
+                CODEX_CWD_ROUTE_AUDIENCE_ENV_VAR,
+                "inherited-route-claim-audience",
             )
             .output()
             .expect("run inherited-environment test process");

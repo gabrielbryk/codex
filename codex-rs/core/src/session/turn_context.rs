@@ -808,6 +808,9 @@ impl Session {
                 return Err(CodexErr::InvalidRequest(message));
             }
         };
+        self.services
+            .model_client
+            .update_route_claim_cwd(session_configuration.cwd().as_path());
         self.emit_config_changed_contributors(previous_config.as_ref(), new_config.as_ref());
         if mcp_inputs_changed {
             self.schedule_mcp_prewarm();

@@ -1454,6 +1454,10 @@ impl Session {
                     attestation_provider,
                     config.http_client_factory(),
                 )
+                .with_route_claim_signer(crate::route_claim::RouteClaimSigner::from_environment(
+                    thread_id,
+                    session_configuration.cwd().as_path(),
+                )?)
                 .with_prompt_cache_key_override(
                     crate::guardian::prompt_cache_key_override_for_review_session(
                         &session_configuration.session_source,

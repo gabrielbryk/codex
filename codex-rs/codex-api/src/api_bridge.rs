@@ -73,6 +73,16 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
                     return CodexErr::ServerOverloaded;
                 }
 
+                if matches!(
+                    status,
+                    http::StatusCode::BAD_REQUEST
+                        | http::StatusCode::CONFLICT
+                        | http::StatusCode::FORBIDDEN
+                ) && let Some(routing_error) = proxy_routing_error(&body_text)
+                {
+                    return CodexErr::InvalidRequest(routing_error);
+                }
+
                 if (status == http::StatusCode::BAD_REQUEST
                     || status == http::StatusCode::FORBIDDEN)
                     && let Ok(parsed) = serde_json::from_str::<Value>(&body_text)
@@ -195,6 +205,29 @@ const MISALIGNMENT_POLICY_VIOLATION_FALLBACK_MESSAGE: &str =
     "This request was blocked due to a misalignment policy violation.";
 const CLOUDFLARE_BLOCKED_MESSAGE: &str =
     "Access blocked by Cloudflare. This usually happens when connecting from a restricted region";
+
+fn proxy_routing_error(body: &str) -> Option<String> {
+    let error = serde_json::from_str::<Value>(body)
+        .ok()?
+        .get("error")?
+        .clone();
+    let code = error.get("code")?.as_str()?;
+    if !matches!(
+        code,
+        "thread_metadata_unavailable"
+            | "ambiguous_thread_cwd"
+            | "invalid_route_claim"
+            | "route_claims_disabled"
+            | "unmatched_thread_cwd"
+    ) {
+        return None;
+    }
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .filter(|message| !message.trim().is_empty());
+    Some(message.map_or_else(|| code.to_string(), |message| format!("{code}: {message}")))
+}
 
 #[cfg(test)]
 #[path = "api_bridge_tests.rs"]
