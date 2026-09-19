@@ -27,7 +27,7 @@ CANONICAL_REFERENCES = (
     "coordination-and-status.md",
     "improvement-and-reporting.md",
 )
-EXPECTED_PATCH_COUNT = 42
+NORMALIZATION_ALLOWLIST = ("PATCHES.md", "codex-rs/Cargo.lock")
 
 
 def load_immutable_plan(path: Path) -> Mapping[str, Any]:
@@ -53,10 +53,8 @@ def validate_test_plan(manifest_text: str, test_plan: Mapping[str, Any]) -> None
     source_commit_order = test_plan.get("sourceCommitOrder")
     if not isinstance(target_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", target_sha):
         raise SystemExit("workflow test plan has invalid target SHA")
-    if not isinstance(patches, list) or len(patches) != EXPECTED_PATCH_COUNT:
-        raise SystemExit(
-            f"workflow test plan must contain exactly {EXPECTED_PATCH_COUNT} leaves"
-        )
+    if not isinstance(patches, list) or not patches:
+        raise SystemExit("workflow test plan has no leaves")
     if not isinstance(source_commit_order, list) or not source_commit_order:
         raise SystemExit("workflow test plan has no source commit order")
     if not all(
@@ -224,6 +222,129 @@ def validate_upgrade_workflow_contract(
         validate_test_plan(manifest_text, test_plan)
 
 
+def validate_attribution(
+    repo_root: Path,
+    plan: Mapping[str, Any],
+    changed_paths: list[str] | None = None,
+    env: Mapping[str, str] | None = None,
+) -> None:
+    """Reject candidate files that are not attributable to a declared patch surface."""
+    env = env if env is not None else os.environ
+    env_target = env.get("FORK_FLEET_TARGET_SHA")
+    plan_target = plan.get("targetSha")
+    if env_target and plan_target and env_target != plan_target:
+        raise SystemExit("attribution target disagrees with the immutable plan")
+
+    if changed_paths is None:
+        target = env_target or plan_target
+        completed = subprocess.run(
+            ["git", "diff", "--name-only", f"{target}..HEAD"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode:
+            raise SystemExit("git diff failed while computing attribution changed paths")
+        changed_paths = [line for line in completed.stdout.splitlines() if line]
+
+    prefixes: set[str] = set()
+    for patch in plan.get("patches") or []:
+        for key in (
+            "ownedSurfaces",
+            "sourceSurfaces",
+            "replacementSurfaces",
+            "sharedSurfaces",
+        ):
+            for surface in patch.get(key) or []:
+                if surface in ("", "."):
+                    continue
+                prefixes.add(surface)
+
+    def matches(path: str, prefix: str) -> bool:
+        return path == prefix or path.startswith(prefix.rstrip("/") + "/")
+
+    matched_any = {prefix: False for prefix in prefixes}
+    unattributed = []
+    for path in changed_paths:
+        if path in NORMALIZATION_ALLOWLIST:
+            continue
+        hit = False
+        for prefix in prefixes:
+            if matches(path, prefix):
+                hit = True
+                matched_any[prefix] = True
+        if not hit:
+            unattributed.append(path)
+
+    if unattributed:
+        raise SystemExit("unattributed candidate files: " + ", ".join(sorted(unattributed)))
+
+    for prefix in sorted(matched_any):
+        if not matched_any[prefix]:
+            print(f"warning: surface matches no candidate file: {prefix}")
+
+
+def run_manifest_sync(repo_root: Path, plan: Mapping[str, Any], plan_path: Path) -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "scripts/render_patches_manifest.py"),
+            "--plan",
+            str(plan_path),
+            "--manifest",
+            str(repo_root / "PATCHES.md"),
+            "--check",
+        ],
+        cwd=repo_root,
+        check=False,
+    )
+    if completed.returncode:
+        raise SystemExit(completed.returncode)
+
+
+def assert_clean_schema_fixtures(repo_root: Path) -> None:
+    schema_dir = "codex-rs/app-server-protocol/schema"
+    diff = subprocess.run(
+        ["git", "diff", "--name-only", "--", schema_dir],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if diff.returncode:
+        raise SystemExit("git diff failed while checking app-server schema fixtures")
+    status = subprocess.run(
+        ["git", "status", "--porcelain", "--", schema_dir],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if status.returncode:
+        raise SystemExit("git status failed while checking app-server schema fixtures")
+
+    paths = {line for line in diff.stdout.splitlines() if line}
+    for line in status.stdout.splitlines():
+        if line.startswith("??"):
+            paths.add(line[3:].strip())
+    if paths:
+        raise SystemExit("app-server schema fixtures drifted: " + ", ".join(sorted(paths)))
+
+
+PLAN_ACTIONS = {
+    "upgrade-workflow-audit": lambda repo_root, plan, plan_path: validate_upgrade_workflow_contract(
+        repo_root, plan
+    ),
+    "attribution": lambda repo_root, plan, plan_path: validate_attribution(repo_root, plan),
+    "manifest-sync": run_manifest_sync,
+}
+
+POST_CHECKS = {
+    "schema-fixtures": assert_clean_schema_fixtures,
+}
+
+
 def run_upgrade_workflow_tests() -> None:
     completed = subprocess.run(
         [sys.executable, str(REPO_ROOT / "scripts/test_fork_fleet_validation.py")],
@@ -256,10 +377,9 @@ def rusty_v8_environment(real_home: Path) -> dict[str, str]:
 
 
 def main() -> None:
-    if len(sys.argv) == 3 and sys.argv[1] == "upgrade-workflow-audit":
-        validate_upgrade_workflow_contract(
-            REPO_ROOT, load_immutable_plan(Path(sys.argv[2]).resolve())
-        )
+    if len(sys.argv) == 3 and sys.argv[1] in PLAN_ACTIONS:
+        plan_path = Path(sys.argv[2]).resolve()
+        PLAN_ACTIONS[sys.argv[1]](REPO_ROOT, load_immutable_plan(plan_path), plan_path)
         return
     if len(sys.argv) == 2 and sys.argv[1] == "upgrade-workflow-tests":
         run_upgrade_workflow_tests()
@@ -274,6 +394,8 @@ def main() -> None:
 
     actions = {
         "upgrade-workflow-audit <immutable-plan-path>": [],
+        "attribution <immutable-plan-path>": [],
+        "manifest-sync <immutable-plan-path>": [],
         "upgrade-workflow-tests": [],
         "format": [(REPO_ROOT, [str(fork_fleet_just), "fmt-check"])],
         "locked-metadata": [
@@ -364,6 +486,10 @@ def main() -> None:
             (REPO_ROOT, [str(fork_fleet_just), "argument-comment-lint"])
         ],
         "release-build": [(REPO_ROOT, [str(fork_fleet_just), "build-for-release"])],
+        "schema-fixtures": [
+            (REPO_ROOT, [str(fork_fleet_just), "write-app-server-schema"]),
+            (REPO_ROOT, [str(fork_fleet_just), "write-app-server-schema", "--experimental"]),
+        ],
     }
     if len(sys.argv) != 2 or sys.argv[1] not in actions:
         choices = ", ".join(sorted(actions))
@@ -434,6 +560,10 @@ def main() -> None:
             completed = subprocess.run(command, cwd=cwd, env=environment, check=False)
             if completed.returncode:
                 raise SystemExit(completed.returncode)
+
+    post_check = POST_CHECKS.get(sys.argv[1])
+    if post_check is not None:
+        post_check(REPO_ROOT)
 
 
 if __name__ == "__main__":

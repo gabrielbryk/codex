@@ -14,12 +14,23 @@ assert SPEC is not None and SPEC.loader is not None
 validation = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(validation)
 
+RENDER_SCRIPT = Path(__file__).with_name("render_patches_manifest.py")
+RENDER_SPEC = importlib.util.spec_from_file_location(
+    "render_patches_manifest", RENDER_SCRIPT
+)
+assert RENDER_SPEC is not None and RENDER_SPEC.loader is not None
+render = importlib.util.module_from_spec(RENDER_SPEC)
+RENDER_SPEC.loader.exec_module(render)
+
+# Not load-bearing; only used to build a plausibly-sized fixture plan below.
+REPRESENTATIVE_PATCH_COUNT = 45
+
 
 class UpgradeWorkflowAuditTest(unittest.TestCase):
     def workflow_plan(self) -> dict[str, object]:
         target_sha = "a" * 40
         patches = []
-        for index in range(validation.EXPECTED_PATCH_COUNT):
+        for index in range(REPRESENTATIVE_PATCH_COUNT):
             patch_id = f"leaf-{index:02d}"
             patches.append(
                 {
@@ -241,6 +252,229 @@ class UpgradeWorkflowAuditTest(unittest.TestCase):
             ):
                 validation.main()
             run.assert_not_called()
+
+
+class RenderPatchesManifestTest(unittest.TestCase):
+    def fake_plan(self) -> dict[str, object]:
+        return {
+            "targetRef": "rust-v9.9.9",
+            "targetSha": "a" * 40,
+            "sourceSha": "b" * 40,
+            "sourceBaseSha": "c" * 40,
+            "patches": [
+                {
+                    "patchId": "zeta-patch",
+                    "group": "fork feature",
+                    "recommendation": "apply",
+                    "decisionBasis": "bounded local behavior",
+                },
+                {
+                    "patchId": "alpha-patch",
+                    "group": "fork feature",
+                    "recommendation": "apply",
+                    "decisionBasis": "bounded local behavior",
+                    "decisionReason": "no upstream equivalent",
+                },
+                {
+                    "patchId": "beta-patch",
+                    "maintenanceClass": "defensive",
+                    "recommendation": "rework",
+                    "decisionReason": "partial upstream coverage",
+                    "adjudicationStatus": "confirmed",
+                },
+                {
+                    "patchId": "gamma-patch",
+                    "disposition": "upstream",
+                    "recommendation": "apply",
+                    "intent": "superseded by upstream retry logic",
+                },
+                {
+                    "patchId": "delta-patch",
+                    "recommendation": "drop",
+                },
+            ],
+        }
+
+    def test_rows_sorted_by_group_then_id(self) -> None:
+        table = render.render_table(self.fake_plan()["patches"])
+        rows = [line for line in table.splitlines() if line.startswith("| `")]
+        patch_ids = [row.split("|")[1].strip().strip("`") for row in rows]
+        self.assertEqual(
+            patch_ids,
+            ["alpha-patch", "zeta-patch", "beta-patch", "delta-patch", "gamma-patch"],
+        )
+
+    def test_fallback_chain_and_adjudication_and_upstream_mapping(self) -> None:
+        table = render.render_table(self.fake_plan()["patches"])
+        rows = {
+            line.split("|")[1].strip().strip("`"): line for line in table.splitlines()
+            if line.startswith("| `")
+        }
+        self.assertIn("bounded local behavior", rows["zeta-patch"])
+        self.assertIn(
+            "bounded local behavior [no upstream equivalent]", rows["alpha-patch"]
+        )
+        self.assertIn(
+            "partial upstream coverage (adjudication: confirmed)", rows["beta-patch"]
+        )
+        self.assertIn("| drop |", rows["gamma-patch"])
+        self.assertIn("no recorded basis", rows["delta-patch"])
+
+    def test_rendered_region_satisfies_manifest_and_test_plan_validation(self) -> None:
+        plan = self.fake_plan()
+        region = render.render_generated_region(plan)
+        manifest_text = "\n".join(
+            (
+                "# Fork patch manifest",
+                render.BEGIN_MARKER,
+                region,
+                render.END_MARKER,
+            )
+        )
+        manifest_ids = validation.extract_manifest_patch_ids(manifest_text)
+        self.assertEqual(
+            set(manifest_ids),
+            {"alpha-patch", "beta-patch", "gamma-patch", "delta-patch", "zeta-patch"},
+        )
+
+        patches = [
+            {"patchId": patch_id, "commitShas": [f"{index:040x}"], "dependsOn": []}
+            for index, patch_id in enumerate(sorted(manifest_ids))
+        ]
+        test_plan = {
+            "targetSha": plan["targetSha"],
+            "sourceCommitOrder": [patch["commitShas"][0] for patch in patches],
+            "patches": patches,
+        }
+        validation.validate_test_plan(manifest_text, test_plan)
+
+    def test_check_reports_diff_for_stale_region_and_zero_when_current(self) -> None:
+        plan = self.fake_plan()
+        region = render.render_generated_region(plan)
+        base_text = "\n".join(
+            ("# Fork patch manifest", render.BEGIN_MARKER, render.END_MARKER, "")
+        )
+        current_text = render.splice(base_text, region)
+        self.assertEqual(render.check(current_text, region), 0)
+
+        stale_text = current_text.replace("alpha-patch", "omega-patch")
+        self.assertEqual(render.check(stale_text, region), 1)
+
+    def test_splice_raises_on_missing_or_duplicate_markers(self) -> None:
+        with self.assertRaises(SystemExit):
+            render.splice("no markers here", "region")
+        duplicated = f"{render.BEGIN_MARKER}\n{render.BEGIN_MARKER}\n{render.END_MARKER}"
+        with self.assertRaises(SystemExit):
+            render.splice(duplicated, "region")
+
+
+class AttributionTest(unittest.TestCase):
+    def plan_with_surfaces(self) -> dict[str, object]:
+        return {
+            "targetSha": "a" * 40,
+            "patches": [
+                {
+                    "patchId": "owned-patch",
+                    "ownedSurfaces": ["codex-rs/core/src/route_claim.rs"],
+                },
+                {
+                    "patchId": "source-patch",
+                    "sourceSurfaces": ["codex-rs/mcp/src"],
+                },
+                {
+                    "patchId": "replacement-patch",
+                    "replacementSurfaces": ["codex-rs/tui/src/recovery.rs"],
+                },
+                {
+                    "patchId": "shared-patch",
+                    "sharedSurfaces": ["."],
+                },
+                {
+                    "patchId": "unused-patch",
+                    "ownedSurfaces": ["codex-rs/never/touched"],
+                },
+            ],
+        }
+
+    def test_files_covered_by_each_surface_kind_pass(self) -> None:
+        changed = [
+            "codex-rs/core/src/route_claim.rs",
+            "codex-rs/mcp/src/handler.rs",
+            "codex-rs/tui/src/recovery.rs",
+        ]
+        validation.validate_attribution(
+            Path("/repo"), self.plan_with_surfaces(), changed_paths=changed, env={}
+        )
+
+    def test_allowlist_paths_pass(self) -> None:
+        validation.validate_attribution(
+            Path("/repo"),
+            self.plan_with_surfaces(),
+            changed_paths=["PATCHES.md", "codex-rs/Cargo.lock"],
+            env={},
+        )
+
+    def test_unattributed_path_fails_named(self) -> None:
+        with self.assertRaisesRegex(
+            SystemExit, "unattributed candidate files: codex-rs/unrelated.rs"
+        ):
+            validation.validate_attribution(
+                Path("/repo"),
+                self.plan_with_surfaces(),
+                changed_paths=["codex-rs/unrelated.rs"],
+                env={},
+            )
+
+    def test_surface_matching_nothing_only_warns(self) -> None:
+        with patch("builtins.print") as printed:
+            validation.validate_attribution(
+                Path("/repo"),
+                self.plan_with_surfaces(),
+                changed_paths=["codex-rs/core/src/route_claim.rs"],
+                env={},
+            )
+        warnings = [call.args[0] for call in printed.call_args_list]
+        self.assertTrue(
+            any("codex-rs/never/touched" in warning for warning in warnings)
+        )
+
+    def test_env_target_disagreeing_with_plan_fails_before_diff(self) -> None:
+        with patch.object(validation.subprocess, "run") as run:
+            with self.assertRaisesRegex(
+                SystemExit, "attribution target disagrees with the immutable plan"
+            ):
+                validation.validate_attribution(
+                    Path("/repo"),
+                    self.plan_with_surfaces(),
+                    env={"FORK_FLEET_TARGET_SHA": "f" * 40},
+                )
+        run.assert_not_called()
+
+
+class ManifestCountTest(unittest.TestCase):
+    def test_validate_test_plan_accepts_arbitrary_leaf_count(self) -> None:
+        target_sha = "d" * 40
+        patch_ids = ["only-leaf-one", "only-leaf-two", "only-leaf-three"]
+        manifest_text = "\n".join(
+            (
+                "# Fork patch manifest",
+                f"Current upstream target: `{target_sha}`",
+                *(
+                    f"| `{patch_id}` | release chore | apply | evidence |"
+                    for patch_id in patch_ids
+                ),
+            )
+        )
+        patches = [
+            {"patchId": patch_id, "commitShas": [f"{index:040x}"], "dependsOn": []}
+            for index, patch_id in enumerate(patch_ids)
+        ]
+        test_plan = {
+            "targetSha": target_sha,
+            "sourceCommitOrder": [patch["commitShas"][0] for patch in patches],
+            "patches": patches,
+        }
+        validation.validate_test_plan(manifest_text, test_plan)
 
 
 if __name__ == "__main__":
