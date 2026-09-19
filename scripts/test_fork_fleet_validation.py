@@ -304,7 +304,7 @@ class RenderPatchesManifestTest(unittest.TestCase):
             ["alpha-patch", "zeta-patch", "beta-patch", "delta-patch", "gamma-patch"],
         )
 
-    def test_fallback_chain_and_adjudication_and_upstream_mapping(self) -> None:
+    def test_fallback_chain_and_upstream_mapping(self) -> None:
         table = render.render_table(self.fake_plan()["patches"])
         rows = {
             line.split("|")[1].strip().strip("`"): line for line in table.splitlines()
@@ -314,11 +314,20 @@ class RenderPatchesManifestTest(unittest.TestCase):
         self.assertIn(
             "bounded local behavior [no upstream equivalent]", rows["alpha-patch"]
         )
-        self.assertIn(
-            "partial upstream coverage (adjudication: confirmed)", rows["beta-patch"]
-        )
+        self.assertIn("partial upstream coverage", rows["beta-patch"])
+        self.assertNotIn("adjudication", rows["beta-patch"])
         self.assertIn("| drop |", rows["gamma-patch"])
         self.assertIn("no recorded basis", rows["delta-patch"])
+
+    def test_ignores_volatile_plan_fields(self) -> None:
+        plan_a = self.fake_plan()
+        plan_b = self.fake_plan()
+        plan_b["sourceSha"] = "d" * 40
+        plan_b["patches"][2]["adjudicationStatus"] = "reopened"
+        self.assertEqual(
+            render.render_generated_region(plan_a),
+            render.render_generated_region(plan_b),
+        )
 
     def test_rendered_region_satisfies_manifest_and_test_plan_validation(self) -> None:
         plan = self.fake_plan()

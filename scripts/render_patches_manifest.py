@@ -32,11 +32,10 @@ def _cell(text: str) -> str:
 def render_target_paragraph(plan: Mapping[str, Any]) -> str:
     target_ref = plan.get("targetRef") or "unknown"
     target_sha = plan.get("targetSha")
-    source_sha = plan.get("sourceSha")
     source_base_sha = plan.get("sourceBaseSha")
     return (
         f"Current upstream target: **`{target_ref}`** (`{target_sha}`). "
-        f"Source head `{source_sha}` replayed from source base `{source_base_sha}`."
+        f"Source base: `{source_base_sha}`."
     )
 
 
@@ -55,9 +54,6 @@ def render_table(patches: list[Mapping[str, Any]]) -> str:
         decision_reason = patch.get("decisionReason")
         assessment = decision_basis or decision_reason or patch.get("intent") or "no recorded basis"
 
-        adjudication_status = patch.get("adjudicationStatus")
-        if adjudication_status:
-            assessment = f"{assessment} (adjudication: {adjudication_status})"
         if decision_basis and decision_reason:
             assessment = f"{assessment} [{decision_reason}]"
 
