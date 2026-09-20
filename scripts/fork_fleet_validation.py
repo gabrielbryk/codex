@@ -355,6 +355,62 @@ def run_upgrade_workflow_tests() -> None:
         raise SystemExit(completed.returncode)
 
 
+def rust_toolchain_environment(
+    real_home: Path, env: Mapping[str, str] | None = None
+) -> dict[str, str]:
+    """Prefix PATH with the pinned rustup toolchain's bin dir (plus ~/.cargo/bin)
+    so `just`/`cargo` invocations resolve `cargo`/`rustc` even when spawned
+    with an otherwise-empty inherited environment. Mirrors the composition
+    style of rusty_v8_environment: derive everything from real_home with
+    fallbacks, never trust an already-sanitized `env` for anything but
+    existing overrides.
+    """
+    base_env: dict[str, str] = dict(env) if env is not None else {}
+    toolchain_text = (CODEX_RS / "rust-toolchain.toml").read_text(encoding="utf-8")
+    match = re.search(r'channel\s*=\s*"([^"]+)"', toolchain_text)
+    if not match:
+        raise SystemExit(
+            f"unable to resolve pinned channel from {CODEX_RS / 'rust-toolchain.toml'}"
+        )
+    channel = match.group(1)
+    if sys.platform != "linux" or platform.machine() != "x86_64":
+        raise SystemExit("Fork Fleet Codex validation supports Linux x86_64 only")
+    triple = "x86_64-unknown-linux-gnu"
+
+    home = Path(base_env.get("HOME") or os.environ.get("HOME") or real_home)
+    rustup_home = Path(
+        base_env.get("RUSTUP_HOME")
+        or os.environ.get("RUSTUP_HOME")
+        or (real_home / ".rustup")
+    )
+    cargo_home = Path(
+        base_env.get("CARGO_HOME")
+        or os.environ.get("CARGO_HOME")
+        or (real_home / ".cargo")
+    )
+    rustup_toolchain = f"{channel}-{triple}"
+    toolchain_bin = rustup_home / "toolchains" / rustup_toolchain / "bin"
+    if not toolchain_bin.is_dir():
+        raise SystemExit(f"pinned rustup toolchain bin directory is missing: {toolchain_bin}")
+    cargo_bin = cargo_home / "bin"
+
+    path_entries = [str(toolchain_bin)]
+    if cargo_bin.is_dir():
+        path_entries.append(str(cargo_bin))
+    path_entries.extend(["/usr/local/bin", "/usr/bin", "/bin"])
+    existing_path = base_env.get("PATH")
+    if existing_path:
+        path_entries.append(existing_path)
+
+    result = dict(base_env)
+    result["PATH"] = os.pathsep.join(path_entries)
+    result.setdefault("HOME", str(home))
+    result.setdefault("CARGO_HOME", str(cargo_home))
+    result.setdefault("RUSTUP_HOME", str(rustup_home))
+    result.setdefault("RUSTUP_TOOLCHAIN", rustup_toolchain)
+    return result
+
+
 def rusty_v8_environment(real_home: Path) -> dict[str, str]:
     with (CODEX_RS / "Cargo.lock").open("rb") as lock_file:
         packages = tomllib.load(lock_file)["package"]
@@ -556,6 +612,7 @@ def main() -> None:
             "FORK_FLEET_NETWORK": os.environ.get("FORK_FLEET_NETWORK", "denied"),
             **rusty_v8_environment(real_home),
         }
+        environment = rust_toolchain_environment(real_home, environment)
         for cwd, command in commands:
             completed = subprocess.run(command, cwd=cwd, env=environment, check=False)
             if completed.returncode:
