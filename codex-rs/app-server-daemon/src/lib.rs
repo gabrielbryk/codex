@@ -763,7 +763,6 @@ impl Daemon {
         let backend = backend::pid_backend(self.backend_paths(&settings));
         backend.start().await?;
         let info = self.wait_until_ready().await?;
-        stock_updater_policy::enforce_stock_updater_disabled(&mut settings);
         let auto_update_enabled = self.ensure_managed_updater(&settings).await?;
         let managed_codex_version = self.managed_codex_version_best_effort().await;
         Ok(BootstrapOutput {
@@ -813,6 +812,14 @@ impl Daemon {
     }
 
     async fn ensure_managed_updater(&self, settings: &DaemonSettings) -> Result<bool> {
+        // Single choke point: every lifecycle path (start, restart, bootstrap, the
+        // remote-control toggle) reaches this function with a settings value loaded
+        // straight from `settings.json`. Enforce the stock-updater-disabled policy
+        // here, rather than in each caller, so no path can start the upstream update
+        // loop no matter what a per-home settings file says.
+        let mut settings = settings.clone();
+        stock_updater_policy::enforce_stock_updater_disabled(&mut settings);
+        let settings = &settings;
         let updater = backend::pid_update_loop_backend(self.backend_paths(settings));
         if !settings.auto_update_enabled {
             updater.stop().await?;
