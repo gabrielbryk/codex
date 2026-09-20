@@ -37,6 +37,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
@@ -190,6 +191,11 @@ const AMBIENT_PET_WRAP_GAP_COLUMNS: u16 = 2;
 const TUI_STUB_MESSAGE: &str = "Not available in TUI yet.";
 const PARENT_OWNED_INPUT_MESSAGE: &str =
     "This sub-agent is controlled by its parent. Direct input is disabled.";
+static NEXT_STATUS_LINE_ASYNC_OWNER: AtomicU64 = AtomicU64::new(1);
+
+fn next_status_line_async_owner() -> u64 {
+    NEXT_STATUS_LINE_ASYNC_OWNER.fetch_add(/*value*/ 1, Ordering::Relaxed)
+}
 
 /// Choose the keybinding used to edit the most-recently queued message.
 ///
@@ -438,6 +444,7 @@ use self::status_state::StatusIndicatorState;
 use self::status_state::StatusState;
 use self::status_state::TerminalTitleStatusKind;
 mod status_controls;
+mod status_line_command;
 mod status_surfaces;
 mod streaming;
 use self::status_surfaces::CachedProjectRootName;
@@ -808,6 +815,9 @@ pub(crate) struct ChatWidget {
     status_line_workspace_messages_disabled: bool,
     // Cached backend-estimated cost and bounded refresh state for the current thread.
     thread_usage: thread_usage::ThreadUsageState,
+    // Invalidates async status dependencies when a command-mode widget changes threads.
+    status_line_async_owner: u64,
+    status_line_command: Option<status_line_command::StatusLineCommandRuntime>,
     // Current thread-goal status shown in the status line when plan mode is inactive.
     current_goal_status_indicator: Option<GoalStatusIndicator>,
     current_goal_status: Option<GoalStatusState>,

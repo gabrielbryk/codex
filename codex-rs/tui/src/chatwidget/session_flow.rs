@@ -37,6 +37,7 @@ impl ChatWidget {
                 backend_banners::AutomaticModelSwitchState::default();
             self.review.recent_auto_review_denials = RecentAutoReviewDenials::default();
             self.clear_thread_usage_state();
+            self.reset_status_line_command_for_thread();
         }
         self.turn_lifecycle.reset_thread();
         self.clear_safety_buffering();

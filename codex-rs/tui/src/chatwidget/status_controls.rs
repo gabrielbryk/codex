@@ -53,8 +53,9 @@ impl ChatWidget {
             StatusDetailsCapitalization::Preserve,
             details_max_lines,
         );
-        let title_uses_status =
-            self.local_settings
+        let surface_uses_status = self.config.tui_status_line_command.is_some()
+            || self
+                .local_settings
                 .tui
                 .terminal_title
                 .as_ref()
@@ -63,7 +64,7 @@ impl ChatWidget {
                         .iter()
                         .any(|item| item == "run-state" || item == "status")
                 });
-        if title_uses_status {
+        if surface_uses_status {
             self.refresh_status_surfaces();
         }
         status_indicator_updated
@@ -83,7 +84,18 @@ impl ChatWidget {
 
     /// Sets the currently rendered footer status-line value.
     pub(crate) fn set_status_line(&mut self, status_line: Option<Line<'static>>) {
-        self.bottom_pane.set_status_line(status_line);
+        self.set_status_lines(status_line.into_iter().collect());
+    }
+
+    pub(crate) fn set_status_lines(&mut self, status_lines: Vec<Line<'static>>) {
+        self.bottom_pane.set_status_lines(status_lines);
+    }
+
+    pub(crate) fn set_status_hyperlink_lines(
+        &mut self,
+        status_lines: Vec<crate::terminal_hyperlinks::HyperlinkLine>,
+    ) {
+        self.bottom_pane.set_status_hyperlink_lines(status_lines);
     }
 
     /// Sets the terminal hyperlink target for the currently rendered footer status line.
@@ -93,9 +105,14 @@ impl ChatWidget {
 
     /// Forwards the contextual active-agent label into the bottom-pane footer pipeline.
     ///
-    /// `ChatWidget` stays a pass-through here so `App` remains the owner of "which thread is the
-    /// user actually looking at?" and the footer stack remains a pure renderer of that decision.
+    /// External formatter output owns the complete passive status region, so command mode
+    /// suppresses the label instead of appending UI-owned text to the formatter's final row.
     pub(crate) fn set_active_agent_label(&mut self, active_agent_label: Option<String>) {
+        let active_agent_label = if self.config.tui_status_line_command.is_some() {
+            None
+        } else {
+            active_agent_label
+        };
         self.bottom_pane.set_active_agent_label(active_agent_label);
     }
 
@@ -333,6 +350,15 @@ impl ChatWidget {
     }
 
     pub(super) fn open_status_line_setup(&mut self) {
+        if self.config.tui_status_line_command.is_some() {
+            self.add_info_message(
+                "An external status line command is configured. Remove `tui.status_line_command` from config.toml to edit built-in status line items."
+                    .to_string(),
+                /*hint*/ None,
+            );
+            return;
+        }
+
         let configured_status_line_items = self.configured_status_line_items();
         let view = StatusLineSetupView::new(
             Some(configured_status_line_items.as_slice()),

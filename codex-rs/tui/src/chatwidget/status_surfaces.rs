@@ -50,6 +50,7 @@ const TERMINAL_TITLE_ACTION_REQUIRED_PREFIX_HIDDEN: &str = "[ . ] Action Require
 /// refresh pass compute those shared concerns once, then render both surfaces
 /// from the same selection set.
 struct StatusSurfaceSelections {
+    status_line_command_enabled: bool,
     status_line_items: Vec<StatusLineItem>,
     invalid_status_line_items: Vec<String>,
     terminal_title_items: Vec<TerminalTitleItem>,
@@ -58,23 +59,28 @@ struct StatusSurfaceSelections {
 
 impl StatusSurfaceSelections {
     fn uses_git_branch(&self) -> bool {
-        self.status_line_items.contains(&StatusLineItem::GitBranch)
+        self.status_line_command_enabled
+            || self.status_line_items.contains(&StatusLineItem::GitBranch)
             || self
                 .terminal_title_items
                 .contains(&TerminalTitleItem::GitBranch)
     }
 
     fn uses_git_summary(&self) -> bool {
-        self.status_line_items
-            .contains(&StatusLineItem::PullRequestNumber)
+        self.status_line_command_enabled
+            || self
+                .status_line_items
+                .contains(&StatusLineItem::PullRequestNumber)
             || self
                 .status_line_items
                 .contains(&StatusLineItem::BranchChanges)
     }
 
     fn uses_workspace_headline(&self) -> bool {
-        self.status_line_items
-            .contains(&StatusLineItem::WorkspaceHeadline)
+        self.status_line_command_enabled
+            || self
+                .status_line_items
+                .contains(&StatusLineItem::WorkspaceHeadline)
     }
 
     fn uses_thread_usage(&self) -> bool {
@@ -109,6 +115,7 @@ impl ChatWidget {
         let (terminal_title_items, invalid_terminal_title_items) =
             self.terminal_title_items_with_invalids();
         StatusSurfaceSelections {
+            status_line_command_enabled: self.config.tui_status_line_command.is_some(),
             status_line_items,
             invalid_status_line_items,
             terminal_title_items,
@@ -200,6 +207,17 @@ impl ChatWidget {
     }
 
     fn refresh_status_line_from_selections(&mut self, selections: &StatusSurfaceSelections) {
+        if selections.status_line_command_enabled {
+            self.bottom_pane.set_status_line_enabled(/*enabled*/ true);
+            self.bottom_pane
+                .set_active_agent_label(/*active_agent_label*/ None);
+            self.set_status_line_hyperlink(/*url*/ None);
+            if let Some(input) = self.status_line_command_input() {
+                self.schedule_status_line_command(input);
+            }
+            return;
+        }
+
         let enabled = !selections.status_line_items.is_empty();
         self.bottom_pane.set_status_line_enabled(enabled);
         if !enabled {
@@ -485,7 +503,7 @@ impl ChatWidget {
             })
     }
 
-    fn status_line_cwd(&self) -> &Path {
+    pub(super) fn status_line_cwd(&self) -> &Path {
         self.current_cwd
             .as_deref()
             .unwrap_or(self.config.cwd.as_path())
@@ -653,10 +671,11 @@ impl ChatWidget {
     pub(super) fn refresh_status_line_if_workspace_headline_due(&mut self) {
         let now = Instant::now();
         if self.status_line_workspace_headline_should_fetch(now)
-            && self
-                .status_line_items_with_invalids()
-                .0
-                .contains(&StatusLineItem::WorkspaceHeadline)
+            && (self.config.tui_status_line_command.is_some()
+                || self
+                    .status_line_items_with_invalids()
+                    .0
+                    .contains(&StatusLineItem::WorkspaceHeadline))
         {
             self.refresh_status_line();
         }
@@ -686,10 +705,11 @@ impl ChatWidget {
         }
 
         if !self.status_line_workspace_messages_disabled
-            && self
-                .status_line_items_with_invalids()
-                .0
-                .contains(&StatusLineItem::WorkspaceHeadline)
+            && (self.config.tui_status_line_command.is_some()
+                || self
+                    .status_line_items_with_invalids()
+                    .0
+                    .contains(&StatusLineItem::WorkspaceHeadline))
         {
             self.frame_requester
                 .schedule_frame_in(crate::workspace_messages::WORKSPACE_HEADLINE_REFRESH_INTERVAL);
@@ -1094,7 +1114,7 @@ impl ChatWidget {
     }
 }
 
-fn five_hour_status_window(
+pub(super) fn five_hour_status_window(
     snapshot: &RateLimitSnapshotDisplay,
 ) -> Option<(&RateLimitWindowDisplay, bool)> {
     find_primary_codex_window(snapshot, "5h")
@@ -1103,7 +1123,7 @@ fn five_hour_status_window(
         .or_else(|| non_weekly_secondary_window_when_primary_is_weekly(snapshot))
 }
 
-fn weekly_status_window(
+pub(super) fn weekly_status_window(
     snapshot: &RateLimitSnapshotDisplay,
 ) -> Option<(&RateLimitWindowDisplay, bool)> {
     find_codex_window(snapshot, "weekly")
@@ -1190,7 +1210,7 @@ fn matches_window_label(window: &RateLimitWindowDisplay, label: &str) -> bool {
         == Some(label)
 }
 
-fn permissions_display(config: &Config) -> String {
+pub(super) fn permissions_display(config: &Config) -> String {
     let active_permission_profile = config.permissions.active_permission_profile();
     if let Some(active_permission_profile) = active_permission_profile.as_ref()
         && !active_permission_profile.id.starts_with(':')
@@ -1219,7 +1239,7 @@ fn permissions_display(config: &Config) -> String {
     "Custom permissions".to_string()
 }
 
-fn approval_mode_display(config: &Config) -> String {
+pub(super) fn approval_mode_display(config: &Config) -> String {
     let approval_policy = AskForApproval::from(config.permissions.approval_policy.value());
     if approval_policy == AskForApproval::OnRequest {
         return match config.approvals_reviewer {
