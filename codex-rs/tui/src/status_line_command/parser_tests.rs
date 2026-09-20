@@ -1,0 +1,200 @@
+use pretty_assertions::assert_eq;
+use ratatui::style::Color;
+use ratatui::style::Modifier;
+
+use super::*;
+
+fn visible_text(parsed: &ParsedStatusLine) -> Vec<String> {
+    parsed
+        .lines
+        .iter()
+        .map(|line| line.line.to_string())
+        .collect()
+}
+
+#[test]
+fn parses_crlf_multiple_rows_and_discards_rows_after_limit() {
+    let parsed =
+        parse_status_line_command_output(b"one\r\ntwo\nthree\nfour").expect("valid status line");
+    assert_eq!(visible_text(&parsed), vec!["one", "two", "three"]);
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)]
+fn parses_sgr_styles_without_retaining_escape_bytes() {
+    let parsed = parse_status_line_command_output(
+        b"plain \x1b[1;31mbold red\x1b[22;39m \x1b[38;2;1;2;3mrgb\x1b[0m",
+    )
+    .expect("valid status line");
+    assert_eq!(visible_text(&parsed), vec!["plain bold red rgb"]);
+    let spans = &parsed.lines[0].line.spans;
+    assert_eq!(spans[1].content.as_ref(), "bold red");
+    assert!(spans[1].style.add_modifier.contains(Modifier::BOLD));
+    assert_eq!(spans[1].style.fg, Some(Color::Red));
+    assert_eq!(spans[3].style.fg, Some(Color::Rgb(1, 2, 3)));
+}
+
+#[test]
+fn parses_https_osc8_as_semantic_hyperlink() {
+    let parsed = parse_status_line_command_output(
+        b"PR \x1b]8;;https://github.com/openai/codex/pull/1\x1b\\#1\x1b]8;;\x1b\\",
+    )
+    .expect("valid status line");
+    assert_eq!(visible_text(&parsed), vec!["PR #1"]);
+    assert_eq!(parsed.lines[0].hyperlinks.len(), 1);
+    assert_eq!(parsed.lines[0].hyperlinks[0].columns, 3..5);
+    assert_eq!(
+        parsed.lines[0].hyperlinks[0].destination,
+        "https://github.com/openai/codex/pull/1"
+    );
+}
+
+#[test]
+fn permits_emoji_joiners_and_variation_selectors() {
+    let parsed =
+        parse_status_line_command_output("👩\u{200d}💻 ❤️".as_bytes()).expect("valid status line");
+    assert_eq!(visible_text(&parsed), vec!["👩\u{200d}💻 ❤️"]);
+}
+
+#[test]
+fn rejects_terminal_controls_and_bidi_controls() {
+    assert_eq!(
+        parse_status_line_command_output(b"bad\ttext"),
+        Err(StatusLineCommandParseError::ForbiddenControl(9))
+    );
+    assert_eq!(
+        parse_status_line_command_output("left\u{202e}right".as_bytes()),
+        Err(StatusLineCommandParseError::ForbiddenInvisible(0x202e))
+    );
+    assert_eq!(
+        parse_status_line_command_output(b"\x1b[2Jclear"),
+        Err(StatusLineCommandParseError::UnsupportedEscape)
+    );
+}
+
+#[test]
+fn rejects_unsafe_or_unterminated_hyperlinks() {
+    assert_eq!(
+        parse_status_line_command_output(b"\x1b]8;;http://example.com\x07label\x1b]8;;\x07"),
+        Err(StatusLineCommandParseError::UnsafeHyperlink)
+    );
+    assert_eq!(
+        parse_status_line_command_output(b"\x1b]8;;https://example.com\x07label"),
+        Err(StatusLineCommandParseError::UnterminatedHyperlink)
+    );
+    assert_eq!(
+        parse_status_line_command_output(
+            "\x1b]8;;https://example.com/\u{202e}spoof\x07label\x1b]8;;\x07".as_bytes()
+        ),
+        Err(StatusLineCommandParseError::MalformedHyperlink)
+    );
+}
+
+#[test]
+fn rejects_bare_cr_invalid_utf8_empty_and_oversized_output() {
+    assert_eq!(
+        parse_status_line_command_output(b"left\rright"),
+        Err(StatusLineCommandParseError::BareCarriageReturn)
+    );
+    assert_eq!(
+        parse_status_line_command_output(&[0xff]),
+        Err(StatusLineCommandParseError::InvalidUtf8)
+    );
+    assert_eq!(
+        parse_status_line_command_output(b"\n"),
+        Err(StatusLineCommandParseError::EmptyOutput)
+    );
+    assert_eq!(
+        parse_status_line_command_output(&vec![b'a'; MAX_STATUS_LINE_COMMAND_BYTES + 1]),
+        Err(StatusLineCommandParseError::OutputTooLarge)
+    );
+}
+
+#[test]
+fn rejects_hyperlink_labels_over_cell_limit() {
+    let output = format!(
+        "\x1b]8;;https://example.com\x07{}\x1b]8;;\x07",
+        "x".repeat(MAX_HYPERLINK_LABEL_CELLS + 1)
+    );
+    assert_eq!(
+        parse_status_line_command_output(output.as_bytes()),
+        Err(StatusLineCommandParseError::HyperlinkLabelTooLong)
+    );
+}
+
+#[test]
+fn hyperlink_label_limit_uses_grapheme_aware_terminal_width() {
+    let label = "👩\u{200d}💻".repeat(MAX_HYPERLINK_LABEL_CELLS / 2);
+    let output = format!("\x1b]8;;https://example.com\x07{label}\x1b]8;;\x07");
+    let parsed = parse_status_line_command_output(output.as_bytes()).expect("512-cell label");
+    assert_eq!(parsed.lines[0].line.to_string(), label);
+}
+
+#[test]
+fn hyperlink_label_limit_counts_halfwidth_sound_marks_as_cells() {
+    // Ratatui reserves a cell for U+FF9E/U+FF9F; `unicode-width` reports zero for both. Measuring
+    // with the raw crate would score this label as 0 cells and admit it, even though it renders
+    // one cell past the bound.
+    let label = "\u{FF9E}".repeat(MAX_HYPERLINK_LABEL_CELLS + 1);
+    let output = format!("\x1b]8;;https://example.com\x07{label}\x1b]8;;\x07");
+    assert_eq!(
+        parse_status_line_command_output(output.as_bytes()),
+        Err(StatusLineCommandParseError::HyperlinkLabelTooLong)
+    );
+
+    // Exactly at the bound still parses, so the guard is not simply rejecting all sound marks.
+    let label = "\u{FF9E}".repeat(MAX_HYPERLINK_LABEL_CELLS);
+    let output = format!("\x1b]8;;https://example.com\x07{label}\x1b]8;;\x07");
+    parse_status_line_command_output(output.as_bytes()).expect("512-cell sound-mark label");
+}
+
+const EXPORTER_V1_FULL_FIXTURE: &str = include_str!("fixtures/exporter_v1_full.json");
+
+/// Deterministic stand-in for the pinned exporter's mutable `ccstatusline@latest`
+/// subprocess. It deliberately consumes only fields covered by the v1 fixture.
+fn render_exporter_fixture(input: &serde_json::Value) -> String {
+    let model = input["model"]["display_name"]
+        .as_str()
+        .expect("model display name");
+    let effort = input["effort"]["level"].as_str().expect("effort level");
+    let used = input["context_window"]["used_percentage"]
+        .as_f64()
+        .expect("used percentage");
+    let branch = input["codex"]["git_branch"].as_str().expect("git branch");
+    let pr_number = input["pr"]["number"].as_u64().expect("PR number");
+    let pr_url = input["pr"]["url"].as_str().expect("PR URL");
+
+    format!(
+        "\x1b[1;36m{model}\x1b[0m ({effort}) · {used:.0}%\n{branch} · \x1b]8;;{pr_url}\x1b\\PR #{pr_number}\x1b]8;;\x1b\\"
+    )
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)]
+fn exporter_fixture_stub_renders_accepted_status_line() {
+    let input = serde_json::from_str::<serde_json::Value>(EXPORTER_V1_FULL_FIXTURE)
+        .expect("valid exporter fixture");
+    let rendered = render_exporter_fixture(&input);
+    let parsed = parse_status_line_command_output(rendered.as_bytes()).expect("accepted output");
+
+    assert_eq!(
+        parsed
+            .lines
+            .iter()
+            .map(|line| line.line.to_string())
+            .collect::<Vec<_>>(),
+        vec!["Terra (high) · 25%", "feature/status-line · PR #42"]
+    );
+    assert_eq!(parsed.lines[0].line.spans[0].style.fg, Some(Color::Cyan));
+    assert!(
+        parsed.lines[0].line.spans[0]
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD)
+    );
+    assert_eq!(parsed.lines[1].hyperlinks.len(), 1);
+    assert_eq!(
+        parsed.lines[1].hyperlinks[0].destination,
+        "https://github.com/openai/codex/pull/42"
+    );
+}

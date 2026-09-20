@@ -8,4 +8,5 @@
 //! process group on a best-effort basis (a formatter that calls `setsid()` can
 //! escape; daemonizing formatters are unsupported).
 
+pub(crate) mod parser;
 pub(crate) mod wire;
