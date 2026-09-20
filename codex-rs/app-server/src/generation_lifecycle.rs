@@ -6,9 +6,8 @@
 //! [`GenerationLifecycle::acquire_work_permit`] must be held by the caller for
 //! the full lifetime of the work it gates (not just until the request is
 //! dispatched) so a drain cannot finish while attributed work is still
-//! detached from any tracked counter -- see `message_processor.rs` and
-//! `request_processors/thread_processor.rs::thread_start_inner` for the two
-//! call sites that hold it across a spawned task.
+//! detached from any tracked counter -- see `message_processor.rs` (around
+//! line 1005), the only call site that holds it across a spawned task.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -217,7 +216,6 @@ pub(crate) fn requires_drain_admission(request: &ClientRequest) -> bool {
         | ClientRequest::ProjectDelete { .. }
         | ClientRequest::ThreadSectionMove { .. }
         | ClientRequest::TurnStart { .. }
-        | ClientRequest::TurnSteer { .. }
         | ClientRequest::TurnSettingsUpdate { .. }
         | ClientRequest::ThreadRealtimeStart { .. }
         | ClientRequest::OneOffCommandExec { .. }
@@ -225,7 +223,8 @@ pub(crate) fn requires_drain_admission(request: &ClientRequest) -> bool {
         | ClientRequest::PluginReconcile { .. }
         | ClientRequest::McpServerEventStreamStart { .. } => true,
 
-        ClientRequest::Initialize { .. }
+        ClientRequest::TurnSteer { .. }
+        | ClientRequest::Initialize { .. }
         | ClientRequest::ServerDiagnostics { .. }
         | ClientRequest::ServerDrainStart { .. }
         | ClientRequest::ServerDrainStatus { .. }

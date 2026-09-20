@@ -1,7 +1,24 @@
 use pretty_assertions::assert_eq;
 
 use super::GenerationLifecycle;
+use super::requires_drain_admission;
+use codex_app_server_protocol::ClientRequest;
+use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerGenerationState;
+use codex_app_server_protocol::TurnSteerParams;
+
+#[test]
+fn turn_steer_does_not_require_drain_admission() {
+    // Steering an already-running turn is not new work admitted against a
+    // generation; it must stay answerable while that generation is draining,
+    // the same as turn/interrupt.
+    let request = ClientRequest::TurnSteer {
+        request_id: RequestId::Integer(1),
+        params: TurnSteerParams::default(),
+    };
+
+    assert!(!requires_drain_admission(&request));
+}
 
 #[tokio::test]
 async fn drain_is_idempotent_for_the_same_replacement() {

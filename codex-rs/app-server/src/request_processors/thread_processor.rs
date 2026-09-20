@@ -554,8 +554,13 @@ impl ThreadRequestProcessor {
                     warn!(%thread_id, %err, "skipping generation-drain release for thread that could not be persisted");
                     continue;
                 }
-                self.prepare_thread_for_removal(thread_id, "generation drain")
-                    .await?;
+                if let Err(err) = self
+                    .prepare_thread_for_removal(thread_id, "generation drain")
+                    .await
+                {
+                    warn!(%thread_id, err = %err.message, "skipping generation-drain release for thread that could not be prepared for removal");
+                    continue;
+                }
                 self.generation_lifecycle
                     .note_released(thread_id.to_string())
                     .await;
