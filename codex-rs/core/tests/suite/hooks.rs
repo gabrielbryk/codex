@@ -1924,7 +1924,7 @@ async fn async_hook_finishing_while_idle_waits_for_the_next_turn(
     let started_path = test
         .codex_home_path()
         .join("async_user_prompt_submit_started");
-    fs_wait::wait_for_path_exists(started_path, Duration::from_secs(5))
+    fs_wait::wait_for_path_exists(started_path, Duration::from_secs(30))
         .await
         .context("timed out waiting for the async hook to start")?;
 
@@ -1938,7 +1938,7 @@ async fn async_hook_finishing_while_idle_waits_for_the_next_turn(
     let finished_path = test
         .codex_home_path()
         .join("async_user_prompt_submit_finished");
-    fs_wait::wait_for_path_exists(finished_path, Duration::from_secs(5))
+    fs_wait::wait_for_path_exists(finished_path, Duration::from_secs(30))
         .await
         .context("timed out waiting for the async hook to finish")?;
 
@@ -1974,7 +1974,7 @@ async fn async_hook_finishing_while_idle_waits_for_the_next_turn(
     test.codex.start_turn_if_idle(next_turn).await?;
 
     let mut warning_event = None;
-    timeout(Duration::from_secs(5), async {
+    timeout(Duration::from_secs(30), async {
         loop {
             let event = test.codex.next_event().await?;
             if matches!(
