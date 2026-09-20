@@ -109,6 +109,43 @@ fn slack_user_token_nested_under_authed_user_is_used() {
 }
 
 #[test]
+fn root_bot_token_does_not_pick_up_authed_user_refresh_token_or_expiry() {
+    // `oauth.v2.access` (bot install) puts a root `access_token` alongside a separate,
+    // unrelated `authed_user` object. Regression test: per-field fallback used to let the
+    // rewrite pair the root (bot) access_token with the authed_user's refresh_token and
+    // expires_in, attaching the wrong refresh credential and lifetime to the bot token.
+    let response = normalize_slack_token_response(slack_response(
+        r#"{
+            "ok": true,
+            "app_id": "A0000000000",
+            "access_token": "xoxb-root-bot-token",
+            "token_type": "bot",
+            "authed_user": {
+                "id": "U0000000000",
+                "access_token": "xoxp-nested-user-token",
+                "token_type": "user",
+                "refresh_token": "xoxe-1-nested-refresh-token",
+                "expires_in": 43200,
+                "scope": "channels:read"
+            }
+        }"#,
+    ));
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let token = parse_token_response(&response);
+    assert_eq!(token.access_token().secret(), "xoxb-root-bot-token");
+    assert!(
+        token.refresh_token().is_none(),
+        "the root token has no refresh_token of its own and must not borrow authed_user's"
+    );
+    assert_eq!(
+        token.expires_in(),
+        None,
+        "the root token has no expires_in of its own and must not borrow authed_user's"
+    );
+}
+
+#[test]
 fn slack_ok_false_envelope_becomes_an_oauth_error_carrying_the_slack_error() {
     let response =
         normalize_slack_token_response(slack_response(r#"{"ok": false, "error": "invalid_code"}"#));

@@ -102,17 +102,18 @@ fn slack_error_response(envelope: &Map<String, Value>) -> NormalizedSlackTokenRe
 }
 
 fn slack_token_response(envelope: &Map<String, Value>) -> Option<NormalizedSlackTokenResponse> {
-    let access_token = envelope_str(envelope, "access_token")?;
+    let source = token_source(envelope)?;
+    let access_token = object_str(source, "access_token")?;
     let mut body = Map::new();
     body.insert("access_token".to_string(), json!(access_token));
     body.insert("token_type".to_string(), json!(NORMALIZED_TOKEN_TYPE));
-    if let Some(refresh_token) = envelope_str(envelope, "refresh_token") {
+    if let Some(refresh_token) = object_str(source, "refresh_token") {
         body.insert("refresh_token".to_string(), json!(refresh_token));
     }
-    if let Some(expires_in) = envelope_field(envelope, "expires_in").and_then(Value::as_u64) {
+    if let Some(expires_in) = object_field(source, "expires_in").and_then(Value::as_u64) {
         body.insert("expires_in".to_string(), json!(expires_in));
     }
-    if let Some(scope) = envelope_str(envelope, "scope").and_then(normalize_scope) {
+    if let Some(scope) = object_str(source, "scope").and_then(normalize_scope) {
         body.insert("scope".to_string(), json!(scope));
     }
 
@@ -122,23 +123,31 @@ fn slack_token_response(envelope: &Map<String, Value>) -> Option<NormalizedSlack
     })
 }
 
-/// Reads `name` from the envelope root, falling back to Slack's nested `authed_user` object.
+/// Picks the single object every token field is read from: the envelope root if it carries an
+/// `access_token`, else Slack's nested `authed_user` object if that carries one.
 ///
 /// `oauth.v2.user.access` reports user-token fields at the root, while `oauth.v2.access` nests
-/// them under `authed_user`; accepting both keeps user-token refreshes working either way.
-fn envelope_field<'a>(envelope: &'a Map<String, Value>, name: &str) -> Option<&'a Value> {
-    if let Some(value) = envelope.get(name).filter(|value| !value.is_null()) {
-        return Some(value);
+/// them under `authed_user`; accepting both keeps user-token refreshes working either way. The
+/// two objects must never be mixed field-by-field - a root (bot) `access_token` paired with an
+/// `authed_user` `refresh_token`/`expires_in` would silently attach the wrong lifetime and
+/// refresh credential to the wrong token - so this picks one object up front and every other
+/// field is read from that same object.
+fn token_source<'a>(envelope: &'a Map<String, Value>) -> Option<&'a Map<String, Value>> {
+    if object_str(envelope, "access_token").is_some() {
+        return Some(envelope);
     }
-    envelope
-        .get("authed_user")
-        .and_then(Value::as_object)
-        .and_then(|authed_user| authed_user.get(name))
-        .filter(|value| !value.is_null())
+    let authed_user = envelope.get("authed_user").and_then(Value::as_object)?;
+    object_str(authed_user, "access_token")
+        .is_some()
+        .then_some(authed_user)
 }
 
-fn envelope_str<'a>(envelope: &'a Map<String, Value>, name: &str) -> Option<&'a str> {
-    envelope_field(envelope, name)
+fn object_field<'a>(object: &'a Map<String, Value>, name: &str) -> Option<&'a Value> {
+    object.get(name).filter(|value| !value.is_null())
+}
+
+fn object_str<'a>(object: &'a Map<String, Value>, name: &str) -> Option<&'a str> {
+    object_field(object, name)
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
