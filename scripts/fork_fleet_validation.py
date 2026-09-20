@@ -77,11 +77,15 @@ def validate_test_plan(manifest_text: str, test_plan: Mapping[str, Any]) -> None
         if not isinstance(patch_id, str) or not patch_id:
             raise SystemExit("workflow test plan has leaf without patchId")
         if not isinstance(commit_shas, list):
-            raise SystemExit(f"workflow test plan leaf {patch_id} has invalid source commits")
+            raise SystemExit(
+                f"workflow test plan leaf {patch_id} has invalid source commits"
+            )
         if not isinstance(dependencies, list) or not all(
             isinstance(dependency, str) for dependency in dependencies
         ):
-            raise SystemExit(f"workflow test plan leaf {patch_id} has invalid dependencies")
+            raise SystemExit(
+                f"workflow test plan leaf {patch_id} has invalid dependencies"
+            )
         for commit_sha in commit_shas:
             if not isinstance(commit_sha, str) or not re.fullmatch(
                 r"[0-9a-f]{40}", commit_sha
@@ -147,7 +151,9 @@ def extract_manifest_patch_ids(manifest_text: str) -> list[str]:
             continue
         patch_ids.append(cells[1][1:-1])
         if cells[3] not in {"apply", "rework", "drop"} or not cells[4]:
-            raise SystemExit(f"fork patch manifest has incomplete patch evidence: {cells[1]}")
+            raise SystemExit(
+                f"fork patch manifest has incomplete patch evidence: {cells[1]}"
+            )
     return patch_ids
 
 
@@ -184,9 +190,7 @@ def validate_upgrade_workflow_contract(
             "upgrade workflow is missing canonical references: "
             + ", ".join(missing_references)
         )
-    canonical_links = re.findall(
-        r"\[[^]]+\]\(references/([^)]+)\)", skill_text
-    )
+    canonical_links = re.findall(r"\[[^]]+\]\(references/([^)]+)\)", skill_text)
     if canonical_links != list(CANONICAL_REFERENCES):
         raise SystemExit(
             "upgrade workflow canonical reference links do not match required order"
@@ -213,10 +217,13 @@ def validate_upgrade_workflow_contract(
     patch_ids = extract_manifest_patch_ids(manifest_text)
     if not patch_ids:
         raise SystemExit("fork patch manifest has no maintained patches")
-    duplicate_ids = sorted({patch_id for patch_id in patch_ids if patch_ids.count(patch_id) > 1})
+    duplicate_ids = sorted(
+        {patch_id for patch_id in patch_ids if patch_ids.count(patch_id) > 1}
+    )
     if duplicate_ids:
         raise SystemExit(
-            "fork patch manifest has duplicate patch ownership: " + ", ".join(duplicate_ids)
+            "fork patch manifest has duplicate patch ownership: "
+            + ", ".join(duplicate_ids)
         )
     if test_plan is not None:
         validate_test_plan(manifest_text, test_plan)
@@ -245,7 +252,9 @@ def validate_attribution(
             check=False,
         )
         if completed.returncode:
-            raise SystemExit("git diff failed while computing attribution changed paths")
+            raise SystemExit(
+                "git diff failed while computing attribution changed paths"
+            )
         changed_paths = [line for line in completed.stdout.splitlines() if line]
 
     prefixes: set[str] = set()
@@ -278,14 +287,18 @@ def validate_attribution(
             unattributed.append(path)
 
     if unattributed:
-        raise SystemExit("unattributed candidate files: " + ", ".join(sorted(unattributed)))
+        raise SystemExit(
+            "unattributed candidate files: " + ", ".join(sorted(unattributed))
+        )
 
     for prefix in sorted(matched_any):
         if not matched_any[prefix]:
             print(f"warning: surface matches no candidate file: {prefix}")
 
 
-def run_manifest_sync(repo_root: Path, plan: Mapping[str, Any], plan_path: Path) -> None:
+def run_manifest_sync(
+    repo_root: Path, plan: Mapping[str, Any], plan_path: Path
+) -> None:
     completed = subprocess.run(
         [
             sys.executable,
@@ -329,14 +342,18 @@ def assert_clean_schema_fixtures(repo_root: Path) -> None:
         if line.startswith("??"):
             paths.add(line[3:].strip())
     if paths:
-        raise SystemExit("app-server schema fixtures drifted: " + ", ".join(sorted(paths)))
+        raise SystemExit(
+            "app-server schema fixtures drifted: " + ", ".join(sorted(paths))
+        )
 
 
 PLAN_ACTIONS = {
-    "upgrade-workflow-audit": lambda repo_root, plan, plan_path: validate_upgrade_workflow_contract(
+    "upgrade-workflow-audit": lambda repo_root, plan, plan_path: (
+        validate_upgrade_workflow_contract(repo_root, plan)
+    ),
+    "attribution": lambda repo_root, plan, plan_path: validate_attribution(
         repo_root, plan
     ),
-    "attribution": lambda repo_root, plan, plan_path: validate_attribution(repo_root, plan),
     "manifest-sync": run_manifest_sync,
 }
 
@@ -391,7 +408,9 @@ def rust_toolchain_environment(
     rustup_toolchain = f"{channel}-{triple}"
     toolchain_bin = rustup_home / "toolchains" / rustup_toolchain / "bin"
     if not toolchain_bin.is_dir():
-        raise SystemExit(f"pinned rustup toolchain bin directory is missing: {toolchain_bin}")
+        raise SystemExit(
+            f"pinned rustup toolchain bin directory is missing: {toolchain_bin}"
+        )
     cargo_bin = cargo_home / "bin"
 
     path_entries = [str(toolchain_bin)]
@@ -544,7 +563,10 @@ def main() -> None:
         "release-build": [(REPO_ROOT, [str(fork_fleet_just), "build-for-release"])],
         "schema-fixtures": [
             (REPO_ROOT, [str(fork_fleet_just), "write-app-server-schema"]),
-            (REPO_ROOT, [str(fork_fleet_just), "write-app-server-schema", "--experimental"]),
+            (
+                REPO_ROOT,
+                [str(fork_fleet_just), "write-app-server-schema", "--experimental"],
+            ),
         ],
     }
     if len(sys.argv) != 2 or sys.argv[1] not in actions:
