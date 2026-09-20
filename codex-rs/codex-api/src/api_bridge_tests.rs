@@ -11,6 +11,20 @@ fn map_api_error_maps_server_overloaded() {
 }
 
 #[test]
+fn map_api_error_preserves_proxy_routing_errors_without_retry() {
+    let body =
+        serde_json::json!({ "error": { "code": "thread_metadata_unavailable" } }).to_string();
+    let err = map_api_error(ApiError::Transport(TransportError::Http {
+        status: http::StatusCode::CONFLICT,
+        url: Some("http://example.com/v1/responses".to_string()),
+        headers: None,
+        body: Some(body),
+    }));
+    assert_eq!(err.to_string(), "thread_metadata_unavailable");
+    assert!(!err.is_retryable());
+}
+
+#[test]
 fn map_api_error_preserves_retry_delay() {
     let retry_delay = std::time::Duration::from_secs(17);
     for (error, expected_code, expected_message) in [

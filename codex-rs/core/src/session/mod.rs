@@ -1766,7 +1766,14 @@ impl Session {
         should_commit: impl FnOnce(&SessionConfiguration, &SessionConfiguration) -> bool + Send,
     ) -> ConstraintResult<Option<SessionSettingsCommit>> {
         let notify_config_contributors = !self.services.extensions.config_contributors().is_empty();
-        let (commit, previous_config, new_config, permission_profile_changed, mcp_inputs_changed) = {
+        let (
+            commit,
+            previous_config,
+            new_config,
+            permission_profile_changed,
+            mcp_inputs_changed,
+            route_claim_cwd,
+        ) = {
             let mut state = self.state.lock().await;
             let updated = match self.apply_session_settings(&state.session_configuration, &updates)
             {
@@ -1817,6 +1824,7 @@ impl Session {
                         .clone(),
                 );
             }
+            let route_claim_cwd = state.session_configuration.cwd().clone();
             let new_config = notify_config_contributors
                 .then(|| self.build_effective_session_config(&state.session_configuration));
             let commit = SessionSettingsCommit {
@@ -1831,8 +1839,12 @@ impl Session {
                 new_config,
                 permission_profile_changed,
                 mcp_inputs_changed,
+                route_claim_cwd,
             )
         };
+        self.services
+            .model_client
+            .update_route_claim_cwd(route_claim_cwd.as_path());
         self.emit_config_changed_contributors(previous_config.as_ref(), new_config.as_ref());
         if permission_profile_changed {
             self.refresh_managed_network_proxy_for_current_permission_profile()

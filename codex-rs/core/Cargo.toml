@@ -89,6 +89,7 @@ dunce = { workspace = true }
 eventsource-stream = { workspace = true }
 futures = { workspace = true }
 http = { workspace = true }
+hmac = { workspace = true }
 iana-time-zone = { workspace = true }
 image = { workspace = true, features = ["jpeg", "png", "webp"] }
 indexmap = { workspace = true }
@@ -105,6 +106,7 @@ rmcp = { workspace = true, default-features = false, features = [
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha1 = { workspace = true }
+sha2 = { workspace = true }
 shlex = { workspace = true }
 similar = { workspace = true }
 tempfile = { workspace = true }

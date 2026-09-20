@@ -1559,6 +1559,10 @@ impl Session {
                     config.http_client_factory(),
                 )
                 .with_free_guardian_enabled(config.free_guardian_enabled())
+                .with_route_claim_signer(crate::route_claim::RouteClaimSigner::from_environment(
+                    thread_id,
+                    session_configuration.cwd().as_path(),
+                )?)
                 .with_session_context(
                     crate::guardian::prompt_cache_key_override_for_review_session(
                         &session_configuration.session_source,
