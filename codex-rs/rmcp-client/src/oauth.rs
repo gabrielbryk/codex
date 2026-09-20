@@ -792,11 +792,16 @@ impl OAuthPersistor {
             }
             None => {
                 let mut last_credentials = self.inner.last_credentials.lock().await;
-                if last_credentials.take().is_some()
-                    && let Err(error) = self.inner.credential_store.delete(
+                // A transient in-memory refresh miss (for example right after a startup 401)
+                // makes `get_credentials()` return `None` even though the seeded snapshot and the
+                // on-disk entry still hold a usable refresh token. Route the eviction through the
+                // stale-aware delete so we never wipe a credential that could still be refreshed.
+                if let Some(evicted) = last_credentials.take()
+                    && let Err(error) = self.inner.credential_store.delete_if_stale(
                         &DefaultKeyringStore,
                         &self.inner.server_name,
                         &self.inner.url,
+                        Some(&evicted),
                     )
                 {
                     warn!(
