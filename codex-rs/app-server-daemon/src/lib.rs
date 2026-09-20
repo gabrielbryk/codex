@@ -42,6 +42,10 @@ const UPDATE_PID_FILE_NAME: &str = "app-server-updater.pid";
 const OPERATION_LOCK_FILE_NAME: &str = "daemon.lock";
 const SETTINGS_FILE_NAME: &str = "settings.json";
 const STATE_DIR_NAME: &str = "app-server-daemon";
+/// Absolute private Unix socket path override for the managed daemon and its spawned
+/// backend, so a host-owned attribution proxy can front the native shared daemon on a
+/// socket of its own choosing. Unset keeps the canonical per-codex-home control socket.
+const SOCKET_ENV_VAR: &str = "CODEX_APP_SERVER_SOCKET";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LifecycleCommand {
@@ -290,6 +294,28 @@ fn ensure_supported_platform() -> Result<()> {
     ))
 }
 
+/// Resolves the managed daemon's control socket: an absolute `CODEX_APP_SERVER_SOCKET`
+/// override if present, else the canonical per-codex-home control socket. Pulled out of
+/// `Daemon::from_environment` so socket-resolution behavior (default, absolute override,
+/// relative rejection) is directly unit-testable without mutating global process env.
+fn resolve_control_socket_path(
+    codex_home: &Path,
+    socket_env_override: Option<std::ffi::OsString>,
+) -> Result<PathBuf> {
+    match socket_env_override {
+        Some(path) => {
+            let path = PathBuf::from(path);
+            if !path.is_absolute() {
+                return Err(anyhow!("{SOCKET_ENV_VAR} must be an absolute path"));
+            }
+            Ok(path)
+        }
+        None => Ok(app_server_control_socket_path(codex_home)?
+            .as_path()
+            .to_path_buf()),
+    }
+}
+
 struct Daemon {
     socket_path: PathBuf,
     pid_file: PathBuf,
@@ -302,9 +328,8 @@ struct Daemon {
 impl Daemon {
     fn from_environment() -> Result<Self> {
         let codex_home = find_codex_home().context("failed to resolve CODEX_HOME")?;
-        let socket_path = app_server_control_socket_path(codex_home.as_path())?
-            .as_path()
-            .to_path_buf();
+        let socket_path =
+            resolve_control_socket_path(codex_home.as_path(), std::env::var_os(SOCKET_ENV_VAR))?;
         let state_dir = codex_home.as_path().join(STATE_DIR_NAME);
         Ok(Self {
             socket_path,
@@ -915,6 +940,7 @@ impl Daemon {
             pid_file: self.pid_file.clone(),
             update_pid_file: self.update_pid_file.clone(),
             remote_control_enabled: settings.remote_control_enabled,
+            socket_path: self.socket_path.clone(),
         }
     }
 
@@ -1066,6 +1092,8 @@ fn try_lock_file(_file: &tokio::fs::File) -> Result<bool> {
 
 #[cfg(all(test, any(unix, windows)))]
 mod tests {
+    use std::path::PathBuf;
+
     use pretty_assertions::assert_eq;
     use tempfile::TempDir;
 
@@ -1079,10 +1107,43 @@ mod tests {
     use super::RemoteControlStatus;
     use super::RestartDecision;
     use super::RestartMode;
+    use super::SOCKET_ENV_VAR;
+    use super::resolve_control_socket_path;
     use super::restart_decision;
     use crate::client::ProbeInfo;
     #[cfg(unix)]
     use crate::settings::DaemonSettings;
+
+    #[test]
+    fn control_socket_defaults_to_the_canonical_per_home_socket() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let resolved = resolve_control_socket_path(temp_dir.path(), None).expect("resolve");
+        assert_eq!(
+            resolved,
+            codex_app_server_transport::app_server_control_socket_path(temp_dir.path())
+                .expect("canonical socket path")
+                .as_path()
+        );
+    }
+
+    #[test]
+    fn control_socket_honors_an_absolute_override() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let resolved = resolve_control_socket_path(
+            temp_dir.path(),
+            Some("/managed/g1/app-server.sock".into()),
+        )
+        .expect("resolve");
+        assert_eq!(resolved, PathBuf::from("/managed/g1/app-server.sock"));
+    }
+
+    #[test]
+    fn control_socket_rejects_a_relative_override() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let error = resolve_control_socket_path(temp_dir.path(), Some("relative.sock".into()))
+            .expect_err("relative override must be rejected");
+        assert!(error.to_string().contains(SOCKET_ENV_VAR));
+    }
 
     #[test]
     fn remote_control_status_uses_camel_case_json() {

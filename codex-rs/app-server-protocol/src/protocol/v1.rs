@@ -77,6 +77,26 @@ pub struct InitializeResponse {
     /// Operating system for the running app-server target, for example
     /// `"macos"`, `"linux"`, or `"windows"`.
     pub platform_os: String,
+    /// Identity of a host-managed rolling app-server generation.
+    ///
+    /// This is null for ordinary stdio and unmanaged app-server processes.
+    #[serde(default)]
+    pub server_identity: Option<ServerIdentity>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerIdentity {
+    /// Unique identity for this process start.
+    pub instance_id: String,
+    /// Host lifecycle generation backed by an immutable package.
+    pub generation: String,
+    /// Exact source commit recorded by the package builder.
+    pub source_sha: String,
+    /// Reviewed compatibility revision for rolling-generation behavior.
+    pub protocol_revision: u32,
+    /// Rolling-generation behaviors supported by this server.
+    pub capabilities: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

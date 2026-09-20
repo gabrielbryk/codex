@@ -10,6 +10,7 @@ use super::thread_input::ensure_direct_input_allowed;
 use super::*;
 use crate::error_code::method_not_found;
 use codex_app_server_protocol::SelectedCapabilityRoot;
+use codex_app_server_protocol::ServerDrainResponse;
 use codex_app_server_protocol::ThreadHistoryMode as ApiThreadHistoryMode;
 use codex_app_server_protocol::ThreadRevertParams;
 use codex_app_server_protocol::ThreadRevertResponse;
@@ -458,6 +459,7 @@ pub(crate) struct ThreadRequestProcessor {
     pub(super) skills_watcher: Arc<SkillsWatcher>,
     pub(super) turn_cost_worker: Option<crate::turn_cost_worker::TurnCostWorkerHandle>,
     pub(super) initial_config_warnings: Arc<Vec<ConfigWarningNotification>>,
+    pub(super) generation_lifecycle: crate::generation_lifecycle::GenerationLifecycle,
 }
 
 /// Whether resume attaches a client or restores a cold runtime during daemon startup.
@@ -497,6 +499,7 @@ impl ThreadRequestProcessor {
         skills_watcher: Arc<SkillsWatcher>,
         turn_cost_worker: Option<crate::turn_cost_worker::TurnCostWorkerHandle>,
         initial_config_warnings: Vec<ConfigWarningNotification>,
+        generation_lifecycle: crate::generation_lifecycle::GenerationLifecycle,
     ) -> Self {
         Self {
             auth_manager,
@@ -517,7 +520,69 @@ impl ThreadRequestProcessor {
             skills_watcher,
             turn_cost_worker,
             initial_config_warnings: Arc::new(initial_config_warnings),
+            generation_lifecycle,
         }
+    }
+
+    /// Releases idle thread writers to the replacement generation and reports drain
+    /// progress. Only idle threads (no active turn/elicitation) are released; a
+    /// released thread's writer ownership does not return, so callers must not
+    /// treat `cancel` as reopening a writer already reported as released.
+    ///
+    /// A thread is only ever reported released after its rollout has been
+    /// durably persisted (mirrors `daemon_snapshot::daemon_recovery_candidates`),
+    /// closing the "false writer-release reporting" gap: the replacement
+    /// generation must be able to resume writing before this generation claims
+    /// to have let go.
+    pub(crate) async fn server_drain_status(
+        &self,
+    ) -> Result<ServerDrainResponse, JSONRPCErrorError> {
+        if self.generation_lifecycle.is_draining().await {
+            for thread_id in self.thread_manager.list_thread_ids().await {
+                let status = self
+                    .thread_watch_manager
+                    .loaded_status_for_thread(&thread_id.to_string())
+                    .await;
+                if matches!(status, ThreadStatus::Active { .. }) {
+                    continue;
+                }
+                if let Err(err) = self
+                    .thread_store
+                    .persist_thread(thread_id, PersistContext::Standard)
+                    .await
+                {
+                    warn!(%thread_id, %err, "skipping generation-drain release for thread that could not be persisted");
+                    continue;
+                }
+                self.prepare_thread_for_removal(thread_id, "generation drain")
+                    .await?;
+                self.generation_lifecycle
+                    .note_released(thread_id.to_string())
+                    .await;
+            }
+        }
+
+        let loaded_thread_ids = self
+            .thread_manager
+            .list_thread_ids()
+            .await
+            .into_iter()
+            .map(|thread_id| thread_id.to_string())
+            .collect::<Vec<_>>();
+        let mut active_thread_ids = Vec::new();
+        for thread_id in &loaded_thread_ids {
+            let status = self
+                .thread_watch_manager
+                .loaded_status_for_thread(thread_id)
+                .await;
+            if matches!(status, ThreadStatus::Active { .. }) {
+                active_thread_ids.push(thread_id.clone());
+            }
+        }
+        Ok(self
+            .generation_lifecycle
+            .response(active_thread_ids, loaded_thread_ids)
+            .await)
     }
 
     pub(crate) async fn thread_start(

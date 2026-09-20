@@ -18,6 +18,7 @@ use crate::extensions::thread_extensions;
 use crate::external_agent_migration::ExternalAgentConfigRequestProcessor;
 use crate::external_agent_migration::ExternalAgentConfigRequestProcessorArgs;
 use crate::fs_watch::FsWatchManager;
+use crate::generation_lifecycle::GenerationLifecycle;
 use crate::outgoing_message::ConnectionId;
 use crate::outgoing_message::ConnectionRequestId;
 use crate::outgoing_message::OutgoingMessageSender;
@@ -155,6 +156,7 @@ pub(crate) struct MessageProcessor {
     external_agent_config_processor: ExternalAgentConfigRequestProcessor,
     feedback_processor: FeedbackRequestProcessor,
     fs_processor: FsRequestProcessor,
+    generation_lifecycle: GenerationLifecycle,
     git_processor: GitRequestProcessor,
     initialize_processor: InitializeRequestProcessor,
     marketplace_processor: MarketplaceRequestProcessor,
@@ -498,6 +500,7 @@ impl MessageProcessor {
             outgoing.clone(),
             Arc::clone(&thread_list_state_permit),
         );
+        let generation_lifecycle = GenerationLifecycle::from_environment();
         let thread_processor = ThreadRequestProcessor::new(
             auth_manager.clone(),
             Arc::clone(&thread_manager),
@@ -516,6 +519,7 @@ impl MessageProcessor {
             Arc::clone(&skills_watcher),
             turn_cost_worker.as_ref().map(TurnCostWorker::handle),
             config_warnings,
+            generation_lifecycle.clone(),
         );
         let turn_processor = TurnRequestProcessor::new(
             auth_manager,
@@ -593,6 +597,7 @@ impl MessageProcessor {
             external_agent_config_processor,
             feedback_processor,
             fs_processor,
+            generation_lifecycle,
             git_processor,
             initialize_processor,
             marketplace_processor,
@@ -1000,6 +1005,13 @@ impl MessageProcessor {
             }
             _ => (None, false),
         };
+        // Held until the queued future below finishes (not just until dispatch), so a
+        // drain cannot report a request's work as crossed while it is still detached
+        // in the serialization queue or a spawned task.
+        let generation_admission_permit = self
+            .generation_lifecycle
+            .admit_request(&codex_request)
+            .await?;
 
         let event_stream_ready = match &codex_request {
             ClientRequest::McpServerEventStreamStart { params, .. } => Some(
@@ -1019,6 +1031,7 @@ impl MessageProcessor {
             rpc_gate,
             async move {
                 let _turn_admission = turn_admission;
+                let _generation_admission_permit = generation_admission_permit;
                 // Runtime changes already admitted before drain finish normally. Turn work
                 // still waiting in serialization must observe the newly closed gate.
                 if recheck_turn_admission && let Err(error) = processor.turn_admission.admit() {
@@ -1123,6 +1136,27 @@ impl MessageProcessor {
                 .await;
             }
             ClientRequest::ServerDiagnostics { .. } => Ok(Some(read_server_diagnostics().into())),
+            ClientRequest::ServerDrainStart { params, .. } => {
+                self.generation_lifecycle
+                    .begin(params.replacement_generation)
+                    .await?;
+                self.thread_processor
+                    .server_drain_status()
+                    .await
+                    .map(|response| Some(response.into()))
+            }
+            ClientRequest::ServerDrainStatus { .. } => self
+                .thread_processor
+                .server_drain_status()
+                .await
+                .map(|response| Some(ClientResponsePayload::ServerDrainStatus(response))),
+            ClientRequest::ServerDrainCancel { .. } => {
+                self.generation_lifecycle.cancel().await?;
+                self.thread_processor
+                    .server_drain_status()
+                    .await
+                    .map(|response| Some(ClientResponsePayload::ServerDrainCancel(response)))
+            }
             ClientRequest::ConfigRead { params, .. } => self
                 .config_processor
                 .read(params)

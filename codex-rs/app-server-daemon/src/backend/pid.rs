@@ -34,6 +34,7 @@ pub(crate) struct PidBackend {
     pid_file: PathBuf,
     lock_file: PathBuf,
     command_kind: PidCommandKind,
+    socket_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,7 +98,15 @@ impl PidBackend {
             command_kind: PidCommandKind::AppServer {
                 remote_control_enabled,
             },
+            socket_path: None,
         }
+    }
+
+    /// Binds the spawned app-server backend to an explicit private Unix socket
+    /// instead of the canonical per-codex-home control socket.
+    pub(crate) fn with_socket_path(mut self, socket_path: PathBuf) -> Self {
+        self.socket_path = Some(socket_path);
+        self
     }
 
     pub(crate) fn new_update_loop(codex_bin: PathBuf, pid_file: PathBuf) -> Self {
@@ -107,6 +116,7 @@ impl PidBackend {
             pid_file,
             lock_file,
             command_kind: PidCommandKind::UpdateLoop,
+            socket_path: None,
         }
     }
 
@@ -351,15 +361,38 @@ impl PidBackend {
     }
 
     #[cfg(any(unix, windows))]
-    fn command_args(&self) -> Vec<&'static str> {
+    fn command_args(&self) -> Vec<String> {
         match self.command_kind {
             PidCommandKind::AppServer {
                 remote_control_enabled: true,
-            } => vec!["app-server", "--remote-control", "--listen", "unix://"],
+            } => vec![
+                "app-server".to_string(),
+                "--remote-control".to_string(),
+                "--listen".to_string(),
+                self.listen_address(),
+            ],
             PidCommandKind::AppServer {
                 remote_control_enabled: false,
-            } => vec!["app-server", "--listen", "unix://"],
-            PidCommandKind::UpdateLoop => vec!["app-server", "daemon", "pid-update-loop"],
+            } => vec![
+                "app-server".to_string(),
+                "--listen".to_string(),
+                self.listen_address(),
+            ],
+            PidCommandKind::UpdateLoop => vec![
+                "app-server".to_string(),
+                "daemon".to_string(),
+                "pid-update-loop".to_string(),
+            ],
+        }
+    }
+
+    /// Explicit private socket if one was requested (`CODEX_APP_SERVER_SOCKET`),
+    /// else the canonical `unix://` default the backend resolves itself.
+    #[cfg(any(unix, windows))]
+    fn listen_address(&self) -> String {
+        match self.socket_path.as_ref() {
+            Some(socket_path) => format!("unix://{}", socket_path.display()),
+            None => "unix://".to_string(),
         }
     }
 

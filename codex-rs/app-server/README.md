@@ -44,6 +44,41 @@ after a client tries to archive or delete it.
 After the owner releases the worker, its saved conversation can be archived or
 deleted normally. Ordinary client-controlled threads keep their existing behavior.
 
+# Rolling-generation server identity and drain (experimental)
+
+When a host launches an app-server process as a managed rolling generation (setting
+`CODEX_APP_SERVER_GENERATION_ID` and `CODEX_APP_SERVER_SOURCE_SHA` in its environment), the
+v1 `initialize` response includes `serverIdentity: {instanceId, generation, sourceSha,
+protocolRevision, capabilities}`. `capabilities` currently advertises `serverIdentityV1`,
+`serverDrainV1`, and `threadWriterLeaseV1`. `serverIdentity` is `null` for ordinary stdio and
+unmanaged app-server processes.
+
+A host-owned router uses the drain RPCs to hand off traffic from an old generation to a new
+one without dropping in-flight work:
+
+- `server/drain/start` (`experimentalApi`, params `{replacementGeneration}`) — stop admitting
+  new thread/turn work on this generation and begin releasing idle thread writers to
+  `replacementGeneration`.
+- `server/drain/status` — read current drain progress; also drives another pass of releasing
+  any threads that have since gone idle.
+- `server/drain/cancel` — reopen this generation to new work. Fails once any thread writer has
+  been released (`cancellationAllowed: false` in the response), since that release is not
+  reversible.
+
+All three return `ServerDrainResponse {generation, state, replacementGeneration,
+activeThreadIds, loadedThreadIds, releasedThreadIds, cancellationAllowed}`, with
+`state` one of `accepting`/`draining`. A thread's writer is only ever reported in
+`releasedThreadIds` after its rollout has been durably persisted, so the replacement
+generation can safely resume writing it. Requests that would start new thread/turn work are
+rejected with JSON-RPC error `-32002` and `data {type: "serverDraining", generation,
+replacementGeneration, retryable: true}` while a generation is draining; `server/drain/*`
+itself, and remote-control status reads, remain answerable throughout.
+
+A managed daemon (or its spawned backend) binds an explicit private control socket instead of
+the canonical per-`CODEX_HOME` one when `CODEX_APP_SERVER_SOCKET` is set to an absolute path
+(a relative override is rejected before any process starts); unset, it keeps the canonical
+socket.
+
 # Amazon Bedrock authentication
 
 If `model_providers.amazon-bedrock.aws.credential_export` is configured, Bedrock setup and
