@@ -7,6 +7,7 @@ mod client;
 mod managed_install;
 mod remote_control_client;
 mod settings;
+mod stock_updater_policy;
 mod thread_recovery;
 mod update_loop;
 
@@ -737,6 +738,7 @@ impl Daemon {
         let backend = backend::pid_backend(self.backend_paths(&settings));
         backend.start().await?;
         let info = self.wait_until_ready().await?;
+        stock_updater_policy::enforce_stock_updater_disabled(&mut settings);
         let auto_update_enabled = self.ensure_managed_updater(&settings).await?;
         let managed_codex_version = self.managed_codex_version_best_effort().await;
         Ok(BootstrapOutput {

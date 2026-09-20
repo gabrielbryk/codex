@@ -58,6 +58,13 @@ Positive minute intervals have no configured cap. `daemon restart` applies the
 enabled state; the next updater wait reads a new interval. The preference does
 not affect an explicit `codex update` command or `daemon update`.
 
+This locally managed fork build additionally enforces `stock_updater_policy`:
+`bootstrap_locked` forces `auto_update_enabled = false` before
+`ensure_managed_updater` runs, regardless of the loaded per-home
+`settings.json`, so the stock managed updater is never started by this build.
+The reported `autoUpdateEnabled` in the bootstrap output reflects that forced
+value. This does not rewrite `settings.json` itself.
+
 `daemon update` checks the latest stable release once, even with automatic
 updates disabled. It requires a Codex installer-owned latest-channel standalone
 install. JSON reports `updated`, `noUpdate`, or `unsupported`, with installed
