@@ -63,9 +63,7 @@ class UpgradeWorkflowAuditTest(unittest.TestCase):
         patches[41]["patchId"] = "repo-workflow"
         patches[41]["commitShas"] = []
         plan["sourceCommitOrder"] = [
-            commit_sha
-            for patch in patches
-            for commit_sha in patch["commitShas"]
+            commit_sha for patch in patches for commit_sha in patch["commitShas"]
         ]
         return plan
 
@@ -123,8 +121,12 @@ class UpgradeWorkflowAuditTest(unittest.TestCase):
             root = Path(temp_dir)
             test_plan = self.workflow_plan()
             self.write_repo(root, test_plan)
-            (root / ".codex/skills/upgrade-codex-fork/references/validation.md").unlink()
-            with self.assertRaisesRegex(SystemExit, "canonical references: validation.md"):
+            (
+                root / ".codex/skills/upgrade-codex-fork/references/validation.md"
+            ).unlink()
+            with self.assertRaisesRegex(
+                SystemExit, "canonical references: validation.md"
+            ):
                 validation.validate_upgrade_workflow_contract(root, test_plan)
 
     def test_rejects_changed_canonical_reference_link(self) -> None:
@@ -147,7 +149,9 @@ class UpgradeWorkflowAuditTest(unittest.TestCase):
             test_plan = self.workflow_plan()
             self.write_repo(root, test_plan)
             (root / "PATCHES.md").write_text(
-                (root / "PATCHES.md").read_text().replace(
+                (root / "PATCHES.md")
+                .read_text()
+                .replace(
                     "| `leaf-00` | release chore | rework | evidence |",
                     "| `leaf-00` | release chore | unknown | |",
                 )
@@ -168,7 +172,9 @@ class UpgradeWorkflowAuditTest(unittest.TestCase):
                     "## Per-upgrade verification",
                 )
             )
-            with self.assertRaisesRegex(SystemExit, "duplicate patch ownership: leaf-00"):
+            with self.assertRaisesRegex(
+                SystemExit, "duplicate patch ownership: leaf-00"
+            ):
                 validation.validate_upgrade_workflow_contract(root, test_plan)
 
     def test_rejects_stale_manifest_target_and_leaf_set(self) -> None:
@@ -206,7 +212,9 @@ class UpgradeWorkflowAuditTest(unittest.TestCase):
             self.write_repo(root, test_plan)
             patches = test_plan["patches"]
             patches[1]["commitShas"] = patches[0]["commitShas"]
-            with self.assertRaisesRegex(SystemExit, "duplicate source commit ownership"):
+            with self.assertRaisesRegex(
+                SystemExit, "duplicate source commit ownership"
+            ):
                 validation.validate_upgrade_workflow_contract(root, test_plan)
 
     def test_rejects_unowned_source_commit(self) -> None:
@@ -307,7 +315,8 @@ class RenderPatchesManifestTest(unittest.TestCase):
     def test_fallback_chain_and_upstream_mapping(self) -> None:
         table = render.render_table(self.fake_plan()["patches"])
         rows = {
-            line.split("|")[1].strip().strip("`"): line for line in table.splitlines()
+            line.split("|")[1].strip().strip("`"): line
+            for line in table.splitlines()
             if line.startswith("| `")
         }
         self.assertIn("bounded local behavior", rows["zeta-patch"])
@@ -372,7 +381,9 @@ class RenderPatchesManifestTest(unittest.TestCase):
     def test_splice_raises_on_missing_or_duplicate_markers(self) -> None:
         with self.assertRaises(SystemExit):
             render.splice("no markers here", "region")
-        duplicated = f"{render.BEGIN_MARKER}\n{render.BEGIN_MARKER}\n{render.END_MARKER}"
+        duplicated = (
+            f"{render.BEGIN_MARKER}\n{render.BEGIN_MARKER}\n{render.END_MARKER}"
+        )
         with self.assertRaises(SystemExit):
             render.splice(duplicated, "region")
 
@@ -508,8 +519,9 @@ class RustToolchainEnvironmentTest(unittest.TestCase):
             cargo_bin = real_home / ".cargo/bin"
             cargo_bin.mkdir(parents=True)
 
-            with patch.object(validation, "CODEX_RS", codex_rs), patch.dict(
-                validation.os.environ, clear=False
+            with (
+                patch.object(validation, "CODEX_RS", codex_rs),
+                patch.dict(validation.os.environ, clear=False),
             ):
                 for key in ("HOME", "RUSTUP_HOME", "CARGO_HOME"):
                     validation.os.environ.pop(key, None)

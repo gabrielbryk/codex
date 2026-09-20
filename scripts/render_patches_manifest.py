@@ -40,7 +40,9 @@ def render_target_paragraph(plan: Mapping[str, Any]) -> str:
 
 
 def render_table(patches: list[Mapping[str, Any]]) -> str:
-    rows = sorted(patches, key=lambda patch: (patch.get("group") or "~", patch.get("patchId")))
+    rows = sorted(
+        patches, key=lambda patch: (patch.get("group") or "~", patch.get("patchId"))
+    )
     lines = [TABLE_HEADER, TABLE_SEPARATOR]
     for patch in rows:
         patch_id = patch.get("patchId")
@@ -52,7 +54,12 @@ def render_table(patches: list[Mapping[str, Any]]) -> str:
 
         decision_basis = patch.get("decisionBasis")
         decision_reason = patch.get("decisionReason")
-        assessment = decision_basis or decision_reason or patch.get("intent") or "no recorded basis"
+        assessment = (
+            decision_basis
+            or decision_reason
+            or patch.get("intent")
+            or "no recorded basis"
+        )
 
         if decision_basis and decision_reason:
             assessment = f"{assessment} [{decision_reason}]"
