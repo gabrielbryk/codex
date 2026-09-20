@@ -51,11 +51,12 @@ use super::ExecCommandArgs;
 use super::ExecCommandEnvironmentArgs;
 use super::get_command;
 use super::post_unified_exec_tool_use_payload;
+use super::scoped_command::CommandScopeIdentity;
+use super::scoped_command::wrap_local_command_for_scope;
 use super::shell_mode_for_environment;
 
 // A byte limit is a conservative hard token bound even for byte-fallback tokenizers.
 const EXEC_COMMAND_REJECTION_MAX_BYTES: usize = 900;
-
 #[derive(Clone, Copy)]
 pub(crate) struct ExecCommandHandlerOptions {
     pub(crate) allow_login_shell: bool,
@@ -296,6 +297,21 @@ impl ExecCommandHandler {
         .map_err(FunctionCallError::RespondToModel)?;
         let command = resolved_command.command;
         let shell_type = resolved_command.shell_type;
+        let command_for_display = codex_shell_command::parse_command::shlex_join(&command);
+        let execution_command = if environment.is_remote() {
+            command.clone()
+        } else {
+            wrap_local_command_for_scope(
+                command.clone(),
+                CommandScopeIdentity {
+                    thread_id: session.thread_id.to_string(),
+                    turn_id: turn.sub_id.clone(),
+                    call_id: call_id.clone(),
+                    profile: std::env::var("CODEX_HOME").unwrap_or_else(|_| "default".to_string()),
+                },
+            )
+        };
+
         let ExecCommandArgs {
             mut tty,
             yield_time_ms,
@@ -420,6 +436,7 @@ impl ExecCommandHandler {
         emit_unified_exec_tty_metric(&step_context.session_telemetry, tty);
         let request = ExecCommandRequest {
             command,
+            execution_command,
             shell_type,
             hook_command: hook_command.clone(),
             process_id,

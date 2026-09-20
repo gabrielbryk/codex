@@ -18,6 +18,7 @@ use std::sync::Arc;
 use crate::tools::handlers::parse_arguments;
 
 mod exec_command;
+mod scoped_command;
 mod write_stdin;
 
 pub use exec_command::ExecCommandHandler;
