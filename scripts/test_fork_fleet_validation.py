@@ -486,5 +486,77 @@ class ManifestCountTest(unittest.TestCase):
         validation.validate_test_plan(manifest_text, test_plan)
 
 
+class RustToolchainEnvironmentTest(unittest.TestCase):
+    def _fixture(self, tmp: str, channel: str = "1.95.0") -> tuple[Path, Path, Path]:
+        root = Path(tmp)
+        codex_rs = root / "codex-rs"
+        codex_rs.mkdir()
+        (codex_rs / "rust-toolchain.toml").write_text(
+            f'[toolchain]\nchannel = "{channel}"\ncomponents = ["clippy"]\n'
+        )
+        real_home = root / "home"
+        real_home.mkdir()
+        return root, codex_rs, real_home
+
+    def test_path_is_prefixed_even_with_empty_inherited_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, codex_rs, real_home = self._fixture(tmp)
+            toolchain_bin = (
+                real_home / ".rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu/bin"
+            )
+            toolchain_bin.mkdir(parents=True)
+            cargo_bin = real_home / ".cargo/bin"
+            cargo_bin.mkdir(parents=True)
+
+            with patch.object(validation, "CODEX_RS", codex_rs), patch.dict(
+                validation.os.environ, clear=False
+            ):
+                for key in ("HOME", "RUSTUP_HOME", "CARGO_HOME"):
+                    validation.os.environ.pop(key, None)
+                env = validation.rust_toolchain_environment(real_home, env={})
+
+            path_entries = env["PATH"].split(":")
+            self.assertEqual(path_entries[0], str(toolchain_bin))
+            self.assertIn(str(cargo_bin), path_entries)
+            self.assertIn("/usr/local/bin", path_entries)
+            self.assertIn("/usr/bin", path_entries)
+            self.assertIn("/bin", path_entries)
+            self.assertEqual(env["RUSTUP_TOOLCHAIN"], "1.95.0-x86_64-unknown-linux-gnu")
+            self.assertEqual(env["RUSTUP_HOME"], str(real_home / ".rustup"))
+            self.assertEqual(env["CARGO_HOME"], str(real_home / ".cargo"))
+            self.assertEqual(env["HOME"], str(real_home))
+
+    def test_existing_env_values_are_preserved_not_overwritten(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, codex_rs, real_home = self._fixture(tmp)
+            toolchain_bin = (
+                real_home / ".rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu/bin"
+            )
+            toolchain_bin.mkdir(parents=True)
+            sanitized_home = real_home / "sanitized"
+            sanitized_home.mkdir()
+
+            with patch.object(validation, "CODEX_RS", codex_rs):
+                env = validation.rust_toolchain_environment(
+                    real_home,
+                    env={"HOME": str(sanitized_home), "PATH": "/existing/tool/dir"},
+                )
+
+            self.assertEqual(env["HOME"], str(sanitized_home))
+            path_entries = env["PATH"].split(":")
+            self.assertEqual(path_entries[0], str(toolchain_bin))
+            self.assertEqual(path_entries[-1], "/existing/tool/dir")
+
+    def test_missing_toolchain_bin_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, codex_rs, real_home = self._fixture(tmp, channel="9.9.9")
+
+            with patch.object(validation, "CODEX_RS", codex_rs):
+                with self.assertRaisesRegex(
+                    SystemExit, "pinned rustup toolchain bin directory is missing"
+                ):
+                    validation.rust_toolchain_environment(real_home, env={})
+
+
 if __name__ == "__main__":
     unittest.main()
