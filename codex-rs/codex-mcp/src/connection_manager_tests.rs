@@ -5637,6 +5637,51 @@ async fn reconciliation_reuses_legacy_stdio_server_with_existing_protocol_marker
 }
 
 #[tokio::test]
+async fn reconciliation_reuses_stdio_server_across_workload_attribution_changes() {
+    let runtime_context = McpRuntimeContext::new(
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        PathBuf::from("/tmp"),
+    );
+    let mut config = reusable_server_config("http://127.0.0.1:1");
+    config.transport = McpServerTransportConfig::Stdio {
+        command: "workload-server".to_string(),
+        args: Vec::new(),
+        env: Some(HashMap::from([(
+            "CODEX_WORKLOAD_THREAD_ID".to_string(),
+            "thread-a".to_string(),
+        )])),
+        env_vars: Vec::new(),
+        cwd: None,
+    };
+    let previous = manager_with_reusable_ready_server(
+        &config,
+        &runtime_context,
+        vec![create_test_tool("docs", "search")],
+    )
+    .await;
+
+    // Publish again with the same configured server but a different owning
+    // thread's attribution, as happens whenever a new turn refreshes the
+    // runtime for an otherwise-unchanged server: reuse must not churn.
+    config.transport = McpServerTransportConfig::Stdio {
+        command: "workload-server".to_string(),
+        args: Vec::new(),
+        env: Some(HashMap::from([(
+            "CODEX_WORKLOAD_THREAD_ID".to_string(),
+            "thread-b".to_string(),
+        )])),
+        env_vars: Vec::new(),
+        cwd: None,
+    };
+    let reconciled = reconcile_reusable_server(&previous, config, runtime_context).await;
+
+    assert!(
+        previous.shares_test_connection_with(&reconciled, "docs"),
+        "differing workload attribution alone must reuse the existing connection"
+    );
+}
+
+#[tokio::test]
 async fn reconciliation_replaces_connection_when_auth_mode_changes() -> anyhow::Result<()> {
     let environment_manager = Arc::new(environment_manager_without_environments());
     environment_manager.upsert_environment(

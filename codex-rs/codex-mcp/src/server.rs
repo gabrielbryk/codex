@@ -57,6 +57,20 @@ impl EffectiveMcpServer {
     pub fn is_agent_plugin(&self) -> bool {
         self.agent_plugin
     }
+
+    /// Adds runtime-only attribution to a local stdio server's environment.
+    ///
+    /// This is intentionally applied after configuration resolution so host
+    /// process-placement metadata never becomes persisted user configuration.
+    /// Reserved keys always overwrite a configured value: user config must
+    /// never be able to spoof workload ownership.
+    pub fn with_stdio_runtime_env(mut self, name: &str, value: String) -> Self {
+        if let McpServerTransportConfig::Stdio { env, .. } = &mut self.config.transport {
+            env.get_or_insert_with(HashMap::new)
+                .insert(name.to_string(), value);
+        }
+        self
+    }
 }
 
 pub(crate) fn has_explicit_http_authorization(config: &McpServerConfig) -> bool {
@@ -87,6 +101,30 @@ pub(crate) fn has_explicit_http_authorization(config: &McpServerConfig) -> bool 
                     .all(|byte| byte == b'\t' || (byte >= b' ' && byte != 0x7f))
         })
     })
+}
+
+/// Runtime-only env keys reserved for workload attribution.
+///
+/// These are injected after configuration resolution (see
+/// [`EffectiveMcpServer::with_stdio_runtime_env`]) and must never influence
+/// whether an existing connection is reused: two publications that differ
+/// only in these keys' values (for example, a different owning thread ID)
+/// still describe the same connection.
+const RESERVED_WORKLOAD_ENV_KEYS: [&str; 2] = ["CODEX_WORKLOAD_THREAD_ID", "CODEX_WORKLOAD_TYPE"];
+
+/// Clones `transport`, stripping [`RESERVED_WORKLOAD_ENV_KEYS`] from any
+/// stdio environment so connection identity is computed from configured
+/// state only, before runtime attribution is applied.
+fn transport_for_identity(transport: &McpServerTransportConfig) -> McpServerTransportConfig {
+    let mut transport = transport.clone();
+    if let McpServerTransportConfig::Stdio { env, .. } = &mut transport
+        && let Some(vars) = env.as_mut()
+    {
+        for key in RESERVED_WORKLOAD_ENV_KEYS {
+            vars.remove(key);
+        }
+    }
+    transport
 }
 
 /// Inputs that determine the identity of a live MCP connection.
@@ -214,7 +252,7 @@ impl McpServerConnectionIdentity {
 
         Self {
             auth: config.auth.clone(),
-            transport: config.transport.clone(),
+            transport: transport_for_identity(&config.transport),
             environment_id: config.environment_id.clone(),
             host_plugin_root: host_plugin_root.cloned(),
             oauth_store: stored_oauth_url
