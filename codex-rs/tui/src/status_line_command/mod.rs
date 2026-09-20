@@ -9,4 +9,6 @@
 //! escape; daemonizing formatters are unsupported).
 
 pub(crate) mod parser;
+pub(crate) mod process;
+pub(crate) mod runner;
 pub(crate) mod wire;
