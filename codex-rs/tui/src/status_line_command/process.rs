@@ -39,7 +39,7 @@ async fn execute(
         Ok(input) => input,
         Err(err) => return failure(StatusLineCommandFailureKind::Stdin, err.to_string()),
     };
-    let env = std::env::vars().collect::<HashMap<_, _>>();
+    let env = allowlisted_env();
     let spawned = match spawn_pipe_process(
         program,
         args,
@@ -105,6 +105,48 @@ async fn execute(
         Ok(parsed) => StatusLineCommandOutcome::Success(parsed),
         Err(err) => failure(StatusLineCommandFailureKind::Parse, err.to_string()),
     }
+}
+
+/// Environment variables passed through to a formatter's child process,
+/// verbatim (exact name match).
+const ENV_ALLOWLIST: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "LANG",
+    "TERM",
+    "COLORTERM",
+    "TZ",
+    "TMPDIR",
+    "CODEX_HOME",
+];
+
+/// Prefixes of environment variables passed through to a formatter's child
+/// process. `LC_*` covers the POSIX locale-category overrides (`LC_ALL`,
+/// `LC_CTYPE`, ...); `XDG_*` covers the XDG base-directory variables.
+const ENV_ALLOWLIST_PREFIXES: &[&str] = &["LC_", "XDG_"];
+
+/// Builds the environment passed to a status-line formatter child process
+/// from an explicit allowlist, rather than forwarding the full parent
+/// environment. Formatters are third-party, user-configured commands; a
+/// secret sitting in the Codex process environment (an API key, a signing
+/// key, an OAuth token) must never be handed to one implicitly.
+fn allowlisted_env() -> HashMap<String, String> {
+    std::env::vars()
+        .filter(|(key, _)| is_env_key_allowlisted(key))
+        .collect()
+}
+
+/// Whether `key` may be forwarded to a status-line formatter's child process.
+/// Split out from [`allowlisted_env`] so the policy is testable without
+/// depending on (or mutating) the real process environment.
+fn is_env_key_allowlisted(key: &str) -> bool {
+    ENV_ALLOWLIST.contains(&key)
+        || ENV_ALLOWLIST_PREFIXES
+            .iter()
+            .any(|prefix| key.starts_with(prefix))
 }
 
 #[derive(Debug)]

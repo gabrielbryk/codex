@@ -370,6 +370,102 @@ async fn timeout_terminates_formatter_process_group() {
     );
 }
 
+#[test]
+fn env_allowlist_admits_expected_variables() {
+    for key in [
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "LANG",
+        "TERM",
+        "COLORTERM",
+        "TZ",
+        "TMPDIR",
+        "CODEX_HOME",
+        "LC_ALL",
+        "LC_CTYPE",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+    ] {
+        assert!(is_env_key_allowlisted(key), "expected {key} to be allowed");
+    }
+}
+
+#[test]
+fn env_allowlist_rejects_secret_looking_variables() {
+    for key in [
+        "OPENAI_API_KEY",
+        "CODEX_CWD_ROUTE_SIGNING_KEY",
+        "ANTHROPIC_API_KEY",
+        "AWS_SECRET_ACCESS_KEY",
+        "GITHUB_TOKEN",
+        "CODEX_HOME_TOKEN",
+    ] {
+        assert!(
+            !is_env_key_allowlisted(key),
+            "expected {key} to be rejected"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn formatter_child_does_not_receive_a_secret_looking_env_var() {
+    // Build the environment the same way `execute` does, then hand it directly
+    // to the spawn call so this test does not need to mutate the real process
+    // environment (unsafe under edition 2024) to plant a fake secret.
+    let mut env = allowlisted_env();
+    env.insert(
+        "OPENAI_API_KEY".to_string(),
+        "sk-should-not-reach-child".to_string(),
+    );
+    // Re-filter through the real policy, exactly as `allowlisted_env` would if
+    // this key had been present in the parent process's environment.
+    let env: HashMap<String, String> = env
+        .into_iter()
+        .filter(|(key, _)| is_env_key_allowlisted(key))
+        .collect();
+    assert!(!env.contains_key("OPENAI_API_KEY"));
+
+    let config = shell_config(
+        concat!(
+            "IFS= read -r _input; ",
+            "if [ -n \"$OPENAI_API_KEY\" ]; then printf leaked; else printf clean; fi"
+        ),
+        Vec::new(),
+    );
+    let Some((program, args)) = config.command.split_first() else {
+        panic!("non-empty command");
+    };
+    let spawned = codex_utils_pty::spawn_pipe_process(
+        program,
+        args,
+        &std::env::current_dir().expect("current dir"),
+        &env,
+        /*arg0*/ &None,
+        /*inherited_fds*/ &[],
+    )
+    .await
+    .expect("spawn formatter");
+    let codex_utils_pty::SpawnedProcess {
+        session,
+        stdout_rx,
+        stderr_rx: _,
+        exit_rx: _,
+    } = spawned;
+    let writer = session.writer_sender();
+    writer
+        .send(input().to_json_line().expect("serialize input"))
+        .await
+        .expect("write stdin");
+    drop(writer);
+    session.close_stdin();
+    let output = collect_bounded(stdout_rx).await.expect("collect stdout");
+    assert_eq!(String::from_utf8_lossy(&output), "clean");
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn command_timeout_is_reported() {
