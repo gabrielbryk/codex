@@ -785,5 +785,328 @@ class RunWorkspaceTestsTest(unittest.TestCase):
             self.assertEqual(json.loads(sidecar.read_text()), ["codex-core::test_a"])
 
 
+class OnlySelectorValidationTest(unittest.TestCase):
+    def test_accepts_well_formed_selector(self) -> None:
+        validation.validate_only_selector("codex-core::route_claim::tests::case_a")
+
+    def test_rejects_selector_without_test_name(self) -> None:
+        with self.assertRaisesRegex(SystemExit, "invalid --only selector"):
+            validation.validate_only_selector("codex-core")
+
+    def test_rejects_shell_metacharacters_in_the_binary_id_segment(self) -> None:
+        # The contract's whitelist (`^[A-Za-z0-9_:./-]+::.+$`) only restricts
+        # the binary-id segment before `::`; commands are exec'd as argv
+        # lists (never a shell), so the free-form test-name segment after
+        # `::` is not itself a shell-injection surface.
+        for selector in (
+            "codex$(whoami)::case",
+            "codex-core; rm -rf /::case",
+            "codex-core`id`::case",
+            "codex-core && echo hi::case",
+        ):
+            with self.assertRaisesRegex(SystemExit, "invalid --only selector"):
+                validation.validate_only_selector(selector)
+
+
+class DiscoverOnlyBinaryIdsTest(unittest.TestCase):
+    def write_crate(
+        self,
+        root: Path,
+        name: str,
+        *,
+        bins: list[str] | None = None,
+        has_lib: bool = True,
+        test_files: list[str] | None = None,
+    ) -> None:
+        crate_dir = root / name
+        (crate_dir / "src").mkdir(parents=True)
+        lines = [
+            "[package]",
+            f'name = "{name}"',
+            'version = "0.1.0"',
+            "",
+        ]
+        for bin_name in bins or []:
+            lines += ["[[bin]]", f'name = "{bin_name}"', 'path = "src/bin/x.rs"', ""]
+        (crate_dir / "Cargo.toml").write_text("\n".join(lines))
+        if has_lib:
+            (crate_dir / "src" / "lib.rs").write_text("")
+        if test_files:
+            tests_dir = crate_dir / "tests"
+            tests_dir.mkdir()
+            for test_file in test_files:
+                (tests_dir / f"{test_file}.rs").write_text("")
+
+    def test_maps_lib_bin_and_integration_test_binary_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            codex_rs = Path(tmp)
+            self.write_crate(
+                codex_rs,
+                "codex-app-server",
+                bins=["codex-app-server", "exec-server"],
+                test_files=["all"],
+            )
+            self.write_crate(codex_rs, "codex-core", test_files=["all", "extra"])
+            self.write_crate(codex_rs, "codex-v8-poc", has_lib=True)
+
+            binary_ids = validation.discover_only_binary_ids(
+                codex_rs, ["codex-app-server", "codex-core", "codex-v8-poc"]
+            )
+
+            self.assertEqual(
+                binary_ids["codex-app-server"], ("codex-app-server", "lib", None)
+            )
+            self.assertEqual(
+                binary_ids["codex-app-server::bin/exec-server"],
+                ("codex-app-server", "bin", "exec-server"),
+            )
+            self.assertEqual(
+                binary_ids["codex-app-server::all"],
+                ("codex-app-server", "test", "all"),
+            )
+            self.assertEqual(binary_ids["codex-core"], ("codex-core", "lib", None))
+            self.assertEqual(
+                binary_ids["codex-core::all"], ("codex-core", "test", "all")
+            )
+            self.assertEqual(
+                binary_ids["codex-core::extra"], ("codex-core", "test", "extra")
+            )
+            self.assertEqual(binary_ids["codex-v8-poc"], ("codex-v8-poc", "lib", None))
+
+    def test_missing_package_is_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            codex_rs = Path(tmp)
+            binary_ids = validation.discover_only_binary_ids(
+                codex_rs, ["codex-never-registered"]
+            )
+            self.assertEqual(binary_ids, {})
+
+
+class ResolveOnlySelectorTest(unittest.TestCase):
+    def binary_ids(self) -> dict[str, tuple[str, str, str | None]]:
+        return {
+            "codex-core": ("codex-core", "lib", None),
+            "codex-core::all": ("codex-core", "test", "all"),
+            "codex-app-server::bin/exec-server": (
+                "codex-app-server",
+                "bin",
+                "exec-server",
+            ),
+        }
+
+    def test_prefers_longest_matching_binary_id(self) -> None:
+        result = validation.resolve_only_selector(
+            "codex-core::all::mod::case", self.binary_ids()
+        )
+        self.assertEqual(result, ("codex-core", "test", "all", "mod::case"))
+
+    def test_falls_back_to_lib_binary_id(self) -> None:
+        result = validation.resolve_only_selector(
+            "codex-core::route_claim::tests::case_a", self.binary_ids()
+        )
+        self.assertEqual(
+            result, ("codex-core", "lib", None, "route_claim::tests::case_a")
+        )
+
+    def test_resolves_bin_binary_id(self) -> None:
+        result = validation.resolve_only_selector(
+            "codex-app-server::bin/exec-server::smoke_test", self.binary_ids()
+        )
+        self.assertEqual(
+            result,
+            ("codex-app-server", "bin", "exec-server", "smoke_test"),
+        )
+
+    def test_rejects_unknown_binary_id(self) -> None:
+        with self.assertRaisesRegex(SystemExit, "does not match a known test binary"):
+            validation.resolve_only_selector("codex-unknown::case", self.binary_ids())
+
+
+class OnlyNextestCommandsTest(unittest.TestCase):
+    def test_builds_expected_command_for_single_selector(self) -> None:
+        binary_ids = {"codex-core": ("codex-core", "lib", None)}
+        commands = validation.only_nextest_commands(
+            ["codex-core::route_claim::tests::case_a"], binary_ids, retries=0
+        )
+        self.assertEqual(len(commands), 1)
+        cwd, command = commands[0]
+        self.assertEqual(cwd, validation.CODEX_RS)
+        self.assertEqual(
+            command,
+            [
+                "cargo",
+                "nextest",
+                "run",
+                "--profile",
+                "fork-fleet",
+                "-p",
+                "codex-core",
+                "--lib",
+                "-E",
+                "test(=route_claim::tests::case_a)",
+                "--retries",
+                "0",
+            ],
+        )
+
+    def test_groups_multiple_selectors_in_same_binary_into_one_filter(self) -> None:
+        binary_ids = {"codex-core::all": ("codex-core", "test", "all")}
+        commands = validation.only_nextest_commands(
+            [
+                "codex-core::all::case_a",
+                "codex-core::all::case_b",
+            ],
+            binary_ids,
+            retries=2,
+        )
+        self.assertEqual(len(commands), 1)
+        _, command = commands[0]
+        self.assertEqual(
+            command,
+            [
+                "cargo",
+                "nextest",
+                "run",
+                "--profile",
+                "fork-fleet",
+                "-p",
+                "codex-core",
+                "--test",
+                "all",
+                "-E",
+                "test(=case_a) | test(=case_b)",
+                "--retries",
+                "2",
+            ],
+        )
+
+    def test_v8_poc_gets_sandbox_feature_flag(self) -> None:
+        binary_ids = {"codex-v8-poc": ("codex-v8-poc", "lib", None)}
+        commands = validation.only_nextest_commands(
+            ["codex-v8-poc::case_a"], binary_ids, retries=0
+        )
+        _, command = commands[0]
+        self.assertEqual(
+            command,
+            [
+                "cargo",
+                "nextest",
+                "run",
+                "--profile",
+                "fork-fleet",
+                "-p",
+                "codex-v8-poc",
+                "--lib",
+                "--features",
+                "sandbox",
+                "-E",
+                "test(=case_a)",
+                "--retries",
+                "0",
+            ],
+        )
+
+    def test_separate_binaries_produce_separate_commands_in_order(self) -> None:
+        binary_ids = {
+            "codex-core": ("codex-core", "lib", None),
+            "codex-tui": ("codex-tui", "lib", None),
+        }
+        commands = validation.only_nextest_commands(
+            ["codex-tui::case_a", "codex-core::case_b"], binary_ids, retries=0
+        )
+        packages = [command[6] for _, command in commands]
+        self.assertEqual(packages, ["codex-tui", "codex-core"])
+
+
+class ParseWorkspaceTestsArgsTest(unittest.TestCase):
+    def test_no_args_returns_empty_defaults(self) -> None:
+        self.assertEqual(validation.parse_workspace_tests_args([]), ([], None))
+
+    def test_collects_repeated_only_and_parses_retries(self) -> None:
+        only, retries = validation.parse_workspace_tests_args(
+            [
+                "--only",
+                "codex-core::case_a",
+                "--only",
+                "codex-tui::case_b",
+                "--retries",
+                "3",
+            ]
+        )
+        self.assertEqual(only, ["codex-core::case_a", "codex-tui::case_b"])
+        self.assertEqual(retries, 3)
+
+    def test_rejects_invalid_only_selector(self) -> None:
+        with self.assertRaisesRegex(SystemExit, "invalid --only selector"):
+            validation.parse_workspace_tests_args(["--only", "no-separator"])
+
+    def test_rejects_non_integer_retries(self) -> None:
+        with self.assertRaisesRegex(SystemExit, "--retries must be an integer"):
+            validation.parse_workspace_tests_args(["--retries", "abc"])
+
+    def test_rejects_dangling_flag_without_value(self) -> None:
+        with self.assertRaisesRegex(SystemExit, "--only requires a value"):
+            validation.parse_workspace_tests_args(["--only"])
+
+    def test_rejects_unrecognized_argument(self) -> None:
+        with self.assertRaisesRegex(SystemExit, "unrecognized argument"):
+            validation.parse_workspace_tests_args(["--bogus"])
+
+
+class RunWorkspaceTestsOnlySidecarTest(unittest.TestCase):
+    def test_only_run_sidecar_contains_only_the_selected_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            codex_rs = Path(tmp) / "codex-rs"
+            junit_path = codex_rs / "target/nextest/fork-fleet/junit.xml"
+            commands = [
+                (Path(tmp), ["cargo", "build", "-p", "codex-code-mode-host"]),
+                (
+                    codex_rs,
+                    [
+                        "cargo",
+                        "nextest",
+                        "run",
+                        "--profile",
+                        "fork-fleet",
+                        "-p",
+                        "codex-core",
+                        "--lib",
+                        "-E",
+                        "test(=route_claim::tests::case_a)",
+                        "--retries",
+                        "0",
+                    ],
+                ),
+            ]
+
+            def fake_run(command, cwd, env, check):
+                if command[0] == "cargo" and "nextest" not in command:
+                    return SimpleNamespace(returncode=0)
+                junit_path.parent.mkdir(parents=True, exist_ok=True)
+                junit_path.write_text(
+                    '<testsuites><testsuite name="codex-core">'
+                    '<testcase name="route_claim::tests::case_a"><failure/></testcase>'
+                    "</testsuite></testsuites>"
+                )
+                return SimpleNamespace(returncode=100)
+
+            with (
+                patch.object(validation, "CODEX_RS", codex_rs),
+                patch.object(validation.subprocess, "run", side_effect=fake_run),
+                patch.dict(
+                    validation.os.environ, {"FORK_FLEET_ARTIFACT_DIR": tmp}, clear=False
+                ),
+            ):
+                with self.assertRaises(SystemExit) as ctx:
+                    validation.run_workspace_tests(commands, {})
+
+            self.assertEqual(ctx.exception.code, 100)
+            sidecar = Path(tmp) / "workspace-tests-failures.json"
+            self.assertEqual(
+                json.loads(sidecar.read_text()),
+                ["codex-core::route_claim::tests::case_a"],
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
