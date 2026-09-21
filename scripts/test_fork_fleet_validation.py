@@ -6,6 +6,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 SCRIPT = Path(__file__).with_name("fork_fleet_validation.py")
@@ -568,6 +569,220 @@ class RustToolchainEnvironmentTest(unittest.TestCase):
                     SystemExit, "pinned rustup toolchain bin directory is missing"
                 ):
                     validation.rust_toolchain_environment(real_home, env={})
+
+    def test_path_includes_uv_and_toolchain_just_bins(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, codex_rs, real_home = self._fixture(tmp)
+            (
+                real_home / ".rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu/bin"
+            ).mkdir(parents=True)
+            local_bin = real_home / ".local/bin"
+            local_bin.mkdir(parents=True)
+            toolchain_just_bin = (
+                real_home / ".local/share/fork-fleet/toolchains/just-1.51.0/bin"
+            )
+            toolchain_just_bin.mkdir(parents=True)
+
+            with patch.object(validation, "CODEX_RS", codex_rs):
+                env = validation.rust_toolchain_environment(real_home, env={})
+
+            path_entries = env["PATH"].split(":")
+            self.assertIn(str(local_bin), path_entries)
+            self.assertIn(str(toolchain_just_bin), path_entries)
+            self.assertEqual(env["UV_PYTHON"], "3.13")
+
+    def test_just_bin_override_takes_precedence_over_toolchain_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, codex_rs, real_home = self._fixture(tmp)
+            (
+                real_home / ".rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu/bin"
+            ).mkdir(parents=True)
+            default_just_bin = (
+                real_home / ".local/share/fork-fleet/toolchains/just-1.51.0/bin"
+            )
+            default_just_bin.mkdir(parents=True)
+            override_bin = Path(tmp) / "custom-just-bin"
+            override_bin.mkdir()
+
+            with patch.object(validation, "CODEX_RS", codex_rs):
+                env = validation.rust_toolchain_environment(
+                    real_home, env={"JUST_BIN": str(override_bin)}
+                )
+
+            path_entries = env["PATH"].split(":")
+            self.assertIn(str(override_bin), path_entries)
+            self.assertNotIn(str(default_just_bin), path_entries)
+
+    def test_uv_python_not_overwritten_when_already_set(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, codex_rs, real_home = self._fixture(tmp)
+            (
+                real_home / ".rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu/bin"
+            ).mkdir(parents=True)
+
+            with patch.object(validation, "CODEX_RS", codex_rs):
+                env = validation.rust_toolchain_environment(
+                    real_home, env={"UV_PYTHON": "3.11"}
+                )
+
+            self.assertEqual(env["UV_PYTHON"], "3.11")
+
+
+class WorkspaceTestPackageArgsTest(unittest.TestCase):
+    def test_package_args_are_dash_p_flag_pairs(self) -> None:
+        args = validation.WORKSPACE_TEST_PACKAGE_ARGS
+        self.assertEqual(len(args) % 2, 0)
+        for flag in args[0::2]:
+            self.assertEqual(flag, "-p")
+        self.assertIn("codex-tui", args)
+        self.assertIn("codex-core", args)
+        self.assertIn("codex-app-server", args)
+
+
+class NextestJunitFailureParsingTest(unittest.TestCase):
+    def test_parses_failures_and_errors_across_testsuites(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            junit_path = Path(tmp) / "junit.xml"
+            junit_path.write_text(
+                """<?xml version="1.0"?>
+<testsuites>
+  <testsuite name="codex-core">
+    <testcase name="test_pass"/>
+    <testcase name="test_fail"><failure message="boom"/></testcase>
+  </testsuite>
+  <testsuite name="codex-tui">
+    <testcase name="test_error"><error message="panic"/></testcase>
+  </testsuite>
+</testsuites>
+"""
+            )
+            failures = validation.parse_nextest_junit_failures(junit_path)
+            self.assertEqual(
+                failures, {"codex-core::test_fail", "codex-tui::test_error"}
+            )
+
+    def test_missing_junit_returns_empty_set(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            failures = validation.parse_nextest_junit_failures(
+                Path(tmp) / "missing.xml"
+            )
+            self.assertEqual(failures, set())
+
+
+class WorkspaceTestsFailuresSidecarTest(unittest.TestCase):
+    def test_default_path_is_under_the_fork_fleet_nextest_profile_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            codex_rs = Path(tmp) / "codex-rs"
+            with (
+                patch.object(validation, "CODEX_RS", codex_rs),
+                patch.dict(validation.os.environ, clear=False),
+            ):
+                validation.os.environ.pop("FORK_FLEET_ARTIFACT_DIR", None)
+                path = validation.workspace_tests_failures_path()
+            self.assertEqual(
+                path,
+                codex_rs / "target/nextest/fork-fleet/workspace-tests-failures.json",
+            )
+
+    def test_artifact_dir_env_overrides_default_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(
+                validation.os.environ,
+                {"FORK_FLEET_ARTIFACT_DIR": tmp},
+                clear=False,
+            ):
+                path = validation.workspace_tests_failures_path()
+            self.assertEqual(path, Path(tmp) / "workspace-tests-failures.json")
+
+    def test_write_sorts_failures_and_creates_parent_dirs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(
+                validation.os.environ,
+                {"FORK_FLEET_ARTIFACT_DIR": tmp},
+                clear=False,
+            ):
+                output_path = validation.write_workspace_tests_failures(
+                    {"codex-tui::z", "codex-core::a"}
+                )
+            self.assertEqual(
+                json.loads(output_path.read_text()),
+                ["codex-core::a", "codex-tui::z"],
+            )
+
+
+class RunWorkspaceTestsTest(unittest.TestCase):
+    def test_build_failure_raises_immediately_without_writing_a_sidecar(self) -> None:
+        commands = [
+            (Path("/repo/codex-rs"), ["cargo", "build", "-p", "codex-code-mode-host"]),
+            (Path("/repo"), ["just", "test", "--profile", "fork-fleet"]),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.object(validation.subprocess, "run") as run,
+                patch.dict(
+                    validation.os.environ, {"FORK_FLEET_ARTIFACT_DIR": tmp}, clear=False
+                ),
+            ):
+                run.return_value = SimpleNamespace(returncode=1)
+                with self.assertRaises(SystemExit) as ctx:
+                    validation.run_workspace_tests(commands, {})
+            self.assertEqual(ctx.exception.code, 1)
+            run.assert_called_once()
+            self.assertFalse((Path(tmp) / "workspace-tests-failures.json").exists())
+
+    def test_aggregates_failures_across_invocations_before_one_overwrites_junit(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            codex_rs = Path(tmp) / "codex-rs"
+            junit_path = codex_rs / "target/nextest/fork-fleet/junit.xml"
+            commands = [
+                (Path(tmp), ["cargo", "build", "-p", "codex-code-mode-host"]),
+                (
+                    Path(tmp),
+                    ["just", "test", "--profile", "fork-fleet", "-p", "codex-core"],
+                ),
+                (
+                    Path(tmp),
+                    ["just", "test", "--profile", "fork-fleet", "-p", "codex-v8-poc"],
+                ),
+            ]
+            call_count = 0
+
+            def fake_run(command, cwd, env, check):
+                nonlocal call_count
+                call_count += 1
+                if command[0] == "cargo":
+                    return SimpleNamespace(returncode=0)
+                junit_path.parent.mkdir(parents=True, exist_ok=True)
+                if "codex-core" in command:
+                    junit_path.write_text(
+                        '<testsuites><testsuite name="codex-core">'
+                        '<testcase name="test_a"><failure/></testcase>'
+                        "</testsuite></testsuites>"
+                    )
+                    return SimpleNamespace(returncode=100)
+                junit_path.write_text(
+                    '<testsuites><testsuite name="codex-v8-poc">'
+                    '<testcase name="test_b"/>'
+                    "</testsuite></testsuites>"
+                )
+                return SimpleNamespace(returncode=0)
+
+            with (
+                patch.object(validation, "CODEX_RS", codex_rs),
+                patch.object(validation.subprocess, "run", side_effect=fake_run),
+                patch.dict(
+                    validation.os.environ, {"FORK_FLEET_ARTIFACT_DIR": tmp}, clear=False
+                ),
+            ):
+                with self.assertRaises(SystemExit) as ctx:
+                    validation.run_workspace_tests(commands, {})
+
+            self.assertEqual(ctx.exception.code, 100)
+            self.assertEqual(call_count, 3)
+            sidecar = Path(tmp) / "workspace-tests-failures.json"
+            self.assertEqual(json.loads(sidecar.read_text()), ["codex-core::test_a"])
 
 
 if __name__ == "__main__":

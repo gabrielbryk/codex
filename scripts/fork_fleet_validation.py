@@ -9,6 +9,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import xml.etree.ElementTree as ET
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,47 @@ import tomllib
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CODEX_RS = REPO_ROOT / "codex-rs"
+NEXTEST_FORK_FLEET_PROFILE = "fork-fleet"
+
+# Shared with both the `workspace-tests` and `workspace-tests-compile` actions.
+WORKSPACE_TEST_PACKAGE_ARGS = [
+    "-p",
+    "codex-app-server",
+    "-p",
+    "codex-app-server-client",
+    "-p",
+    "codex-app-server-daemon",
+    "-p",
+    "codex-app-server-protocol",
+    "-p",
+    "codex-app-server-transport",
+    "-p",
+    "codex-cli",
+    "-p",
+    "codex-config",
+    "-p",
+    "codex-core",
+    "-p",
+    "codex-external-agent-migration",
+    "-p",
+    "codex-goal-extension",
+    "-p",
+    "codex-mcp",
+    "-p",
+    "codex-otel",
+    "-p",
+    "codex-protocol",
+    "-p",
+    "codex-rmcp-client",
+    "-p",
+    "codex-thread-manager-sample",
+    "-p",
+    "codex-tui",
+    "-p",
+    "codex-uds",
+    "-p",
+    "codex-utils-pty",
+]
 
 CANONICAL_REFERENCES = (
     "planning-and-reconciliation.md",
@@ -413,9 +455,27 @@ def rust_toolchain_environment(
         )
     cargo_bin = cargo_home / "bin"
 
+    # uv (installed to ~/.local/bin) and the pinned fork-fleet `just` toolchain
+    # are not on the sanitized PATH validation stages inherit; add them here so
+    # `format`/other actions that shell out to `just`/`uv` resolve the pinned
+    # binaries rather than an asdf shim or nothing at all. JUST_BIN, if set,
+    # names the directory containing the `just` binary and takes precedence
+    # over the fork-fleet toolchain default.
+    just_bin_override = base_env.get("JUST_BIN") or os.environ.get("JUST_BIN")
+    just_bin = (
+        Path(just_bin_override)
+        if just_bin_override
+        else real_home / ".local/share/fork-fleet/toolchains/just-1.51.0/bin"
+    )
+    local_bin = real_home / ".local/bin"
+
     path_entries = [str(toolchain_bin)]
     if cargo_bin.is_dir():
         path_entries.append(str(cargo_bin))
+    if just_bin.is_dir():
+        path_entries.append(str(just_bin))
+    if local_bin.is_dir():
+        path_entries.append(str(local_bin))
     path_entries.extend(["/usr/local/bin", "/usr/bin", "/bin"])
     existing_path = base_env.get("PATH")
     if existing_path:
@@ -427,6 +487,7 @@ def rust_toolchain_environment(
     result.setdefault("CARGO_HOME", str(cargo_home))
     result.setdefault("RUSTUP_HOME", str(rustup_home))
     result.setdefault("RUSTUP_TOOLCHAIN", rustup_toolchain)
+    result.setdefault("UV_PYTHON", "3.13")
     return result
 
 
@@ -451,6 +512,83 @@ def rusty_v8_environment(real_home: Path) -> dict[str, str]:
     }
 
 
+def nextest_fork_fleet_junit_path() -> Path:
+    return CODEX_RS / "target" / "nextest" / NEXTEST_FORK_FLEET_PROFILE / "junit.xml"
+
+
+def workspace_tests_failures_path() -> Path:
+    """Where the workspace-tests failure-set sidecar is written: the daemon's
+    per-run artifact directory when it sets FORK_FLEET_ARTIFACT_DIR, else next
+    to the nextest fork-fleet profile's own output directory.
+    """
+    artifact_dir = os.environ.get("FORK_FLEET_ARTIFACT_DIR")
+    if artifact_dir:
+        return Path(artifact_dir) / "workspace-tests-failures.json"
+    return (
+        CODEX_RS
+        / "target"
+        / "nextest"
+        / NEXTEST_FORK_FLEET_PROFILE
+        / ("workspace-tests-failures.json")
+    )
+
+
+def parse_nextest_junit_failures(junit_path: Path) -> set[str]:
+    """Parse a nextest JUnit report into a set of "<binary-id>::<test name>"
+    failure/error ids. Returns an empty set if the report does not exist (a
+    build step ran instead of a test invocation, or nextest never produced a
+    report).
+    """
+    if not junit_path.is_file():
+        return set()
+    tree = ET.parse(junit_path)
+    failures: set[str] = set()
+    for testsuite in tree.getroot().iter("testsuite"):
+        binary_id = testsuite.get("name", "")
+        for testcase in testsuite.iter("testcase"):
+            if testcase.find("failure") is None and testcase.find("error") is None:
+                continue
+            test_name = testcase.get("name", "")
+            failures.add(f"{binary_id}::{test_name}")
+    return failures
+
+
+def write_workspace_tests_failures(failures: set[str]) -> Path:
+    output_path = workspace_tests_failures_path()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(sorted(failures), indent=2) + "\n")
+    return output_path
+
+
+def run_workspace_tests(
+    commands: list[tuple[Path, list[str]]], environment: Mapping[str, str]
+) -> None:
+    """Run the workspace-tests command sequence (code-mode-host build, then the
+    nextest invocations). Build failures raise immediately (nothing to parse).
+    A nextest invocation's non-zero exit is deferred until every invocation has
+    run and its JUnit report has been folded into the failure-set sidecar, so
+    the sidecar reflects every failure even when an earlier package fails
+    first; the process still exits with nextest's own (first non-zero) code.
+    """
+    final_returncode = 0
+    failures: set[str] = set()
+    for cwd, command in commands:
+        completed = subprocess.run(command, cwd=cwd, env=environment, check=False)
+        is_nextest_invocation = "nextest" in command or (
+            len(command) >= 2 and command[1] == "test"
+        )
+        if not is_nextest_invocation:
+            if completed.returncode:
+                raise SystemExit(completed.returncode)
+            continue
+        failures |= parse_nextest_junit_failures(nextest_fork_fleet_junit_path())
+        if completed.returncode and not final_returncode:
+            final_returncode = completed.returncode
+    write_workspace_tests_failures(failures)
+    if final_returncode:
+        raise SystemExit(final_returncode)
+
+
 def main() -> None:
     if len(sys.argv) == 3 and sys.argv[1] in PLAN_ACTIONS:
         plan_path = Path(sys.argv[2]).resolve()
@@ -461,8 +599,11 @@ def main() -> None:
         return
 
     real_home = Path.home()
+    just_bin_override = os.environ.get("JUST_BIN")
     fork_fleet_just = (
-        real_home / ".local/share/fork-fleet/toolchains/just-1.51.0/bin/just"
+        Path(just_bin_override) / "just"
+        if just_bin_override
+        else real_home / ".local/share/fork-fleet/toolchains/just-1.51.0/bin/just"
     )
     if not fork_fleet_just.is_file():
         raise SystemExit(f"Fork Fleet just executable is missing: {fork_fleet_just}")
@@ -488,47 +629,18 @@ def main() -> None:
         ],
         "workspace-tests": [
             (
+                CODEX_RS,
+                ["cargo", "build", "-p", "codex-code-mode-host"],
+            ),
+            (
                 REPO_ROOT,
                 [
                     str(fork_fleet_just),
                     "test",
                     "--test-threads=4",
-                    "-p",
-                    "codex-app-server",
-                    "-p",
-                    "codex-app-server-client",
-                    "-p",
-                    "codex-app-server-daemon",
-                    "-p",
-                    "codex-app-server-protocol",
-                    "-p",
-                    "codex-app-server-transport",
-                    "-p",
-                    "codex-cli",
-                    "-p",
-                    "codex-config",
-                    "-p",
-                    "codex-core",
-                    "-p",
-                    "codex-external-agent-migration",
-                    "-p",
-                    "codex-goal-extension",
-                    "-p",
-                    "codex-mcp",
-                    "-p",
-                    "codex-otel",
-                    "-p",
-                    "codex-protocol",
-                    "-p",
-                    "codex-rmcp-client",
-                    "-p",
-                    "codex-thread-manager-sample",
-                    "-p",
-                    "codex-tui",
-                    "-p",
-                    "codex-uds",
-                    "-p",
-                    "codex-utils-pty",
+                    "--profile",
+                    NEXTEST_FORK_FLEET_PROFILE,
+                    *WORKSPACE_TEST_PACKAGE_ARGS,
                 ],
             ),
             (
@@ -536,6 +648,31 @@ def main() -> None:
                 [
                     str(fork_fleet_just),
                     "test",
+                    "--profile",
+                    NEXTEST_FORK_FLEET_PROFILE,
+                    "-p",
+                    "codex-v8-poc",
+                    "--features",
+                    "sandbox",
+                ],
+            ),
+        ],
+        "workspace-tests-compile": [
+            (
+                REPO_ROOT,
+                [
+                    str(fork_fleet_just),
+                    "test",
+                    "--no-run",
+                    *WORKSPACE_TEST_PACKAGE_ARGS,
+                ],
+            ),
+            (
+                CODEX_RS,
+                [
+                    str(fork_fleet_just),
+                    "test",
+                    "--no-run",
                     "-p",
                     "codex-v8-poc",
                     "--features",
@@ -635,10 +772,15 @@ def main() -> None:
             **rusty_v8_environment(real_home),
         }
         environment = rust_toolchain_environment(real_home, environment)
-        for cwd, command in commands:
-            completed = subprocess.run(command, cwd=cwd, env=environment, check=False)
-            if completed.returncode:
-                raise SystemExit(completed.returncode)
+        if sys.argv[1] == "workspace-tests":
+            run_workspace_tests(commands, environment)
+        else:
+            for cwd, command in commands:
+                completed = subprocess.run(
+                    command, cwd=cwd, env=environment, check=False
+                )
+                if completed.returncode:
+                    raise SystemExit(completed.returncode)
 
     post_check = POST_CHECKS.get(sys.argv[1])
     if post_check is not None:
