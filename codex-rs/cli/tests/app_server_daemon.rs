@@ -102,43 +102,24 @@ fn signal(pid: u32, signal: libc::c_int) -> Result<()> {
     Ok(())
 }
 
-fn wait_for_exit(pid: u32) -> Result<()> {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        let output = Command::new("/bin/ps")
-            .args(["-p", &pid.to_string(), "-o", "stat="])
-            .output()
-            .context("failed to invoke ps")?;
-        let state = String::from_utf8_lossy(&output.stdout);
-        if !output.status.success() || state.trim().starts_with('Z') {
-            return Ok(());
-        }
-        ensure!(Instant::now() < deadline, "pid {pid} did not exit: {state}");
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
 #[test]
 fn managed_starts_ensure_one_updater_and_recover_a_missing_one() -> Result<()> {
+    // Under the fork's stock-updater policy (`enforce_stock_updater_disabled`),
+    // the managed updater must never be started for any lifecycle transition,
+    // regardless of settings.json. This is the fork's replacement for
+    // upstream's "one updater, recovered if missing" contract.
     let daemon = TestDaemon::new()?;
     assert_eq!(daemon.lifecycle("start")?["status"], "started");
     let backend_pid = daemon.pid("app-server.pid")?;
-    let updater_pid = daemon.pid("app-server-updater.pid")?;
-    assert_ne!(backend_pid, updater_pid);
+    assert!(daemon.pid("app-server-updater.pid").is_err());
 
     assert_eq!(daemon.lifecycle("start")?["status"], "alreadyRunning");
     assert_eq!(daemon.pid("app-server.pid")?, backend_pid);
-    assert_eq!(daemon.pid("app-server-updater.pid")?, updater_pid);
+    assert!(daemon.pid("app-server-updater.pid").is_err());
 
-    signal(updater_pid, libc::SIGTERM)?;
-    wait_for_exit(updater_pid)?;
-    assert_eq!(daemon.lifecycle("start")?["status"], "alreadyRunning");
-    assert_eq!(daemon.pid("app-server.pid")?, backend_pid);
-    let replacement_pid = daemon.pid("app-server-updater.pid")?;
-    assert_ne!(replacement_pid, updater_pid);
     assert_eq!(daemon.lifecycle("restart")?["status"], "restarted");
     assert_ne!(daemon.pid("app-server.pid")?, backend_pid);
-    assert_eq!(daemon.pid("app-server-updater.pid")?, replacement_pid);
+    assert!(daemon.pid("app-server-updater.pid").is_err());
     Ok(())
 }
 
@@ -158,33 +139,24 @@ fn managed_start_succeeds_when_updater_record_is_invalid() -> Result<()> {
 
 #[test]
 fn managed_start_keeps_updater_on_marker_mismatch_but_stops_it_for_pin() -> Result<()> {
+    // Fork policy disables the updater unconditionally, so neither the marker
+    // mismatch nor its resolution ever produces a running updater.
     let daemon = TestDaemon::new()?;
     assert_eq!(daemon.lifecycle("start")?["status"], "started");
-    let updater_pid = daemon.pid("app-server-updater.pid")?;
+    assert!(daemon.pid("app-server-updater.pid").is_err());
     let marker = daemon
         .home
         .path()
         .join("packages/standalone/auto-update-version");
     std::fs::write(&marker, "0.1.0-other-target")?;
     assert_eq!(daemon.lifecycle("start")?["status"], "alreadyRunning");
-    assert_eq!(daemon.pid("app-server-updater.pid")?, updater_pid);
+    assert!(daemon.pid("app-server-updater.pid").is_err());
     assert_eq!(daemon.lifecycle("update")?["status"], "unsupported");
-    std::thread::sleep(Duration::from_millis(250));
-    let updater_state = Command::new("/bin/ps")
-        .args(["-p", &updater_pid.to_string(), "-o", "stat="])
-        .output()?;
-    ensure!(
-        updater_state.status.success()
-            && !String::from_utf8_lossy(&updater_state.stdout)
-                .trim()
-                .starts_with('Z'),
-        "updater exited during the latest marker transition"
-    );
+    assert!(daemon.pid("app-server-updater.pid").is_err());
 
     std::fs::remove_file(marker)?;
 
     assert_eq!(daemon.lifecycle("start")?["status"], "alreadyRunning");
-    wait_for_exit(updater_pid)?;
     assert!(
         !daemon
             .home
@@ -197,9 +169,13 @@ fn managed_start_keeps_updater_on_marker_mismatch_but_stops_it_for_pin() -> Resu
 
 #[test]
 fn restart_applies_saved_updater_preference() -> Result<()> {
+    // A saved preference of `autoUpdateEnabled: true` no longer has any
+    // effect: `ensure_managed_updater` forces the policy off at its single
+    // choke point before honoring settings.json, so the updater stays off
+    // and `bootstrap`'s reported `autoUpdateEnabled` reflects that truthfully.
     let daemon = TestDaemon::new()?;
     assert_eq!(daemon.lifecycle("start")?["status"], "started");
-    let updater_pid = daemon.pid("app-server-updater.pid")?;
+    assert!(daemon.pid("app-server-updater.pid").is_err());
     let settings = daemon.home.path().join("app-server-daemon/settings.json");
     std::fs::write(
         &settings,
@@ -208,7 +184,6 @@ fn restart_applies_saved_updater_preference() -> Result<()> {
         }))?,
     )?;
     assert_eq!(daemon.lifecycle("restart")?["status"], "restarted");
-    wait_for_exit(updater_pid)?;
     assert!(daemon.pid("app-server-updater.pid").is_err());
     assert_eq!(daemon.lifecycle("bootstrap")?["autoUpdateEnabled"], false);
     assert!(daemon.pid("app-server-updater.pid").is_err());
@@ -220,7 +195,8 @@ fn restart_applies_saved_updater_preference() -> Result<()> {
         }))?,
     )?;
     assert_eq!(daemon.lifecycle("restart")?["status"], "restarted");
-    assert_ne!(daemon.pid("app-server-updater.pid")?, updater_pid);
+    assert!(daemon.pid("app-server-updater.pid").is_err());
+    assert_eq!(daemon.lifecycle("bootstrap")?["autoUpdateEnabled"], false);
 
     std::fs::write(&settings, "{malformed")?;
     assert_eq!(daemon.lifecycle("stop")?["status"], "stopped");
