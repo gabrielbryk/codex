@@ -759,6 +759,20 @@ def is_nextest_invocation(command: list[str]) -> bool:
     return "nextest" in command or (len(command) >= 2 and command[1] == "test")
 
 
+def read_fresh_nextest_junit_failures(junit_path: Path) -> tuple[set[str], bool]:
+    """Read a JUnit report produced by the nextest invocation that just ran.
+    Returns `(failures, ok)`, where `ok` is False when the report is missing
+    or unparseable -- distinct from a valid, empty-failure report -- which
+    signals a build or harness failure rather than a completed test run.
+    """
+    if not junit_path.is_file():
+        return set(), False
+    try:
+        return parse_nextest_junit_failures(junit_path), True
+    except ET.ParseError:
+        return set(), False
+
+
 def run_workspace_tests(
     commands: list[tuple[Path, list[str]]], environment: Mapping[str, str]
 ) -> None:
@@ -768,16 +782,41 @@ def run_workspace_tests(
     run and its JUnit report has been folded into the failure-set sidecar, so
     the sidecar reflects every failure even when an earlier package fails
     first; the process still exits with nextest's own (first non-zero) code.
+
+    Every nextest invocation shares the same fork-fleet-profile JUnit path, so
+    a pre-existing (stale, from an earlier run under a shared target dir) or
+    never-produced (a build or harness failure inside `cargo nextest run`
+    itself, which exits non-zero without ever writing a report) JUnit report
+    must never be read as this invocation's result: that silently yields an
+    empty failure set, which downstream diffing treats as "no new failures".
+    So the JUnit path is cleared before each nextest invocation, and a
+    non-zero exit with no fresh, parseable report aborts immediately without
+    writing the failure-set sidecar at all -- covering both the full
+    workspace-tests run and an `--only` solo rerun, which shares this same
+    command-sequence path.
     """
     final_returncode = 0
     failures: set[str] = set()
+    junit_path = nextest_fork_fleet_junit_path()
     for cwd, command in commands:
+        if is_nextest_invocation(command):
+            junit_path.unlink(missing_ok=True)
         completed = subprocess.run(command, cwd=cwd, env=environment, check=False)
         if not is_nextest_invocation(command):
             if completed.returncode:
                 raise SystemExit(completed.returncode)
             continue
-        failures |= parse_nextest_junit_failures(nextest_fork_fleet_junit_path())
+        run_failures, junit_ok = read_fresh_nextest_junit_failures(junit_path)
+        if completed.returncode and not junit_ok:
+            print(
+                f"error: `{' '.join(command)}` exited {completed.returncode} "
+                f"with no fresh JUnit report at {junit_path} -- treating as a "
+                "build or harness failure, not writing "
+                "workspace-tests-failures.json",
+                file=sys.stderr,
+            )
+            raise SystemExit(completed.returncode)
+        failures |= run_failures
         if completed.returncode and not final_returncode:
             final_returncode = completed.returncode
     write_workspace_tests_failures(failures)
