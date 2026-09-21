@@ -1910,6 +1910,7 @@ async fn remote_control_http_mode_enrolls_before_connecting() {
                     "codexHome": codex_home.path(),
                     "platformFamily": "test-family",
                     "platformOs": "test-os",
+                    "serverIdentity": null,
                 }
             }
         })
