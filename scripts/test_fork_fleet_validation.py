@@ -784,6 +784,203 @@ class RunWorkspaceTestsTest(unittest.TestCase):
             sidecar = Path(tmp) / "workspace-tests-failures.json"
             self.assertEqual(json.loads(sidecar.read_text()), ["codex-core::test_a"])
 
+    def test_missing_junit_with_nonzero_exit_raises_without_sidecar(self) -> None:
+        # nextest exits nonzero but never writes a junit.xml at all (e.g. the
+        # harness itself crashed before running any test). This must not be
+        # read as "zero failures".
+        with tempfile.TemporaryDirectory() as tmp:
+            codex_rs = Path(tmp) / "codex-rs"
+            commands = [
+                (
+                    Path(tmp),
+                    ["just", "test", "--profile", "fork-fleet", "-p", "codex-core"],
+                ),
+            ]
+            with (
+                patch.object(validation, "CODEX_RS", codex_rs),
+                patch.object(validation.subprocess, "run") as run,
+                patch.dict(
+                    validation.os.environ, {"FORK_FLEET_ARTIFACT_DIR": tmp}, clear=False
+                ),
+            ):
+                run.return_value = SimpleNamespace(returncode=101)
+                with self.assertRaises(SystemExit) as ctx:
+                    validation.run_workspace_tests(commands, {})
+            self.assertEqual(ctx.exception.code, 101)
+            self.assertFalse((Path(tmp) / "workspace-tests-failures.json").exists())
+
+    def test_unparseable_junit_with_nonzero_exit_raises_without_sidecar(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            codex_rs = Path(tmp) / "codex-rs"
+            junit_path = codex_rs / "target/nextest/fork-fleet/junit.xml"
+            commands = [
+                (
+                    Path(tmp),
+                    ["just", "test", "--profile", "fork-fleet", "-p", "codex-core"],
+                ),
+            ]
+
+            def fake_run(command, cwd, env, check):
+                junit_path.parent.mkdir(parents=True, exist_ok=True)
+                junit_path.write_text("not valid xml <<<")
+                return SimpleNamespace(returncode=101)
+
+            with (
+                patch.object(validation, "CODEX_RS", codex_rs),
+                patch.object(validation.subprocess, "run", side_effect=fake_run),
+                patch.dict(
+                    validation.os.environ, {"FORK_FLEET_ARTIFACT_DIR": tmp}, clear=False
+                ),
+            ):
+                with self.assertRaises(SystemExit) as ctx:
+                    validation.run_workspace_tests(commands, {})
+            self.assertEqual(ctx.exception.code, 101)
+            self.assertFalse((Path(tmp) / "workspace-tests-failures.json").exists())
+
+    def test_stale_junit_is_removed_before_the_next_nextest_invocation(self) -> None:
+        # A stale junit.xml left over from a previous run (shared target dir)
+        # must never be attributed to this invocation. If this invocation
+        # crashes without writing its own report, the stale content must not
+        # leak through as "no failures".
+        with tempfile.TemporaryDirectory() as tmp:
+            codex_rs = Path(tmp) / "codex-rs"
+            junit_path = codex_rs / "target/nextest/fork-fleet/junit.xml"
+            junit_path.parent.mkdir(parents=True, exist_ok=True)
+            junit_path.write_text(
+                '<testsuites><testsuite name="codex-core">'
+                '<testcase name="stale_test"><failure/></testcase>'
+                "</testsuite></testsuites>"
+            )
+            commands = [
+                (
+                    Path(tmp),
+                    ["just", "test", "--profile", "fork-fleet", "-p", "codex-core"],
+                ),
+            ]
+
+            def fake_run(command, cwd, env, check):
+                # Simulate a harness crash: no fresh junit.xml written.
+                self.assertFalse(junit_path.exists())
+                return SimpleNamespace(returncode=101)
+
+            with (
+                patch.object(validation, "CODEX_RS", codex_rs),
+                patch.object(validation.subprocess, "run", side_effect=fake_run),
+                patch.dict(
+                    validation.os.environ, {"FORK_FLEET_ARTIFACT_DIR": tmp}, clear=False
+                ),
+            ):
+                with self.assertRaises(SystemExit) as ctx:
+                    validation.run_workspace_tests(commands, {})
+            self.assertEqual(ctx.exception.code, 101)
+            self.assertFalse((Path(tmp) / "workspace-tests-failures.json").exists())
+
+    def test_fresh_junit_with_failures_writes_sidecar(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            codex_rs = Path(tmp) / "codex-rs"
+            junit_path = codex_rs / "target/nextest/fork-fleet/junit.xml"
+            commands = [
+                (
+                    Path(tmp),
+                    ["just", "test", "--profile", "fork-fleet", "-p", "codex-core"],
+                ),
+            ]
+
+            def fake_run(command, cwd, env, check):
+                junit_path.parent.mkdir(parents=True, exist_ok=True)
+                junit_path.write_text(
+                    '<testsuites><testsuite name="codex-core">'
+                    '<testcase name="test_a"><failure/></testcase>'
+                    "</testsuite></testsuites>"
+                )
+                return SimpleNamespace(returncode=100)
+
+            with (
+                patch.object(validation, "CODEX_RS", codex_rs),
+                patch.object(validation.subprocess, "run", side_effect=fake_run),
+                patch.dict(
+                    validation.os.environ, {"FORK_FLEET_ARTIFACT_DIR": tmp}, clear=False
+                ),
+            ):
+                with self.assertRaises(SystemExit) as ctx:
+                    validation.run_workspace_tests(commands, {})
+            self.assertEqual(ctx.exception.code, 100)
+            sidecar = Path(tmp) / "workspace-tests-failures.json"
+            self.assertEqual(json.loads(sidecar.read_text()), ["codex-core::test_a"])
+
+    def test_only_run_missing_junit_raises_without_sidecar(self) -> None:
+        # The `--only` solo rerun path funnels through the same
+        # run_workspace_tests command sequence, so the same guard applies.
+        with tempfile.TemporaryDirectory() as tmp:
+            codex_rs = Path(tmp) / "codex-rs"
+            commands = [
+                (Path(tmp), ["cargo", "build", "-p", "codex-code-mode-host"]),
+                (
+                    codex_rs,
+                    [
+                        "cargo",
+                        "nextest",
+                        "run",
+                        "--profile",
+                        "fork-fleet",
+                        "-p",
+                        "codex-core",
+                        "--lib",
+                        "-E",
+                        "test(=some::test)",
+                        "--retries",
+                        "0",
+                    ],
+                ),
+            ]
+
+            def fake_run(command, cwd, env, check):
+                if command[0] == "cargo" and "nextest" not in command:
+                    return SimpleNamespace(returncode=0)
+                return SimpleNamespace(returncode=101)
+
+            with (
+                patch.object(validation, "CODEX_RS", codex_rs),
+                patch.object(validation.subprocess, "run", side_effect=fake_run),
+                patch.dict(
+                    validation.os.environ, {"FORK_FLEET_ARTIFACT_DIR": tmp}, clear=False
+                ),
+            ):
+                with self.assertRaises(SystemExit) as ctx:
+                    validation.run_workspace_tests(commands, {})
+            self.assertEqual(ctx.exception.code, 101)
+            self.assertFalse((Path(tmp) / "workspace-tests-failures.json").exists())
+
+
+class ReadFreshNextestJunitFailuresTest(unittest.TestCase):
+    def test_missing_report_is_not_ok(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            failures, ok = validation.read_fresh_nextest_junit_failures(
+                Path(tmp) / "missing.xml"
+            )
+            self.assertEqual(failures, set())
+            self.assertFalse(ok)
+
+    def test_unparseable_report_is_not_ok(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            junit_path = Path(tmp) / "junit.xml"
+            junit_path.write_text("not valid xml <<<")
+            failures, ok = validation.read_fresh_nextest_junit_failures(junit_path)
+            self.assertEqual(failures, set())
+            self.assertFalse(ok)
+
+    def test_valid_empty_report_is_ok(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            junit_path = Path(tmp) / "junit.xml"
+            junit_path.write_text(
+                '<testsuites><testsuite name="codex-core">'
+                '<testcase name="test_a"/>'
+                "</testsuite></testsuites>"
+            )
+            failures, ok = validation.read_fresh_nextest_junit_failures(junit_path)
+            self.assertEqual(failures, set())
+            self.assertTrue(ok)
+
 
 class OnlySelectorValidationTest(unittest.TestCase):
     def test_accepts_well_formed_selector(self) -> None:
