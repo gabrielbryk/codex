@@ -498,6 +498,54 @@ class ManifestCountTest(unittest.TestCase):
         validation.validate_test_plan(manifest_text, test_plan)
 
 
+class ResolveJustPathsTest(unittest.TestCase):
+    def test_default_when_no_override(self) -> None:
+        real_home = Path("/home/example")
+        bin_dir, bin_path = validation.resolve_just_paths(real_home, None)
+        self.assertEqual(
+            bin_dir,
+            real_home / ".local/share/fork-fleet/toolchains/just-1.51.0/bin",
+        )
+        self.assertEqual(bin_path, bin_dir / "just")
+
+    def test_override_pointing_at_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            override_dir = Path(tmp) / "custom-just-bin"
+            override_dir.mkdir()
+            bin_dir, bin_path = validation.resolve_just_paths(
+                Path("/unused"), str(override_dir)
+            )
+            self.assertEqual(bin_dir, override_dir)
+            self.assertEqual(bin_path, override_dir / "just")
+
+    def test_override_pointing_at_the_binary_itself(self) -> None:
+        # This is what the Fork Fleet registry's `forks.toml` actually pins:
+        # JUST_BIN = "<toolchain-dir>/bin/just" (the executable, not its
+        # directory). Appending "just" to that unconditionally used to
+        # produce ".../bin/just/just" -- a file that never exists.
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir_on_disk = Path(tmp) / "custom-just-bin"
+            bin_dir_on_disk.mkdir()
+            just_file = bin_dir_on_disk / "just"
+            just_file.write_text("#!/bin/sh\n")
+            bin_dir, bin_path = validation.resolve_just_paths(
+                Path("/unused"), str(just_file)
+            )
+            self.assertEqual(bin_dir, bin_dir_on_disk)
+            self.assertEqual(bin_path, just_file)
+
+    def test_override_pointing_at_nonexistent_file_path(self) -> None:
+        # JUST_BIN may be set to a path that doesn't exist yet at resolution
+        # time (the caller checks existence separately); a nonexistent path
+        # is not a directory, so it must be treated as a binary path, not a
+        # directory to search.
+        bin_dir, bin_path = validation.resolve_just_paths(
+            Path("/unused"), "/does/not/exist/just"
+        )
+        self.assertEqual(bin_dir, Path("/does/not/exist"))
+        self.assertEqual(bin_path, Path("/does/not/exist/just"))
+
+
 class RustToolchainEnvironmentTest(unittest.TestCase):
     def _fixture(self, tmp: str, channel: str = "1.95.0") -> tuple[Path, Path, Path]:
         root = Path(tmp)
@@ -613,6 +661,32 @@ class RustToolchainEnvironmentTest(unittest.TestCase):
             self.assertIn(str(override_bin), path_entries)
             self.assertNotIn(str(default_just_bin), path_entries)
 
+    def test_just_bin_file_override_adds_its_parent_dir_to_path(self) -> None:
+        # forks.toml pins JUST_BIN to the `just` executable itself, not its
+        # directory; the containing directory must still land on PATH.
+        with tempfile.TemporaryDirectory() as tmp:
+            _, codex_rs, real_home = self._fixture(tmp)
+            (
+                real_home / ".rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu/bin"
+            ).mkdir(parents=True)
+            default_just_bin = (
+                real_home / ".local/share/fork-fleet/toolchains/just-1.51.0/bin"
+            )
+            default_just_bin.mkdir(parents=True)
+            override_dir = Path(tmp) / "custom-just-bin"
+            override_dir.mkdir()
+            override_file = override_dir / "just"
+            override_file.write_text("#!/bin/sh\n")
+
+            with patch.object(validation, "CODEX_RS", codex_rs):
+                env = validation.rust_toolchain_environment(
+                    real_home, env={"JUST_BIN": str(override_file)}
+                )
+
+            path_entries = env["PATH"].split(":")
+            self.assertIn(str(override_dir), path_entries)
+            self.assertNotIn(str(default_just_bin), path_entries)
+
     def test_uv_python_not_overwritten_when_already_set(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             _, codex_rs, real_home = self._fixture(tmp)
@@ -637,6 +711,30 @@ class WorkspaceTestPackageArgsTest(unittest.TestCase):
         self.assertIn("codex-tui", args)
         self.assertIn("codex-core", args)
         self.assertIn("codex-app-server", args)
+
+
+class BuildActionsWorkspaceTestsCompileTest(unittest.TestCase):
+    def test_omits_no_fail_fast_and_does_not_shell_out_through_just(self) -> None:
+        # `just test --no-run` fails: the `test` recipe hardcodes
+        # `--no-fail-fast`, which `cargo nextest run` rejects together with
+        # `--no-run`. The compile action must call `cargo nextest run`
+        # directly instead, with no `--no-fail-fast` anywhere.
+        fork_fleet_just = Path("/fake/toolchains/just-1.51.0/bin/just")
+        actions = validation.build_actions(fork_fleet_just)
+        commands = actions["workspace-tests-compile"]
+        self.assertTrue(commands)
+        for _cwd, command in commands:
+            self.assertNotIn("--no-fail-fast", command)
+            self.assertNotIn(str(fork_fleet_just), command)
+            self.assertIn("--no-run", command)
+            self.assertEqual(command[0], "cargo")
+            self.assertEqual(command[1], "nextest")
+
+    def test_other_actions_still_shell_out_through_just(self) -> None:
+        fork_fleet_just = Path("/fake/toolchains/just-1.51.0/bin/just")
+        actions = validation.build_actions(fork_fleet_just)
+        format_command = actions["format"][0][1]
+        self.assertEqual(format_command[0], str(fork_fleet_just))
 
 
 class NextestJunitFailureParsingTest(unittest.TestCase):

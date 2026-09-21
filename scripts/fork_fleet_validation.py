@@ -414,6 +414,24 @@ def run_upgrade_workflow_tests() -> None:
         raise SystemExit(completed.returncode)
 
 
+def resolve_just_paths(real_home: Path, override: str | None) -> tuple[Path, Path]:
+    """Resolve the pinned Fork Fleet `just` toolchain into (bin_dir, bin_path).
+
+    JUST_BIN, when set by the registry (see forks.toml), may name either the
+    `just` executable itself or the directory containing it. Detect which one
+    was given rather than assuming a directory and blindly appending `just`,
+    which would double up the path when the override already points at the
+    binary (e.g. ".../bin/just" -> ".../bin/just/just").
+    """
+    default_dir = real_home / ".local/share/fork-fleet/toolchains/just-1.51.0/bin"
+    if not override:
+        return default_dir, default_dir / "just"
+    override_path = Path(override)
+    if override_path.is_dir():
+        return override_path, override_path / "just"
+    return override_path.parent, override_path
+
+
 def rust_toolchain_environment(
     real_home: Path, env: Mapping[str, str] | None = None
 ) -> dict[str, str]:
@@ -459,14 +477,10 @@ def rust_toolchain_environment(
     # are not on the sanitized PATH validation stages inherit; add them here so
     # `format`/other actions that shell out to `just`/`uv` resolve the pinned
     # binaries rather than an asdf shim or nothing at all. JUST_BIN, if set,
-    # names the directory containing the `just` binary and takes precedence
-    # over the fork-fleet toolchain default.
+    # may name either the `just` binary itself or its containing directory
+    # and takes precedence over the fork-fleet toolchain default.
     just_bin_override = base_env.get("JUST_BIN") or os.environ.get("JUST_BIN")
-    just_bin = (
-        Path(just_bin_override)
-        if just_bin_override
-        else real_home / ".local/share/fork-fleet/toolchains/just-1.51.0/bin"
-    )
+    just_bin, _ = resolve_just_paths(real_home, just_bin_override)
     local_bin = real_home / ".local/bin"
 
     path_entries = [str(toolchain_bin)]
@@ -824,26 +838,16 @@ def run_workspace_tests(
         raise SystemExit(final_returncode)
 
 
-def main() -> None:
-    if len(sys.argv) == 3 and sys.argv[1] in PLAN_ACTIONS:
-        plan_path = Path(sys.argv[2]).resolve()
-        PLAN_ACTIONS[sys.argv[1]](REPO_ROOT, load_immutable_plan(plan_path), plan_path)
-        return
-    if len(sys.argv) == 2 and sys.argv[1] == "upgrade-workflow-tests":
-        run_upgrade_workflow_tests()
-        return
-
-    real_home = Path.home()
-    just_bin_override = os.environ.get("JUST_BIN")
-    fork_fleet_just = (
-        Path(just_bin_override) / "just"
-        if just_bin_override
-        else real_home / ".local/share/fork-fleet/toolchains/just-1.51.0/bin/just"
-    )
-    if not fork_fleet_just.is_file():
-        raise SystemExit(f"Fork Fleet just executable is missing: {fork_fleet_just}")
-
-    actions = {
+def build_actions(
+    fork_fleet_just: Path,
+) -> dict[str, list[tuple[Path, list[str]]]]:
+    """Build the `{action-name: [(cwd, command), ...]}` table `main()` dispatches
+    through. Split out from `main()` so the exact commands each action shells
+    out to -- e.g. that `workspace-tests-compile` calls `cargo nextest run`
+    directly rather than through `just test` -- are unit-testable without
+    exercising the rest of `main()`'s environment setup.
+    """
+    return {
         "upgrade-workflow-audit <immutable-plan-path>": [],
         "attribution <immutable-plan-path>": [],
         "manifest-sync <immutable-plan-path>": [],
@@ -892,22 +896,35 @@ def main() -> None:
                 ],
             ),
         ],
+        # Calls `cargo nextest run` directly instead of through `just test`:
+        # the `test` recipe in the justfile hardcodes `--no-fail-fast`, which
+        # `cargo nextest run` rejects together with `--no-run` ("the argument
+        # '--no-fail-fast' cannot be used with '--no-run'"). `--no-fail-fast`
+        # only affects which tests keep running after a failure, which is
+        # meaningless for a compile-only invocation, so it is simply omitted
+        # here rather than reworking the (out-of-scope) justfile recipe.
         "workspace-tests-compile": [
             (
-                REPO_ROOT,
+                CODEX_RS,
                 [
-                    str(fork_fleet_just),
-                    "test",
+                    "cargo",
+                    "nextest",
+                    "run",
                     "--no-run",
+                    "--profile",
+                    NEXTEST_FORK_FLEET_PROFILE,
                     *WORKSPACE_TEST_PACKAGE_ARGS,
                 ],
             ),
             (
                 CODEX_RS,
                 [
-                    str(fork_fleet_just),
-                    "test",
+                    "cargo",
+                    "nextest",
+                    "run",
                     "--no-run",
+                    "--profile",
+                    NEXTEST_FORK_FLEET_PROFILE,
                     "-p",
                     "codex-v8-poc",
                     "--features",
@@ -941,6 +958,24 @@ def main() -> None:
             ),
         ],
     }
+
+
+def main() -> None:
+    if len(sys.argv) == 3 and sys.argv[1] in PLAN_ACTIONS:
+        plan_path = Path(sys.argv[2]).resolve()
+        PLAN_ACTIONS[sys.argv[1]](REPO_ROOT, load_immutable_plan(plan_path), plan_path)
+        return
+    if len(sys.argv) == 2 and sys.argv[1] == "upgrade-workflow-tests":
+        run_upgrade_workflow_tests()
+        return
+
+    real_home = Path.home()
+    just_bin_override = os.environ.get("JUST_BIN")
+    _, fork_fleet_just = resolve_just_paths(real_home, just_bin_override)
+    if not fork_fleet_just.is_file():
+        raise SystemExit(f"Fork Fleet just executable is missing: {fork_fleet_just}")
+
+    actions = build_actions(fork_fleet_just)
     workspace_tests_style = sys.argv[1:2] in (
         ["workspace-tests"],
         ["workspace-tests-compile"],
