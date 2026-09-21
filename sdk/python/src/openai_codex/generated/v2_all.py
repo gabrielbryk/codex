@@ -4259,6 +4259,11 @@ class ServerDiagnosticsProcess(BaseModel):
     resident_memory_bytes: Annotated[int | None, Field(alias="residentMemoryBytes", ge=0)] = None
 
 
+class ServerGenerationState(Enum):
+    accepting = "accepting"
+    draining = "draining"
+
+
 class ProjectChangedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
