@@ -560,6 +560,205 @@ def write_workspace_tests_failures(failures: set[str]) -> Path:
     return output_path
 
 
+# `--only` selectors are "<binary-id>::<test-name>" round-tripping
+# `parse_nextest_junit_failures`'s output ids exactly. The character class
+# whitelist also doubles as shell-metacharacter rejection.
+ONLY_SELECTOR_PATTERN = re.compile(r"^[A-Za-z0-9_:./-]+::.+$")
+
+# Packages `--only` is allowed to target: the ones workspace-tests itself
+# exercises (the shared package list, plus codex-v8-poc, which workspace-tests
+# runs as a separate sandbox-featured invocation).
+ONLY_SELECTOR_PACKAGES = [*WORKSPACE_TEST_PACKAGE_ARGS[1::2], "codex-v8-poc"]
+
+# Extra cargo args a package's nextest invocation always needs, beyond
+# `-p <package>` and the resolved target selector.
+ONLY_SELECTOR_EXTRA_PACKAGE_ARGS: dict[str, list[str]] = {
+    "codex-v8-poc": ["--features", "sandbox"],
+}
+
+
+def validate_only_selector(selector: str) -> None:
+    if not ONLY_SELECTOR_PATTERN.fullmatch(selector):
+        raise SystemExit(f"invalid --only selector: {selector}")
+
+
+def parse_cargo_package_name(manifest_text: str) -> str | None:
+    """Extract the `name` field of a Cargo.toml's `[package]` table only
+    (never a dependency's `name = "..."` rename)."""
+    table = re.search(r"(?ms)^\[package\]\s*$(.*?)(?=^\[|\Z)", manifest_text)
+    if table is None:
+        return None
+    name = re.search(r'(?m)^name\s*=\s*"([^"]+)"', table.group(1))
+    return name.group(1) if name else None
+
+
+def parse_cargo_bin_names(manifest_text: str) -> list[str]:
+    """Extract every `[[bin]]` table's `name` field, in file order."""
+    names = []
+    for table in re.finditer(r"(?ms)^\[\[bin\]\]\s*$(.*?)(?=^\[|\Z)", manifest_text):
+        name = re.search(r'(?m)^name\s*=\s*"([^"]+)"', table.group(1))
+        if name:
+            names.append(name.group(1))
+    return names
+
+
+def find_package_crate_dir(codex_rs: Path, package: str) -> Path | None:
+    for manifest in sorted(codex_rs.rglob("Cargo.toml")):
+        if "target" in manifest.parts:
+            continue
+        if parse_cargo_package_name(manifest.read_text(encoding="utf-8")) == package:
+            return manifest.parent
+    return None
+
+
+# binary-id -> (package, kind, target). kind is "lib", "bin", or "test";
+# target is the bin/test-target name, or None for "lib".
+OnlyBinaryId = tuple[str, str, str | None]
+
+
+def discover_only_binary_ids(
+    codex_rs: Path, packages: list[str]
+) -> dict[str, OnlyBinaryId]:
+    """Map every statically-discoverable nextest binary-id for `packages` to
+    its (package, kind, target), mirroring nextest's own binary-id
+    convention: the bare package name for the lib target, "<package>::bin/
+    <name>" for a [[bin]] target, and "<package>::<file-stem>" for each
+    tests/*.rs integration-test target. Static (Cargo.toml/tests-dir
+    discovery) rather than a `cargo nextest list` round trip, so resolving
+    `--only` needs no build.
+    """
+    binary_ids: dict[str, OnlyBinaryId] = {}
+    for package in packages:
+        crate_dir = find_package_crate_dir(codex_rs, package)
+        if crate_dir is None:
+            continue
+        manifest_text = (crate_dir / "Cargo.toml").read_text(encoding="utf-8")
+        if (crate_dir / "src" / "lib.rs").is_file():
+            binary_ids[package] = (package, "lib", None)
+        for bin_name in parse_cargo_bin_names(manifest_text):
+            binary_ids[f"{package}::bin/{bin_name}"] = (package, "bin", bin_name)
+        tests_dir = crate_dir / "tests"
+        if tests_dir.is_dir():
+            for test_file in sorted(tests_dir.glob("*.rs")):
+                binary_ids[f"{package}::{test_file.stem}"] = (
+                    package,
+                    "test",
+                    test_file.stem,
+                )
+    return binary_ids
+
+
+def resolve_only_selector(
+    selector: str, binary_ids: Mapping[str, OnlyBinaryId]
+) -> tuple[str, str, str | None, str]:
+    """Resolve a validated "<binary-id>::<test-name>" selector against known
+    binary ids, returning (package, kind, target, test_name). Picks the
+    longest matching binary-id prefix so e.g. "codex-core::all::mod::case"
+    resolves to the "codex-core::all" test target (test name "mod::case"),
+    not the "codex-core" lib target (test name "all::mod::case")."""
+    candidates = [
+        binary_id for binary_id in binary_ids if selector.startswith(binary_id + "::")
+    ]
+    if not candidates:
+        raise SystemExit(
+            f"--only selector does not match a known test binary: {selector}"
+        )
+    binary_id = max(candidates, key=len)
+    package, kind, target = binary_ids[binary_id]
+    test_name = selector[len(binary_id) + 2 :]
+    if not test_name:
+        raise SystemExit(f"--only selector is missing a test name: {selector}")
+    return package, kind, target, test_name
+
+
+def only_nextest_commands(
+    selectors: list[str],
+    binary_ids: Mapping[str, OnlyBinaryId],
+    retries: int,
+) -> list[tuple[Path, list[str]]]:
+    """Build one `cargo nextest run` invocation per (package, kind, target)
+    group among the resolved selectors, filtering to exactly the selected
+    test names via `-E 'test(=name) | test(=name2) | ...'`."""
+    groups: dict[tuple[str, str, str | None], list[str]] = {}
+    order: list[tuple[str, str, str | None]] = []
+    for selector in selectors:
+        package, kind, target, test_name = resolve_only_selector(selector, binary_ids)
+        key = (package, kind, target)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(test_name)
+
+    target_flags = {
+        "lib": ["--lib"],
+        "bin": lambda name: ["--bin", name],
+        "test": lambda name: ["--test", name],
+    }
+    commands: list[tuple[Path, list[str]]] = []
+    for package, kind, target in order:
+        target_args = (
+            target_flags["lib"] if kind == "lib" else target_flags[kind](target)
+        )
+        filter_expr = " | ".join(
+            f"test(={test_name})" for test_name in groups[(package, kind, target)]
+        )
+        commands.append(
+            (
+                CODEX_RS,
+                [
+                    "cargo",
+                    "nextest",
+                    "run",
+                    "--profile",
+                    NEXTEST_FORK_FLEET_PROFILE,
+                    "-p",
+                    package,
+                    *target_args,
+                    *ONLY_SELECTOR_EXTRA_PACKAGE_ARGS.get(package, []),
+                    "-E",
+                    filter_expr,
+                    "--retries",
+                    str(retries),
+                ],
+            )
+        )
+    return commands
+
+
+def parse_workspace_tests_args(argv: list[str]) -> tuple[list[str], int | None]:
+    """Parse `workspace-tests`/`workspace-tests-compile` trailing args:
+    repeatable `--only <selector>` and an optional `--retries <N>`."""
+    only: list[str] = []
+    retries: int | None = None
+    index = 0
+    while index < len(argv):
+        arg = argv[index]
+        if arg == "--only":
+            if index + 1 >= len(argv):
+                raise SystemExit("--only requires a value")
+            only.append(argv[index + 1])
+            index += 2
+        elif arg == "--retries":
+            if index + 1 >= len(argv):
+                raise SystemExit("--retries requires a value")
+            try:
+                retries = int(argv[index + 1])
+            except ValueError as error:
+                raise SystemExit(
+                    f"--retries must be an integer: {argv[index + 1]}"
+                ) from error
+            index += 2
+        else:
+            raise SystemExit(f"unrecognized argument: {arg}")
+    for selector in only:
+        validate_only_selector(selector)
+    return only, retries
+
+
+def is_nextest_invocation(command: list[str]) -> bool:
+    return "nextest" in command or (len(command) >= 2 and command[1] == "test")
+
+
 def run_workspace_tests(
     commands: list[tuple[Path, list[str]]], environment: Mapping[str, str]
 ) -> None:
@@ -574,10 +773,7 @@ def run_workspace_tests(
     failures: set[str] = set()
     for cwd, command in commands:
         completed = subprocess.run(command, cwd=cwd, env=environment, check=False)
-        is_nextest_invocation = "nextest" in command or (
-            len(command) >= 2 and command[1] == "test"
-        )
-        if not is_nextest_invocation:
+        if not is_nextest_invocation(command):
             if completed.returncode:
                 raise SystemExit(completed.returncode)
             continue
@@ -706,11 +902,42 @@ def main() -> None:
             ),
         ],
     }
-    if len(sys.argv) != 2 or sys.argv[1] not in actions:
+    workspace_tests_style = sys.argv[1:2] in (
+        ["workspace-tests"],
+        ["workspace-tests-compile"],
+    )
+    if workspace_tests_style:
+        action = sys.argv[1]
+        only_selectors, retries = parse_workspace_tests_args(sys.argv[2:])
+    elif len(sys.argv) != 2 or sys.argv[1] not in actions:
         choices = ", ".join(sorted(actions))
         raise SystemExit(f"usage: {Path(sys.argv[0]).name} <{choices}>")
+    else:
+        action = sys.argv[1]
+        only_selectors, retries = [], None
 
-    commands = actions[sys.argv[1]]
+    commands = actions[action]
+    if action == "workspace-tests-compile":
+        # `--only`/`--retries` are accepted but not meaningful for a
+        # compile-only (`--no-run`) invocation: it always compiles every
+        # workspace-tests package.
+        pass
+    elif action == "workspace-tests" and only_selectors:
+        binary_ids = discover_only_binary_ids(CODEX_RS, ONLY_SELECTOR_PACKAGES)
+        commands = [commands[0]] + only_nextest_commands(
+            only_selectors, binary_ids, retries if retries is not None else 0
+        )
+    elif action == "workspace-tests" and retries is not None:
+        retries_args = ["--retries", str(retries)]
+        commands = [
+            (
+                cwd,
+                [*command, *retries_args]
+                if is_nextest_invocation(command)
+                else command,
+            )
+            for cwd, command in commands
+        ]
     tool_paths = [
         real_home / ".local/bin",
         real_home / ".asdf/shims",
@@ -772,7 +999,7 @@ def main() -> None:
             **rusty_v8_environment(real_home),
         }
         environment = rust_toolchain_environment(real_home, environment)
-        if sys.argv[1] == "workspace-tests":
+        if action == "workspace-tests":
             run_workspace_tests(commands, environment)
         else:
             for cwd, command in commands:
@@ -782,7 +1009,7 @@ def main() -> None:
                 if completed.returncode:
                     raise SystemExit(completed.returncode)
 
-    post_check = POST_CHECKS.get(sys.argv[1])
+    post_check = POST_CHECKS.get(action)
     if post_check is not None:
         post_check(REPO_ROOT)
 
