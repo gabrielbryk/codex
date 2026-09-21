@@ -13,6 +13,7 @@ mod update_loop;
 
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -46,6 +47,18 @@ const STATE_DIR_NAME: &str = "app-server-daemon";
 /// backend, so a host-owned attribution proxy can front the native shared daemon on a
 /// socket of its own choosing. Unset keeps the canonical per-codex-home control socket.
 const SOCKET_ENV_VAR: &str = "CODEX_APP_SERVER_SOCKET";
+/// Absolute directory override for this daemon instance's private state: pid file,
+/// operation lock, settings snapshot, and stderr logs. Lets a per-generation host
+/// rollout controller run an isolated daemon instance without colliding with the
+/// shared `$CODEX_HOME/app-server-daemon` state used by the legacy generation, so
+/// `running_backend_instance` (and the pid file it probes) never observes another
+/// generation's process. Unset keeps the canonical per-codex-home state directory.
+const DAEMON_DIR_ENV_VAR: &str = "CODEX_APP_SERVER_DAEMON_DIR";
+/// Absolute path override for the codex binary this daemon instance execs as its
+/// managed backend, in place of `$CODEX_HOME/packages/standalone/current/codex`. Lets
+/// a per-generation host rollout controller pin the daemon to a specific generation's
+/// binary. Unset keeps the canonical managed install path.
+const MANAGED_BIN_ENV_VAR: &str = "CODEX_APP_SERVER_MANAGED_BIN";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LifecycleCommand {
@@ -316,6 +329,121 @@ fn resolve_control_socket_path(
     }
 }
 
+/// Rejects a `..` traversal component anywhere in an absolute env-var override path.
+fn reject_parent_dir_components(path: &Path, env_var: &str) -> Result<()> {
+    if path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(anyhow!("{env_var} must not contain '..' components"));
+    }
+    Ok(())
+}
+
+/// Resolves this daemon instance's private state directory: an absolute
+/// `CODEX_APP_SERVER_DAEMON_DIR` override if present, else the canonical
+/// per-codex-home state directory. Pulled out of `Daemon::from_environment` so
+/// directory-resolution behavior (default, absolute override, invalid overrides) is
+/// directly unit-testable without mutating global process env.
+fn resolve_daemon_state_dir(
+    codex_home: &Path,
+    daemon_dir_override: Option<std::ffi::OsString>,
+) -> Result<PathBuf> {
+    match daemon_dir_override {
+        Some(dir) => {
+            let dir = PathBuf::from(dir);
+            if !dir.is_absolute() {
+                return Err(anyhow!("{DAEMON_DIR_ENV_VAR} must be an absolute path"));
+            }
+            reject_parent_dir_components(&dir, DAEMON_DIR_ENV_VAR)?;
+            match dir.parent() {
+                Some(parent) if !parent.as_os_str().is_empty() && !parent.is_dir() => {
+                    return Err(anyhow!(
+                        "{DAEMON_DIR_ENV_VAR} parent directory {} does not exist",
+                        parent.display()
+                    ));
+                }
+                _ => {}
+            }
+            Ok(dir)
+        }
+        None => Ok(codex_home.join(STATE_DIR_NAME)),
+    }
+}
+
+/// Resolves the codex binary this daemon instance execs as its managed backend: an
+/// absolute `CODEX_APP_SERVER_MANAGED_BIN` override if present, else the canonical
+/// managed install path under `codex_home`. Pulled out of `Daemon::from_environment`
+/// for the same reason as `resolve_daemon_state_dir`.
+fn resolve_managed_codex_bin(
+    codex_home: &Path,
+    managed_bin_override: Option<std::ffi::OsString>,
+) -> Result<PathBuf> {
+    match managed_bin_override {
+        Some(bin) => {
+            let bin = PathBuf::from(bin);
+            if !bin.is_absolute() {
+                return Err(anyhow!("{MANAGED_BIN_ENV_VAR} must be an absolute path"));
+            }
+            reject_parent_dir_components(&bin, MANAGED_BIN_ENV_VAR)?;
+            match bin.parent() {
+                Some(parent) if !parent.as_os_str().is_empty() && !parent.is_dir() => {
+                    return Err(anyhow!(
+                        "{MANAGED_BIN_ENV_VAR} parent directory {} does not exist",
+                        parent.display()
+                    ));
+                }
+                _ => {}
+            }
+            Ok(bin)
+        }
+        None => Ok(managed_codex_bin(codex_home)),
+    }
+}
+
+/// Resolves the real Codex home for installer-managed lookups (the managed codex
+/// binary, the stable-standalone-release check, the latest-selection marker, and the
+/// saved-thread recovery file), given the daemon's settings file path and the real
+/// home captured for this process when `CODEX_APP_SERVER_DAEMON_DIR` is in force (see
+/// `CODEX_HOME_OVERRIDE`).
+///
+/// When `override_home` is `None`, `settings_file`'s grandparent is the real Codex
+/// home (the legacy derivation every `Daemon` not built by `from_environment` relies
+/// on, e.g. `<home>/app-server-daemon/settings.json`). When it is `Some`, that means
+/// a `CODEX_APP_SERVER_DAEMON_DIR` override put `settings_file` under a per-generation
+/// private directory instead, so its grandparent is not the real home; the captured
+/// override is the only source of truth left.
+///
+/// A pure function (no env, no globals) so both branches are directly unit-testable.
+fn resolve_codex_home(settings_file: &Path, override_home: Option<&Path>) -> Result<PathBuf> {
+    if let Some(home) = override_home {
+        return Ok(home.to_path_buf());
+    }
+    settings_file
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .context("daemon settings path has no Codex home")
+}
+
+/// Process-wide capture of the real Codex home, populated exactly once by the first
+/// `Daemon::from_environment` call in this process, `Some(real home)` when
+/// `CODEX_APP_SERVER_DAEMON_DIR` was in force at that time, `None` otherwise.
+///
+/// `Daemon::codex_home` cannot re-derive the real home from `settings_file` once a
+/// daemon-dir override is in force (see `resolve_codex_home`), and cannot re-read
+/// `CODEX_APP_SERVER_DAEMON_DIR` from the environment on every call either, since a
+/// `Daemon` may outlive the specific env snapshot it was built from and other code in
+/// this process may mutate env vars concurrently. Capturing once, at the one place
+/// (`from_environment`) that already resolves the real home for this env, avoids
+/// both. Because it is a `OnceLock`, only the *first* `from_environment` call in a
+/// process sets it; a second call with different env state in the same process reuses
+/// the first capture. This is a non-issue in production, where a process hosts one
+/// daemon instance under one fixed env for its whole life. Tests must not rely on two
+/// `from_environment` calls observing different `CODEX_APP_SERVER_DAEMON_DIR` states
+/// in the same test binary; see the single `from_environment`-driven test in `tests`.
+static CODEX_HOME_OVERRIDE: OnceLock<Option<PathBuf>> = OnceLock::new();
+
 struct Daemon {
     socket_path: PathBuf,
     pid_file: PathBuf,
@@ -328,25 +456,46 @@ struct Daemon {
 impl Daemon {
     fn from_environment() -> Result<Self> {
         let codex_home = find_codex_home().context("failed to resolve CODEX_HOME")?;
+        let daemon_dir_env = std::env::var_os(DAEMON_DIR_ENV_VAR);
+        let daemon_dir_override_in_force = daemon_dir_env.is_some();
+        // Capture the real home for `codex_home()` exactly once per process; see
+        // `CODEX_HOME_OVERRIDE`'s doc comment.
+        CODEX_HOME_OVERRIDE.get_or_init(|| {
+            daemon_dir_override_in_force.then(|| codex_home.as_path().to_path_buf())
+        });
         let socket_path =
             resolve_control_socket_path(codex_home.as_path(), std::env::var_os(SOCKET_ENV_VAR))?;
-        let state_dir = codex_home.as_path().join(STATE_DIR_NAME);
+        let state_dir = resolve_daemon_state_dir(codex_home.as_path(), daemon_dir_env)?;
+        let managed_codex_bin =
+            resolve_managed_codex_bin(codex_home.as_path(), std::env::var_os(MANAGED_BIN_ENV_VAR))?;
         Ok(Self {
             socket_path,
             pid_file: state_dir.join(PID_FILE_NAME),
             update_pid_file: state_dir.join(UPDATE_PID_FILE_NAME),
             operation_lock_file: state_dir.join(OPERATION_LOCK_FILE_NAME),
             settings_file: state_dir.join(SETTINGS_FILE_NAME),
-            managed_codex_bin: managed_codex_bin(codex_home.as_path()),
+            managed_codex_bin,
         })
+    }
+
+    /// Resolves the real Codex home this `Daemon`'s installer-managed lookups must
+    /// use, independent of any `CODEX_APP_SERVER_DAEMON_DIR` override its state
+    /// paths may be using. When that override was in force when this process's first
+    /// `from_environment` call captured `CODEX_HOME_OVERRIDE`, `settings_file`'s
+    /// grandparent is a per-generation private directory, not the real home, so the
+    /// captured override is used instead; otherwise, `settings_file`'s grandparent is
+    /// the real home (the legacy derivation), so no `Daemon` constructed directly
+    /// around a conventional `<home>/app-server-daemon/...` layout needs any change,
+    /// and no call to `from_environment` (and thus no populated `CODEX_HOME_OVERRIDE`)
+    /// is required either.
+    fn codex_home(&self) -> Result<PathBuf> {
+        let override_home = CODEX_HOME_OVERRIDE.get().and_then(|home| home.as_deref());
+        resolve_codex_home(&self.settings_file, override_home)
     }
 
     fn recovery_file(&self) -> Result<PathBuf> {
         Ok(codex_app_server_transport::daemon_recovery_file_path(
-            self.settings_file
-                .parent()
-                .and_then(Path::parent)
-                .context("daemon settings path has no Codex home")?,
+            &self.codex_home()?,
         ))
     }
 
@@ -859,35 +1008,25 @@ impl Daemon {
     }
 
     fn is_stable_standalone_release(&self) -> Result<bool> {
-        let codex_home = self
-            .settings_file
-            .parent()
-            .and_then(Path::parent)
-            .context("daemon settings path has no Codex home")?;
         Ok(managed_install::is_stable_standalone_release(
-            codex_home,
+            &self.codex_home()?,
             &self.current_managed_codex_bin()?,
         ))
     }
 
     fn current_managed_codex_bin(&self) -> Result<PathBuf> {
         // An installer can move a legacy binary into bin/ while this updater runs.
-        let home = self
-            .settings_file
-            .parent()
-            .and_then(Path::parent)
-            .context("daemon settings path has no Codex home")?;
-        Ok(managed_install::managed_codex_bin(home))
+        // Always the real Codex home, never a `CODEX_APP_SERVER_DAEMON_DIR` override,
+        // so a per-generation daemon dir cannot be pointed at a directory without an
+        // installer-managed `packages/standalone` layout.
+        Ok(managed_install::managed_codex_bin(&self.codex_home()?))
     }
 
     fn has_latest_selection_marker(&self) -> bool {
-        self.settings_file
-            .parent()
-            .and_then(Path::parent)
-            .is_some_and(|home| {
-                home.join("packages/standalone/auto-update-version")
-                    .is_file()
-            })
+        self.codex_home().is_ok_and(|home| {
+            home.join("packages/standalone/auto-update-version")
+                .is_file()
+        })
     }
 
     async fn is_bootstrapped(&self, settings: &DaemonSettings) -> Result<bool> {
@@ -1150,6 +1289,185 @@ mod tests {
         let error = resolve_control_socket_path(temp_dir.path(), Some("relative.sock".into()))
             .expect_err("relative override must be rejected");
         assert!(error.to_string().contains(SOCKET_ENV_VAR));
+    }
+
+    #[test]
+    fn daemon_state_dir_defaults_to_the_canonical_per_home_directory() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let resolved = super::resolve_daemon_state_dir(temp_dir.path(), None).expect("resolve");
+        assert_eq!(resolved, temp_dir.path().join(super::STATE_DIR_NAME));
+    }
+
+    #[test]
+    fn daemon_state_dir_honors_an_absolute_override_with_an_existing_parent() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let generations = temp_dir.path().join("generations");
+        std::fs::create_dir_all(&generations).expect("generations parent");
+        let generation_dir = generations.join("g1");
+        let resolved = super::resolve_daemon_state_dir(
+            temp_dir.path(),
+            Some(generation_dir.clone().into_os_string()),
+        )
+        .expect("resolve");
+        assert_eq!(resolved, generation_dir);
+    }
+
+    #[test]
+    fn daemon_state_dir_rejects_a_relative_override() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let error = super::resolve_daemon_state_dir(temp_dir.path(), Some("relative-dir".into()))
+            .expect_err("relative override must be rejected");
+        assert!(error.to_string().contains(super::DAEMON_DIR_ENV_VAR));
+    }
+
+    #[test]
+    fn daemon_state_dir_rejects_a_traversal_override() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let traversal = temp_dir.path().join("generations/../escape");
+        let error =
+            super::resolve_daemon_state_dir(temp_dir.path(), Some(traversal.into_os_string()))
+                .expect_err("traversal override must be rejected");
+        assert!(error.to_string().contains(super::DAEMON_DIR_ENV_VAR));
+    }
+
+    #[test]
+    fn daemon_state_dir_rejects_an_override_with_a_missing_parent() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let orphaned = temp_dir.path().join("no-such-parent/generation-dir");
+        let error =
+            super::resolve_daemon_state_dir(temp_dir.path(), Some(orphaned.into_os_string()))
+                .expect_err("missing parent must be rejected");
+        assert!(error.to_string().contains(super::DAEMON_DIR_ENV_VAR));
+    }
+
+    #[test]
+    fn managed_codex_bin_defaults_to_the_canonical_managed_install_path() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let resolved = super::resolve_managed_codex_bin(temp_dir.path(), None).expect("resolve");
+        assert_eq!(
+            resolved,
+            crate::managed_install::managed_codex_bin(temp_dir.path())
+        );
+    }
+
+    #[test]
+    fn managed_codex_bin_honors_an_absolute_override_with_an_existing_parent() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let bin = temp_dir.path().join("codex");
+        let resolved =
+            super::resolve_managed_codex_bin(temp_dir.path(), Some(bin.clone().into_os_string()))
+                .expect("resolve");
+        assert_eq!(resolved, bin);
+    }
+
+    #[test]
+    fn managed_codex_bin_rejects_a_relative_override() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let error = super::resolve_managed_codex_bin(temp_dir.path(), Some("codex".into()))
+            .expect_err("relative override must be rejected");
+        assert!(error.to_string().contains(super::MANAGED_BIN_ENV_VAR));
+    }
+
+    #[test]
+    fn managed_codex_bin_rejects_an_override_with_a_missing_parent() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let orphaned = temp_dir.path().join("no-such-parent/codex");
+        let error =
+            super::resolve_managed_codex_bin(temp_dir.path(), Some(orphaned.into_os_string()))
+                .expect_err("missing parent must be rejected");
+        assert!(error.to_string().contains(super::MANAGED_BIN_ENV_VAR));
+    }
+
+    #[test]
+    fn codex_home_uses_the_legacy_settings_grandparent_when_no_override_is_in_force() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let settings_file = temp_dir
+            .path()
+            .join(super::STATE_DIR_NAME)
+            .join("settings.json");
+        let resolved = super::resolve_codex_home(&settings_file, None).expect("resolve codex home");
+        assert_eq!(resolved, temp_dir.path());
+    }
+
+    #[test]
+    fn codex_home_rejects_a_settings_path_with_no_grandparent_when_no_override_is_in_force() {
+        let error = super::resolve_codex_home(std::path::Path::new("settings.json"), None)
+            .expect_err("settings path with no grandparent must be rejected");
+        assert!(error.to_string().contains("Codex home"));
+    }
+
+    #[test]
+    fn codex_home_uses_the_override_when_one_is_in_force() {
+        // Pure: an override, once captured, always wins over the settings-path
+        // derivation, regardless of what (if anything) `settings_file` even points
+        // at — this is exactly the case where `settings_file`'s grandparent is a
+        // per-generation private directory, not the real home.
+        let settings_file = std::path::Path::new("/generations/g1/settings.json");
+        let override_home = std::path::Path::new("/real/codex/home");
+        let resolved = super::resolve_codex_home(settings_file, Some(override_home))
+            .expect("resolve codex home");
+        assert_eq!(resolved, override_home);
+    }
+
+    #[tokio::test]
+    async fn from_environment_uses_per_generation_paths_and_creates_a_private_state_dir() {
+        let home = TempDir::new().expect("home");
+        let generations = home.path().join("generations");
+        std::fs::create_dir_all(&generations).expect("generations parent");
+        let generation_dir = generations.join("g1");
+        let managed_bin_parent = home.path().join("managed/g1");
+        std::fs::create_dir_all(&managed_bin_parent).expect("managed bin parent");
+        let managed_bin = managed_bin_parent.join("codex");
+        // SAFETY: this test mutates process-wide env vars (`CODEX_HOME`,
+        // `DAEMON_DIR_ENV_VAR`, `MANAGED_BIN_ENV_VAR`), which is only sound because
+        // nextest runs each test in its own process (process-per-test) — under a
+        // single-process runner (`cargo test`'s default in-process multi-threading)
+        // this would race any other test reading or writing the same vars. This is
+        // also the only test in this binary that calls `Daemon::from_environment`:
+        // `CODEX_HOME_OVERRIDE` is a `OnceLock` populated by the *first*
+        // `from_environment` call in a process, so a second call with different env
+        // state would silently reuse this test's capture instead of observing its
+        // own. Keep it that way — do not add a second `from_environment`-driven test
+        // to this file; extend this one instead.
+        unsafe {
+            std::env::set_var("CODEX_HOME", home.path());
+            std::env::set_var(super::DAEMON_DIR_ENV_VAR, &generation_dir);
+            std::env::set_var(super::MANAGED_BIN_ENV_VAR, &managed_bin);
+        }
+        let result = Daemon::from_environment();
+        unsafe {
+            std::env::remove_var("CODEX_HOME");
+            std::env::remove_var(super::DAEMON_DIR_ENV_VAR);
+            std::env::remove_var(super::MANAGED_BIN_ENV_VAR);
+        }
+        let daemon = result.expect("resolve daemon from environment");
+        assert_eq!(daemon.pid_file, generation_dir.join("app-server.pid"));
+        assert_eq!(
+            daemon.operation_lock_file,
+            generation_dir.join("daemon.lock")
+        );
+        assert_eq!(daemon.settings_file, generation_dir.join("settings.json"));
+        assert_eq!(daemon.managed_codex_bin, managed_bin);
+
+        // Taking the operation lock (as Start/Restart/Stop do) must create the
+        // generation directory privately (0700 on unix) rather than requiring it to
+        // pre-exist.
+        assert!(!generation_dir.exists());
+        let _lock = daemon
+            .acquire_operation_lock()
+            .await
+            .expect("acquire operation lock creates the generation dir");
+        assert!(generation_dir.is_dir());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&generation_dir)
+                .expect("generation dir metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o700);
+        }
     }
 
     #[test]
