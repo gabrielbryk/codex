@@ -11,6 +11,13 @@ path = "junit.xml"
 [profile.local]
 inherits = "default"
 
+[profile.fork-fleet]
+inherits = "default"
+retries = 1
+
+[profile.fork-fleet.junit]
+path = "junit.xml"
+
 [test-groups.app_server_protocol_codegen]
 max-threads = 1
 
