@@ -67,3 +67,24 @@ Finish with commit/run/artifact links, compact results, separate engineering/run
 real remaining blockers. Include `metrics` counts for executed/reused/invalidated/duplicate gates,
 review reuse, and recorded abandoned work. Token cost is unknown without authoritative request data;
 never add cached input to total input or sum cumulative transcript counters.
+
+## Coordinator discipline
+
+- Subagents run builds in the foreground and poll for completion; never arm a background monitor
+  and stop. A stopped coordinator cannot see a monitor fire.
+- One git worktree per agent, with its own private `CARGO_TARGET_DIR`. Never share a target dir
+  across agents — concurrent writers corrupt each other's incremental build state.
+- Opus reviews the implementer brief before wave 1 of any multi-agent run. This is the step that
+  would have caught a missing Cargo.lock instruction; do not skip it to save a round trip.
+- `forkctl candidate preflight <id> --compile` must come back clean before committing the release
+  tail and again before `finalize`. Two checkpoints, not one — a clean preflight before the tail
+  commit does not guarantee it stays clean after.
+- Capture the broad baseline (`forkctl target baseline codex --stage workspace-tests`) before the
+  first full validation run, not after. Validation without a baseline cannot tell a pre-existing
+  failure from a regression.
+- Re-seal is append-only: fix forward on top of a sealed candidate, never rebuild one to apply a
+  fix. A rebuild invalidates every receipt the earlier preflight/validation runs produced.
+- Commit the stamped `Cargo.lock` in the release-tail leaf. It is part of the tail, not a
+  side effect to reconcile later.
+- Run the cutover rehearsal (`codex-rollout-rehearse`) before any real cutover. A rehearsal that
+  only happens after something breaks is not a rehearsal.
