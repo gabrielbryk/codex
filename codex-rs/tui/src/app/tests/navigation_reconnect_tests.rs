@@ -304,6 +304,7 @@ async fn reconnect_daemon_command_center_after_socket_replacement_without_a_conv
             /*remote_cwd*/ None,
             session.thread_tool_transport(),
             ReconnectPresentation::Overview,
+            crate::app::reconnect::DEFAULT_RECONNECT_BUDGET,
         )
         .await?;
         app.finish_reconnect(

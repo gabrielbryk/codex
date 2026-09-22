@@ -240,7 +240,7 @@ async fn same_cwd_thread_reset_rejects_old_dependency_results() {
     let stale_cwd = PathBuf::from("/stale-cwd");
     chat.status_line_branch_cwd = Some(cwd.clone());
     chat.status_line_branch_pending = true;
-    chat.status_line_git_summary_cwd = Some(cwd.clone());
+    chat.status_line_git_summary_cwd = Some(cwd);
     chat.status_line_git_summary_pending = true;
     chat.status_line_workspace_headline_pending_request_id = Some(11);
     chat.set_status_line_branch(stale_cwd.clone(), Some("stale-branch".to_string()));

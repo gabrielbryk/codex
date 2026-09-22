@@ -1007,6 +1007,8 @@ See the Codex keymap documentation for supported actions and examples."
                     continue;
                 }
                 if app.reconnect.offline && !app.reconnect.failed && reconnect.is_none() {
+                    // Read the budget once per reconnect episode, not inside the retry loop.
+                    let budget = reconnect::reconnect_budget_from_env();
                     reconnect = Some(Box::pin(reconnect::reconnect(
                         app.app_server_target.clone(),
                         app.config.clone(),
@@ -1015,6 +1017,7 @@ See the Codex keymap documentation for supported actions and examples."
                         app_server.remote_cwd_override().map(Path::to_path_buf),
                         app_server.thread_tool_transport(),
                         app.reconnect.presentation,
+                        budget,
                     )));
                 }
                 // Replay queues history and operations. A buffered closure must not switch

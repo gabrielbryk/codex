@@ -27,6 +27,29 @@ pub(super) struct Reconnected {
     thread: Option<AppServerStartedThread>,
 }
 
+/// Default total time budget for retrying a refused/unreachable connection before giving up.
+/// A brief router/proxy restart should not strand a session, so this defaults high enough to
+/// ride out gaps of up to a minute.
+pub(super) const DEFAULT_RECONNECT_BUDGET: Duration = Duration::from_millis(60_000);
+/// Initial backoff between connect attempts; doubles each attempt up to `RECONNECT_BACKOFF_CAP`.
+const RECONNECT_BACKOFF_START: Duration = Duration::from_millis(100);
+/// Backoff cap so attempts keep landing roughly every 5s instead of drifting to huge gaps.
+const RECONNECT_BACKOFF_CAP: Duration = Duration::from_secs(5);
+
+/// Total time to keep retrying a connection that is being actively refused (e.g. the app-server
+/// process or the network path in front of it is briefly down). Read once by the caller from
+/// `CODEX_APP_SERVER_RECONNECT_BUDGET_MS` (testing/tuning only); defaults to 60s. Not read inside
+/// the retry loop itself, so a single reconnect attempt always retries against one fixed budget.
+pub(super) fn reconnect_budget_from_env() -> Duration {
+    std::env::var("CODEX_APP_SERVER_RECONNECT_BUDGET_MS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|millis| *millis > 0)
+        .map(Duration::from_millis)
+        .unwrap_or(DEFAULT_RECONNECT_BUDGET)
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn reconnect(
     target: AppServerTarget,
     config: Config,
@@ -35,6 +58,7 @@ pub(super) async fn reconnect(
     remote_cwd: Option<PathBuf>,
     task_tools: ThreadToolTransport,
     presentation: ReconnectPresentation,
+    budget: Duration,
 ) -> Result<Reconnected> {
     let mode = target.thread_params_mode();
     if matches!(target, AppServerTarget::Embedded) {
@@ -50,15 +74,36 @@ pub(super) async fn reconnect(
     }
     // Connecting already has transport deadlines. Give healthy history/inventory hydration one
     // shared budget instead of repeatedly discarding its progress on a short per-attempt timer.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(/*secs*/ 120);
-    for delay in [0, 1, 2, 4, 8] {
+    // The hydration deadline always covers at least the connect-retry budget below, so a larger
+    // configured retry budget is never cut short by a stalled-server timeout sized for the default.
+    // This deadline bounds *completed* attempts (each of which fails fast on refusal/transport
+    // error and retries); it does not bound a single in-flight attempt. A server that accepts the
+    // connection but then stalls mid-hydration is one attempt, so it can still run all the way to
+    // this deadline (120s) even when `budget` is much smaller — see
+    // `reconnect_allows_slow_hydration_but_bounds_a_stalled_server`, which asserts exactly that.
+    let retry_budget = budget;
+    let deadline =
+        tokio::time::Instant::now() + retry_budget.max(Duration::from_secs(/*secs*/ 120));
+    let retry_start = tokio::time::Instant::now();
+    let mut backoff = RECONNECT_BACKOFF_START;
+    let mut first_attempt = true;
+    loop {
+        if first_attempt {
+            first_attempt = false;
+        } else {
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(RECONNECT_BACKOFF_CAP);
+        }
         let attempt = async {
-            tokio::time::sleep(Duration::from_secs(delay)).await;
             let client = crate::app_server_connection::connect(&target).await?;
             let mut session = AppServerSession::new(client, mode)
                 .with_local_codex_home(&config.codex_home)
                 .with_remote_cwd_override(remote_cwd.clone())
                 .with_thread_tool_transport(task_tools.clone());
+            // A failed bootstrap never calls session.shutdown(): the connection is fresh and
+            // likely still broken, so shutdown() would just wait out its own timeout for
+            // nothing. `?` drops `session` here, which closes `command_tx` and lets the
+            // worker task exit on its own (app-server-client/src/remote.rs:263-266).
             let bootstrap = session.bootstrap(&config).await?;
             let thread = if let Some(thread_id) = thread_id {
                 match session
@@ -77,6 +122,13 @@ pub(super) async fn reconnect(
                             Some(TypedRequestError::Transport { .. })
                         ) =>
                     {
+                        // The connection is already broken, so shutdown() has nothing live to
+                        // negotiate — it just waits on a dead socket (up to 2x its own 5s
+                        // per-call timeout) instead of returning quickly, which would starve the
+                        // retry budget. Drop the session instead: dropping closes `command_tx`,
+                        // and the worker task exits on its own read-loop error
+                        // (app-server-client/src/remote.rs:263-266).
+                        drop(session);
                         return Err(error);
                     }
                     // Unloading threads use the same code as unavailable conversations, but
@@ -89,6 +141,9 @@ pub(super) async fn reconnect(
                                     && source.message.starts_with(&format!("thread {thread_id} is closing;"))
                         ) =>
                     {
+                        // Same reasoning as the transport-error arm above: drop rather than
+                        // await shutdown() so a bad attempt cannot eat into the retry budget.
+                        drop(session);
                         return Err(error);
                     }
                     Err(error)
@@ -99,7 +154,17 @@ pub(super) async fn reconnect(
                     {
                         None
                     }
-                    Err(error) => return Err(error),
+                    Err(error) => {
+                        // A retryable resume failure (e.g. a transient server error). Drop this
+                        // attempt's session rather than await shutdown(): the faster backoff
+                        // below can cycle through many more attempts than the old fixed
+                        // 5-attempt loop did, so a shutdown() that blocks up to 2x5s per failed
+                        // attempt would starve the overall retry budget. Dropping still closes
+                        // `command_tx` and lets the worker task exit on its own
+                        // (app-server-client/src/remote.rs:263-266), so nothing leaks.
+                        drop(session);
+                        return Err(error);
+                    }
                 }
             } else {
                 None
@@ -117,6 +182,9 @@ pub(super) async fn reconnect(
             Err(_) => break,
         }
         // Transport errors can contain endpoint credentials. Do not render or log them.
+        if retry_start.elapsed() >= retry_budget {
+            break;
+        }
     }
     color_eyre::eyre::bail!("app-server session could not be restored")
 }

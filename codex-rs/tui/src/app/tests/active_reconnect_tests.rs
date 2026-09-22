@@ -3,6 +3,8 @@
 use super::*;
 use crate::app::reconnect::ReconnectPresentation;
 use crate::app::reconnect::reconnect;
+use codex_app_server_client::RemoteAppServerEndpoint;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use tokio::net::TcpListener;
@@ -247,6 +249,7 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
             /*remote_cwd*/ None,
             transport,
             ReconnectPresentation::Conversation,
+            crate::app::reconnect::DEFAULT_RECONNECT_BUDGET,
         )
         .await?;
         let paused = call_mcp().send().await?.text().await?;
@@ -483,6 +486,7 @@ async fn reconnect_reconciles_offscreen_pending_profile_before_restoring_permiss
         /*remote_cwd*/ None,
         session.thread_tool_transport(),
         ReconnectPresentation::Conversation,
+        crate::app::reconnect::DEFAULT_RECONNECT_BUDGET,
     )
     .await?;
     app.finish_reconnect(
@@ -555,13 +559,18 @@ async fn reconnect_exhaustion_and_unknown_initial_thread_stay_offline() -> Resul
                 id,
                 /*remote_cwd*/ None,
                 crate::dynamic_tools_mcp::ThreadToolTransport::Dynamic,
-                ReconnectPresentation::Conversation
+                ReconnectPresentation::Conversation,
+                crate::app::reconnect::DEFAULT_RECONNECT_BUDGET,
             )
             .await
             .is_err()
         );
     }
-    assert!((15..=65).contains(&start.elapsed().as_secs()));
+    // Only the `Some(id)` call actually retries: with no thread id, `Conversation` presentation
+    // bails immediately instead of connecting. The one retrying call backs off exponentially
+    // (100ms -> 5s cap) for the default 60s CODEX_APP_SERVER_RECONNECT_BUDGET_MS budget before
+    // giving up, landing a little past 60s.
+    assert!((55..=75).contains(&start.elapsed().as_secs()));
     app.begin_reconnect();
     app.chat_widget.reconnect_failed();
     assert_snapshot!(
@@ -608,6 +617,7 @@ async fn reconnect_allows_slow_hydration_but_bounds_a_stalled_server() -> Result
             /*remote_cwd*/ None,
             crate::dynamic_tools_mcp::ThreadToolTransport::Dynamic,
             ReconnectPresentation::Conversation,
+            crate::app::reconnect::DEFAULT_RECONNECT_BUDGET,
         )
         .await;
         let elapsed = start.elapsed().as_secs();
@@ -675,6 +685,144 @@ async fn reconnect_allows_slow_hydration_but_bounds_a_stalled_server() -> Result
             server.abort();
         }
     }
+    Ok(())
+}
+
+/// A brief router/proxy restart refuses connections for about a second; the retry budget must
+/// comfortably ride that out. Uses a real unix socket in a private tempdir (as production: see
+/// `RemoteAppServerEndpoint::UnixSocket`) rather than a paused clock, since the previous
+/// TCP-and-`tokio::time::pause()` version of this test raced a shared dev machine's localhost
+/// port watcher, which probes freshly bound listening TCP sockets. A private-tempdir unix
+/// socket is not on that scan path, so no probe-skipping workaround is needed here.
+#[tokio::test]
+async fn reconnect_succeeds_after_a_second_of_refused_connects() -> Result<()> {
+    let (app, _, _) = make_test_app_with_channels().await;
+    let socket_dir = tempfile::TempDir::new()?;
+    let socket_path =
+        AbsolutePathBuf::from_absolute_path_checked(socket_dir.path().join("reconnect.sock"))?;
+    let endpoint = RemoteAppServerEndpoint::UnixSocket {
+        socket_path: socket_path.clone(),
+    };
+    let start = std::time::Instant::now();
+    let server = tokio::spawn(async move {
+        // No listener at all stands in for the router/proxy actively refusing connections:
+        // connecting to a socket path with nothing bound fails immediately, the same shape of
+        // failure a refused TCP connect produces.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let mut listener = codex_uds::UnixListener::bind(socket_path.as_path()).await?;
+        let stream = listener.accept().await?;
+        let socket = tokio_tungstenite::accept_async(stream).await?;
+        serve_reconnect_requests(socket, |_request| std::future::ready(None)).await
+    });
+    let result = reconnect(
+        AppServerTarget::Remote { endpoint },
+        app.config.clone(),
+        app.local_settings.clone(),
+        /*thread_id*/ None,
+        /*remote_cwd*/ None,
+        crate::dynamic_tools_mcp::ThreadToolTransport::Dynamic,
+        ReconnectPresentation::Overview,
+        /*budget*/ Duration::from_secs(5),
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "{}",
+        result
+            .as_ref()
+            .err()
+            .map(ToString::to_string)
+            .unwrap_or_default()
+    );
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed >= Duration::from_millis(900) && elapsed <= Duration::from_secs(4),
+        "{elapsed:?}"
+    );
+    // Dropping the connected session closes the socket so the server task's read loop ends.
+    drop(result);
+    tokio::time::timeout(Duration::from_secs(5), server).await???;
+    Ok(())
+}
+
+/// The reattachment retries (connect + `thread/resume`) share one backoff budget: a thread
+/// that keeps reporting transiently unavailable must still reattach once the server recovers,
+/// without replaying any turn/start. Uses a real unix socket in a private tempdir, as production.
+#[tokio::test]
+async fn reconnect_reattach_succeeds_on_fifth_attempt() -> Result<()> {
+    let (app, _, _) = make_test_app_with_channels().await;
+    let socket_dir = tempfile::TempDir::new()?;
+    let socket_path =
+        AbsolutePathBuf::from_absolute_path_checked(socket_dir.path().join("reconnect.sock"))?;
+    let mut listener = codex_uds::UnixListener::bind(socket_path.as_path()).await?;
+    let endpoint = RemoteAppServerEndpoint::UnixSocket { socket_path };
+    let id = ThreadId::new();
+    let cwd = app.config.cwd.clone();
+    let thread = json!({
+        "id": id, "sessionId": id, "preview": "", "ephemeral": false,
+        "modelProvider": "test-provider", "createdAt": 1, "updatedAt": 2,
+        "status": {"type": "idle"}, "cwd": cwd, "cliVersion": "0.0.0", "source": "cli",
+        "turns": []
+    });
+    let server = tokio::spawn(async move {
+        let mut methods = Vec::new();
+        for attempt in 0..5 {
+            let stream = listener.accept().await?;
+            let socket = tokio_tungstenite::accept_async(stream).await?;
+            let thread = thread.clone();
+            let cwd = cwd.clone();
+            let served = serve_reconnect_requests(socket, move |request| {
+                let thread = thread.clone();
+                let cwd = cwd.clone();
+                std::future::ready(match request.method.as_str() {
+                    "thread/resume" if attempt < 4 => Some(json!({"error": {
+                        "code": -32603, "message": "temporarily unavailable"
+                    }})),
+                    "thread/resume" => Some(json!({"result": {
+                        "thread": thread, "model": "gpt-test", "modelProvider": "test-provider",
+                        "cwd": cwd, "approvalPolicy": "never", "approvalsReviewer": "user",
+                        "sandbox": {"type": "readOnly"}, "reasoningEffort": null
+                    }})),
+                    // The resumed thread reports no turns and legacy (non-paginated) history,
+                    // so history hydration re-fetches it with `includeTurns: true`.
+                    "thread/read" => Some(json!({"result": {"thread": thread}})),
+                    _ => None,
+                })
+            })
+            .await?;
+            methods.extend(served);
+        }
+        Ok::<_, color_eyre::Report>(methods)
+    });
+    let result = reconnect(
+        AppServerTarget::Remote { endpoint },
+        app.config.clone(),
+        app.local_settings.clone(),
+        Some(id),
+        /*remote_cwd*/ None,
+        crate::dynamic_tools_mcp::ThreadToolTransport::Dynamic,
+        ReconnectPresentation::Conversation,
+        /*budget*/ Duration::from_secs(5),
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "{}",
+        result
+            .as_ref()
+            .err()
+            .map(ToString::to_string)
+            .unwrap_or_default()
+    );
+    drop(result);
+    let methods = tokio::time::timeout(Duration::from_secs(5), server).await???;
+    assert_eq!(
+        methods
+            .iter()
+            .filter(|method| *method == "thread/resume")
+            .count(),
+        5
+    );
     Ok(())
 }
 
