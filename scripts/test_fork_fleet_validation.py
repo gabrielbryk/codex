@@ -1403,5 +1403,265 @@ class RunWorkspaceTestsOnlySidecarTest(unittest.TestCase):
             )
 
 
+FAKE_METADATA = {
+    "packages": [
+        {
+            "name": "codex-core",
+            "manifest_path": "/repo/codex-rs/core/Cargo.toml",
+            "dependencies": [{"name": "codex-protocol"}],
+        },
+        {
+            "name": "codex-protocol",
+            "manifest_path": "/repo/codex-rs/protocol/Cargo.toml",
+            "dependencies": [],
+        },
+        {
+            "name": "codex-tui",
+            "manifest_path": "/repo/codex-rs/tui/Cargo.toml",
+            "dependencies": [{"name": "codex-core"}],
+        },
+        {
+            "name": "codex-app-server",
+            "manifest_path": "/repo/codex-rs/app-server/Cargo.toml",
+            "dependencies": [{"name": "codex-tui"}],
+        },
+    ]
+}
+
+
+class PackageDirsFromMetadataTest(unittest.TestCase):
+    def test_maps_crate_dir_to_package_name(self) -> None:
+        package_dirs = validation.package_dirs_from_metadata(
+            FAKE_METADATA, Path("/repo")
+        )
+        self.assertEqual(
+            package_dirs,
+            {
+                "codex-rs/core": "codex-core",
+                "codex-rs/protocol": "codex-protocol",
+                "codex-rs/tui": "codex-tui",
+                "codex-rs/app-server": "codex-app-server",
+            },
+        )
+
+
+class MapChangedPathsToPackagesTest(unittest.TestCase):
+    def test_maps_paths_under_crate_dirs_and_drops_others(self) -> None:
+        package_dirs = validation.package_dirs_from_metadata(
+            FAKE_METADATA, Path("/repo")
+        )
+        changed = [
+            "codex-rs/core/src/lib.rs",
+            "codex-rs/protocol/Cargo.toml",
+            "PATCHES.md",
+            "scripts/fork_fleet_validation.py",
+        ]
+        packages = validation.map_changed_paths_to_packages(changed, package_dirs)
+        self.assertEqual(packages, {"codex-core", "codex-protocol"})
+
+    def test_picks_longest_matching_crate_dir_prefix(self) -> None:
+        package_dirs = {
+            "codex-rs/core": "codex-core",
+            "codex-rs/core/nested": "codex-core-nested",
+        }
+        packages = validation.map_changed_paths_to_packages(
+            ["codex-rs/core/nested/src/lib.rs"], package_dirs
+        )
+        self.assertEqual(packages, {"codex-core-nested"})
+
+
+class ExpandWithDependentsTest(unittest.TestCase):
+    def test_adds_transitive_dependents(self) -> None:
+        expanded = validation.expand_with_dependents(
+            {"codex-protocol"}, FAKE_METADATA["packages"]
+        )
+        self.assertEqual(
+            expanded,
+            {"codex-protocol", "codex-core", "codex-tui", "codex-app-server"},
+        )
+
+    def test_no_dependents_returns_input_unchanged(self) -> None:
+        expanded = validation.expand_with_dependents(
+            {"codex-app-server"}, FAKE_METADATA["packages"]
+        )
+        self.assertEqual(expanded, {"codex-app-server"})
+
+
+class BuildScopedNextestCommandTest(unittest.TestCase):
+    def test_command_is_sorted_and_uses_fork_fleet_profile(self) -> None:
+        command = validation.build_scoped_nextest_command({"codex-tui", "codex-core"})
+        self.assertEqual(
+            command,
+            [
+                "cargo",
+                "nextest",
+                "run",
+                "--profile",
+                "fork-fleet",
+                "-p",
+                "codex-core",
+                "-p",
+                "codex-tui",
+            ],
+        )
+
+
+class ParseWorkspaceTestsScopedArgsTest(unittest.TestCase):
+    def test_no_args_returns_defaults(self) -> None:
+        self.assertEqual(
+            validation.parse_workspace_tests_scoped_args([]), (None, False, False)
+        )
+
+    def test_parses_target_with_dependents_and_dry_run(self) -> None:
+        result = validation.parse_workspace_tests_scoped_args(
+            ["--target", "deadbeef", "--with-dependents", "--dry-run"]
+        )
+        self.assertEqual(result, ("deadbeef", True, True))
+
+    def test_rejects_dangling_target_without_value(self) -> None:
+        with self.assertRaisesRegex(SystemExit, "--target requires a value"):
+            validation.parse_workspace_tests_scoped_args(["--target"])
+
+    def test_rejects_unrecognized_argument(self) -> None:
+        with self.assertRaisesRegex(SystemExit, "unrecognized argument"):
+            validation.parse_workspace_tests_scoped_args(["--bogus"])
+
+
+class ResolveTargetShaTest(unittest.TestCase):
+    def test_override_takes_precedence(self) -> None:
+        sha = validation.resolve_target_sha(
+            Path("/repo"), "aaa", {"FORK_FLEET_TARGET_SHA": "bbb"}
+        )
+        self.assertEqual(sha, "aaa")
+
+    def test_env_var_used_when_no_override(self) -> None:
+        sha = validation.resolve_target_sha(
+            Path("/repo"), None, {"FORK_FLEET_TARGET_SHA": "bbb"}
+        )
+        self.assertEqual(sha, "bbb")
+
+    def test_falls_back_to_merge_base_with_default_ref(self) -> None:
+        with patch.object(
+            validation.subprocess,
+            "run",
+            return_value=SimpleNamespace(returncode=0, stdout="ccc\n"),
+        ) as run:
+            sha = validation.resolve_target_sha(Path("/repo"), None, {})
+        self.assertEqual(sha, "ccc")
+        run.assert_called_once_with(
+            ["git", "merge-base", "HEAD", validation.DEFAULT_SCOPED_TARGET_REF],
+            cwd=Path("/repo"),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+
+class RunWorkspaceTestsScopedTest(unittest.TestCase):
+    def test_zero_crates_prints_message_and_does_not_run_nextest(self) -> None:
+        with (
+            patch.object(validation, "resolve_target_sha", return_value="deadbeef"),
+            patch.object(validation, "git_diff_name_only", return_value=["PATCHES.md"]),
+            patch.object(
+                validation, "fetch_cargo_metadata", return_value=FAKE_METADATA
+            ),
+            patch.object(validation, "run_workspace_tests") as run_tests,
+            patch("builtins.print") as fake_print,
+        ):
+            validation.run_workspace_tests_scoped(
+                Path("/repo"), Path("/repo/codex-rs"), {}, None, False, False
+            )
+        run_tests.assert_not_called()
+        fake_print.assert_called_once_with("no crates changed")
+
+    def test_dry_run_prints_command_and_does_not_run_nextest(self) -> None:
+        with (
+            patch.object(validation, "resolve_target_sha", return_value="deadbeef"),
+            patch.object(
+                validation,
+                "git_diff_name_only",
+                return_value=["codex-rs/core/src/lib.rs"],
+            ),
+            patch.object(
+                validation, "fetch_cargo_metadata", return_value=FAKE_METADATA
+            ),
+            patch.object(validation, "run_workspace_tests") as run_tests,
+            patch("builtins.print") as fake_print,
+        ):
+            validation.run_workspace_tests_scoped(
+                Path("/repo"), Path("/repo/codex-rs"), {}, None, False, True
+            )
+        run_tests.assert_not_called()
+        fake_print.assert_called_once_with(
+            "cargo nextest run --profile fork-fleet -p codex-core"
+        )
+
+    def test_composes_scoped_nextest_command_via_run_workspace_tests(self) -> None:
+        with (
+            patch.object(validation, "resolve_target_sha", return_value="deadbeef"),
+            patch.object(
+                validation,
+                "git_diff_name_only",
+                return_value=["codex-rs/core/src/lib.rs"],
+            ),
+            patch.object(
+                validation, "fetch_cargo_metadata", return_value=FAKE_METADATA
+            ),
+            patch.object(validation, "run_workspace_tests") as run_tests,
+        ):
+            validation.run_workspace_tests_scoped(
+                Path("/repo"),
+                Path("/repo/codex-rs"),
+                {"FOO": "bar"},
+                None,
+                False,
+                False,
+            )
+        run_tests.assert_called_once_with(
+            [
+                (
+                    Path("/repo/codex-rs"),
+                    [
+                        "cargo",
+                        "nextest",
+                        "run",
+                        "--profile",
+                        "fork-fleet",
+                        "-p",
+                        "codex-core",
+                    ],
+                )
+            ],
+            {"FOO": "bar"},
+        )
+
+    def test_with_dependents_expands_scoped_packages(self) -> None:
+        with (
+            patch.object(validation, "resolve_target_sha", return_value="deadbeef"),
+            patch.object(
+                validation,
+                "git_diff_name_only",
+                return_value=["codex-rs/protocol/src/lib.rs"],
+            ),
+            patch.object(
+                validation, "fetch_cargo_metadata", return_value=FAKE_METADATA
+            ),
+            patch.object(validation, "run_workspace_tests") as run_tests,
+        ):
+            validation.run_workspace_tests_scoped(
+                Path("/repo"), Path("/repo/codex-rs"), {}, None, True, False
+            )
+        ((commands, _env),) = [run_tests.call_args.args]
+        command = commands[0][1]
+        self.assertEqual(
+            command[0:5], ["cargo", "nextest", "run", "--profile", "fork-fleet"]
+        )
+        packages = set(command[6::2])
+        self.assertEqual(
+            packages,
+            {"codex-protocol", "codex-core", "codex-tui", "codex-app-server"},
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

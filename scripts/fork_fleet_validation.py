@@ -739,6 +739,203 @@ def only_nextest_commands(
     return commands
 
 
+DEFAULT_SCOPED_TARGET_REF = "refs/tags/rust-v0.155.1"
+
+
+def git_diff_name_only(repo_root: Path, target_sha: str) -> list[str]:
+    """List paths changed between `target_sha` and HEAD, repo-root-relative
+    POSIX paths as `git diff --name-only` reports them."""
+    completed = subprocess.run(
+        ["git", "diff", "--name-only", f"{target_sha}..HEAD"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode:
+        raise SystemExit("git diff failed while computing changed paths")
+    return [line for line in completed.stdout.splitlines() if line]
+
+
+def resolve_target_sha(
+    repo_root: Path, override: str | None, env: Mapping[str, str] | None = None
+) -> str:
+    """Resolve the target SHA `workspace-tests-scoped` diffs HEAD against:
+    `--target` overrides `FORK_FLEET_TARGET_SHA` overrides the merge-base
+    with `refs/tags/rust-v0.155.1`."""
+    if override:
+        return override
+    env = env if env is not None else os.environ
+    env_target = env.get("FORK_FLEET_TARGET_SHA")
+    if env_target:
+        return env_target
+    completed = subprocess.run(
+        ["git", "merge-base", "HEAD", DEFAULT_SCOPED_TARGET_REF],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode:
+        raise SystemExit(
+            "unable to resolve workspace-tests-scoped default target "
+            f"(merge-base with {DEFAULT_SCOPED_TARGET_REF})"
+        )
+    return completed.stdout.strip()
+
+
+def fetch_cargo_metadata(
+    codex_rs: Path, environment: Mapping[str, str]
+) -> Mapping[str, Any]:
+    """Run `cargo metadata --offline --no-deps` and return its parsed JSON."""
+    completed = subprocess.run(
+        ["cargo", "metadata", "--offline", "--no-deps", "--format-version", "1"],
+        cwd=codex_rs,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode:
+        raise SystemExit(
+            "cargo metadata failed while resolving workspace-tests-scoped "
+            f"packages: {completed.stderr}"
+        )
+    return json.loads(completed.stdout)
+
+
+def package_dirs_from_metadata(
+    metadata: Mapping[str, Any], repo_root: Path
+) -> dict[str, str]:
+    """Map each package's crate directory (POSIX path relative to
+    `repo_root`, e.g. "codex-rs/core") to its cargo package name, from
+    `cargo metadata --offline --no-deps` output."""
+    package_dirs: dict[str, str] = {}
+    for package in metadata.get("packages", []):
+        manifest_path = package.get("manifest_path")
+        name = package.get("name")
+        if not manifest_path or not name:
+            continue
+        crate_dir = Path(manifest_path).parent
+        try:
+            relative_dir = crate_dir.resolve().relative_to(repo_root.resolve())
+        except ValueError:
+            continue
+        package_dirs[relative_dir.as_posix()] = name
+    return package_dirs
+
+
+def map_changed_paths_to_packages(
+    changed_paths: list[str], package_dirs: Mapping[str, str]
+) -> set[str]:
+    """Map changed repo-relative paths to the cargo packages that own them,
+    picking the longest matching crate-dir prefix per path. Paths outside
+    every known crate directory (docs, scripts, non-crate files) are
+    dropped."""
+    ordered_dirs = sorted(package_dirs, key=len, reverse=True)
+    packages: set[str] = set()
+    for path in changed_paths:
+        for crate_dir in ordered_dirs:
+            if path == crate_dir or path.startswith(crate_dir + "/"):
+                packages.add(package_dirs[crate_dir])
+                break
+    return packages
+
+
+def expand_with_dependents(
+    packages: set[str], metadata_packages: list[Mapping[str, Any]]
+) -> set[str]:
+    """Add every package that (transitively) depends on a package already in
+    `packages`, using each package's declared `dependencies` (by name) from
+    `cargo metadata --no-deps` output -- not the resolved dependency graph."""
+    dependency_names: dict[str, set[str]] = {}
+    for package in metadata_packages:
+        name = package.get("name")
+        if not name:
+            continue
+        dependency_names[name] = {
+            dep.get("name")
+            for dep in package.get("dependencies", [])
+            if dep.get("name")
+        }
+    expanded = set(packages)
+    changed = True
+    while changed:
+        changed = False
+        for name, deps in dependency_names.items():
+            if name in expanded:
+                continue
+            if deps & expanded:
+                expanded.add(name)
+                changed = True
+    return expanded
+
+
+def build_scoped_nextest_command(packages: set[str]) -> list[str]:
+    """`cargo nextest run --profile fork-fleet -p <pkg> ...` for the given
+    packages, in deterministic (sorted) order."""
+    command = ["cargo", "nextest", "run", "--profile", NEXTEST_FORK_FLEET_PROFILE]
+    for package in sorted(packages):
+        command += ["-p", package]
+    return command
+
+
+def run_workspace_tests_scoped(
+    repo_root: Path,
+    codex_rs: Path,
+    environment: Mapping[str, str],
+    target_override: str | None,
+    with_dependents: bool,
+    dry_run: bool,
+) -> None:
+    """Resolve the crates touched between the target SHA and HEAD and run
+    `cargo nextest run --profile fork-fleet -p <pkg> ...` scoped to them,
+    reusing `run_workspace_tests` for the junit sidecar / fresh-junit rule.
+    Prints "no crates changed" and exits 0 if nothing maps to a crate."""
+    target_sha = resolve_target_sha(repo_root, target_override)
+    changed_paths = git_diff_name_only(repo_root, target_sha)
+    metadata = fetch_cargo_metadata(codex_rs, environment)
+    package_dirs = package_dirs_from_metadata(metadata, repo_root)
+    packages = map_changed_paths_to_packages(changed_paths, package_dirs)
+    if with_dependents:
+        packages = expand_with_dependents(packages, metadata.get("packages", []))
+    if not packages:
+        print("no crates changed")
+        return
+    command = build_scoped_nextest_command(packages)
+    if dry_run:
+        print(" ".join(command))
+        return
+    run_workspace_tests([(codex_rs, command)], environment)
+
+
+def parse_workspace_tests_scoped_args(
+    argv: list[str],
+) -> tuple[str | None, bool, bool]:
+    """Parse `workspace-tests-scoped` trailing args: optional `--target
+    <sha>`, and the `--with-dependents` / `--dry-run` flags."""
+    target: str | None = None
+    with_dependents = False
+    dry_run = False
+    index = 0
+    while index < len(argv):
+        arg = argv[index]
+        if arg == "--target":
+            if index + 1 >= len(argv):
+                raise SystemExit("--target requires a value")
+            target = argv[index + 1]
+            index += 2
+        elif arg == "--with-dependents":
+            with_dependents = True
+            index += 1
+        elif arg == "--dry-run":
+            dry_run = True
+            index += 1
+        else:
+            raise SystemExit(f"unrecognized argument: {arg}")
+    return target, with_dependents, dry_run
+
+
 def parse_workspace_tests_args(argv: list[str]) -> tuple[list[str], int | None]:
     """Parse `workspace-tests`/`workspace-tests-compile` trailing args:
     repeatable `--only <selector>` and an optional `--retries <N>`."""
@@ -852,6 +1049,7 @@ def build_actions(
         "attribution <immutable-plan-path>": [],
         "manifest-sync <immutable-plan-path>": [],
         "upgrade-workflow-tests": [],
+        "workspace-tests-scoped [--target <sha>] [--with-dependents] [--dry-run]": [],
         "format": [(REPO_ROOT, [str(fork_fleet_just), "fmt-check"])],
         "locked-metadata": [
             (
@@ -980,9 +1178,19 @@ def main() -> None:
         ["workspace-tests"],
         ["workspace-tests-compile"],
     )
+    scoped_style = sys.argv[1:2] == ["workspace-tests-scoped"]
+    target_override: str | None = None
+    with_dependents = False
+    dry_run = False
     if workspace_tests_style:
         action = sys.argv[1]
         only_selectors, retries = parse_workspace_tests_args(sys.argv[2:])
+    elif scoped_style:
+        action = sys.argv[1]
+        only_selectors, retries = [], None
+        target_override, with_dependents, dry_run = parse_workspace_tests_scoped_args(
+            sys.argv[2:]
+        )
     elif len(sys.argv) != 2 or sys.argv[1] not in actions:
         choices = ", ".join(sorted(actions))
         raise SystemExit(f"usage: {Path(sys.argv[0]).name} <{choices}>")
@@ -990,7 +1198,7 @@ def main() -> None:
         action = sys.argv[1]
         only_selectors, retries = [], None
 
-    commands = actions[action]
+    commands = actions.get(action, [])
     if action == "workspace-tests-compile":
         # `--only`/`--retries` are accepted but not meaningful for a
         # compile-only (`--no-run`) invocation: it always compiles every
@@ -1075,6 +1283,15 @@ def main() -> None:
         environment = rust_toolchain_environment(real_home, environment)
         if action == "workspace-tests":
             run_workspace_tests(commands, environment)
+        elif action == "workspace-tests-scoped":
+            run_workspace_tests_scoped(
+                REPO_ROOT,
+                CODEX_RS,
+                environment,
+                target_override,
+                with_dependents,
+                dry_run,
+            )
         else:
             for cwd, command in commands:
                 completed = subprocess.run(
