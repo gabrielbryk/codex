@@ -201,6 +201,9 @@ pub(crate) struct StatusLineCommandCodex {
     pub(crate) schema_version: u8,
     /// Working directory of the local TUI process that launches the formatter.
     pub(crate) local_process_cwd: String,
+    /// Resumable Codex thread id (`codex resume <id>`). Top-level `session_id`
+    /// is a per-runtime status-line lifecycle id and is not resumable.
+    pub(crate) thread_id: Option<String>,
     pub(crate) status: String,
     pub(crate) permissions: String,
     pub(crate) approval_mode: String,

@@ -42,6 +42,7 @@ fn input() -> StatusLineCommandInput {
         codex: StatusLineCommandCodex {
             schema_version: STATUS_LINE_COMMAND_SCHEMA_VERSION,
             local_process_cwd: "/local".to_string(),
+            thread_id: None,
             status: "idle".to_string(),
             permissions: "read-only".to_string(),
             approval_mode: "on-request".to_string(),
@@ -114,6 +115,7 @@ fn exporter_fixture_input() -> StatusLineCommandInput {
     input.codex.status = "working".to_string();
     input.codex.permissions = "workspace-write".to_string();
     input.codex.service_tier = "fast".to_string();
+    input.codex.thread_id = Some("019a0000-1111-7222-8333-444444444444".to_string());
     input.codex.workspace_headline = Some("Implementing status line".to_string());
     input.codex.task_progress = Some(StatusLineCommandTaskProgress {
         completed: 2,

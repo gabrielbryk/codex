@@ -63,6 +63,7 @@
   "codex": {
     "schema_version": 1,
     "local_process_cwd": "/local/codex",
+    "thread_id": "019a0000-1111-7222-8333-444444444444",
     "status": "working",
     "permissions": "workspace-write",
     "approval_mode": "on-request",

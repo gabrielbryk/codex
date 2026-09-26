@@ -42,6 +42,7 @@ fn minimal_input() -> StatusLineCommandInput {
         codex: StatusLineCommandCodex {
             schema_version: STATUS_LINE_COMMAND_SCHEMA_VERSION,
             local_process_cwd: "/local/codex".to_string(),
+            thread_id: None,
             status: "working".to_string(),
             permissions: "workspace-write".to_string(),
             approval_mode: "on-request".to_string(),
@@ -85,6 +86,7 @@ fn minimal_contract_uses_null_only_for_declared_nullable_fields() {
             "codex": {
                 "schema_version": 1,
                 "local_process_cwd": "/local/codex",
+                "thread_id": null,
                 "status": "working",
                 "permissions": "workspace-write",
                 "approval_mode": "on-request",
@@ -221,6 +223,7 @@ fn fully_populated_exporter_fixture_is_stable() {
         url: "https://github.com/openai/codex/pull/42".to_string(),
         review_state: Some("approved".to_string()),
     });
+    input.codex.thread_id = Some("019a0000-1111-7222-8333-444444444444".to_string());
     input.codex.workspace_headline = Some("Implementing status line".to_string());
     input.codex.task_progress = Some(StatusLineCommandTaskProgress {
         completed: 2,

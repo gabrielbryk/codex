@@ -311,6 +311,7 @@ impl ChatWidget {
             codex: StatusLineCommandCodex {
                 schema_version: STATUS_LINE_COMMAND_SCHEMA_VERSION,
                 local_process_cwd: local_process_cwd.to_string_lossy().into_owned(),
+                thread_id: self.thread_id.map(|thread_id| thread_id.to_string()),
                 status: self.run_state_status_text().to_lowercase(),
                 permissions: permissions_display(&self.config),
                 approval_mode: approval_mode_display(&self.config),

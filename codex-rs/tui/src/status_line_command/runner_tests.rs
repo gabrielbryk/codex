@@ -38,6 +38,7 @@ fn input() -> StatusLineCommandInput {
         codex: StatusLineCommandCodex {
             schema_version: STATUS_LINE_COMMAND_SCHEMA_VERSION,
             local_process_cwd: "/local".to_string(),
+            thread_id: None,
             status: "idle".to_string(),
             permissions: "read-only".to_string(),
             approval_mode: "on-request".to_string(),
