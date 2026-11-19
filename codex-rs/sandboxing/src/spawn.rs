@@ -40,6 +40,32 @@ pub struct SpawnRequest<'a> {
     pub inherited_fds: codex_utils_pty::ChildFds<'a>,
 }
 
+/// Host hook: when set to an executable path, every locally spawned command is
+/// launched as `<wrapper> -- <command...>`. The wrapper reads `CODEX_THREAD_ID`
+/// and `CODEX_TOOL_CALL_ID` from the inherited command environment.
+const COMMAND_SCOPE_EXEC_ENV: &str = "CODEX_COMMAND_SCOPE_EXEC";
+
+/// Prefixes `command` with the host scope wrapper, if one is configured.
+///
+/// A command carrying an `arg0` override is left alone: that is the sandbox
+/// helper re-entering Codex by argv0, and a prefix would change what runs.
+fn scope_wrapped_command(
+    command: &[String],
+    wrapper: Option<&str>,
+    has_arg0_override: bool,
+) -> Vec<String> {
+    match wrapper {
+        Some(wrapper) if !wrapper.is_empty() && !has_arg0_override => {
+            let mut wrapped = Vec::with_capacity(command.len() + 2);
+            wrapped.push(wrapper.to_string());
+            wrapped.push("--".to_string());
+            wrapped.extend_from_slice(command);
+            wrapped
+        }
+        _ => command.to_vec(),
+    }
+}
+
 /// Spawn a process using the backend selected by the prepared sandbox request.
 #[tracing::instrument(name = "codex.process.spawn", skip_all)]
 pub async fn spawn_process(request: SpawnRequest<'_>) -> Result<SpawnedProcess> {
@@ -102,8 +128,12 @@ pub async fn spawn_process(request: SpawnRequest<'_>) -> Result<SpawnedProcess> 
         anyhow::bail!("Windows sandbox process spawn is unavailable on this platform");
     }
 
-    let (program, args) = request
-        .command
+    let scoped = scope_wrapped_command(
+        request.command,
+        std::env::var(COMMAND_SCOPE_EXEC_ENV).ok().as_deref(),
+        request.arg0.is_some(),
+    );
+    let (program, args) = scoped
         .split_first()
         .context("missing program for process spawn")?;
     let spawned = if tty {
@@ -140,3 +170,7 @@ pub async fn spawn_process(request: SpawnRequest<'_>) -> Result<SpawnedProcess> 
     };
     spawned.map(finish_spawn)
 }
+
+#[cfg(test)]
+#[path = "spawn_tests.rs"]
+mod tests;
